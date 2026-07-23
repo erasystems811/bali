@@ -93,6 +93,25 @@ const input = $input.first().json.body;
 const { from_number, text, reply_to_message_id, contact_id } = input;
 const trimmed = (text || '').trim();
 
+// --- Command: "invoice [event name]" -- manual trigger to draft the invoice --------
+const invoiceMatch = trimmed.match(/^invoice\s+(.+)$/i);
+if (invoiceMatch) {
+  const eventName = invoiceMatch[1].trim();
+  const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(eventName)}*&status=neq.cancelled&select=*`);
+  if (matches.length === 0) {
+    await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}" — check the spelling?`);
+    return [{ json: { action: 'invoice_command_not_found', query: eventName } }];
+  }
+  await helpers.httpRequest({
+    method: 'POST',
+    url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+    headers: { 'Content-Type': 'application/json' },
+    body: { action: 'draft_invoice', booking_id: matches[0].id },
+    json: true,
+  });
+  return [{ json: { action: 'invoice_command_triggered', booking_id: matches[0].id } }];
+}
+
 // --- Command: "open [event name]" -------------------------------------------------
 const openMatch = trimmed.match(/^open\s+(.+)$/i);
 if (openMatch) {
@@ -122,6 +141,19 @@ if (trimmed.toLowerCase() === 'close') {
   }
   await sbPatch(`bookings?id=eq.${open.id}`, { mode: 'bot-led' });
   await sendWhatsApp(from_number, `Closed "${open.event_name}" — back to automated.`);
+
+  // Closing a still-negotiating booking is taken as "price agreed" -- kicks off Stage 3.
+  // If that's wrong (PM just stepping away mid-negotiation), re-open with "open [event name]"
+  // -- nothing below has moved the booking past 'negotiating' yet.
+  if (open.status === 'negotiating') {
+    await helpers.httpRequest({
+      method: 'POST',
+      url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+      headers: { 'Content-Type': 'application/json' },
+      body: { action: 'draft_invoice', booking_id: open.id },
+      json: true,
+    });
+  }
   return [{ json: { action: 'closed', booking_id: open.id } }];
 }
 
@@ -168,6 +200,23 @@ if (target.field_name === 'kb_escalation' || target.field_name === 'kb_save_conf
     url: `${env.N8N_BASE_URL}/webhook/kb-check`,
     headers: { 'Content-Type': 'application/json' },
     body: { action, pending_question_id: target.id, answer_text: text },
+    json: true,
+  });
+  await sbPatch(`pending_questions?id=eq.${target.id}`, { resolved_at: new Date().toISOString() });
+  return [{ json: { action: `${target.field_name}_resolved`, pending_question_id: target.id } }];
+}
+
+const STAGE3_4_DELEGATED_FIELDS = {
+  invoice_approval: 'resolve_invoice_approval',
+  contract_approval: 'resolve_contract_approval',
+  payment_confirmed: 'resolve_payment_confirmed',
+};
+if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
+  await helpers.httpRequest({
+    method: 'POST',
+    url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+    headers: { 'Content-Type': 'application/json' },
+    body: { action: STAGE3_4_DELEGATED_FIELDS[target.field_name], pending_question_id: target.id, answer_text: text },
     json: true,
   });
   await sbPatch(`pending_questions?id=eq.${target.id}`, { resolved_at: new Date().toISOString() });

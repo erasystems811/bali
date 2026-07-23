@@ -153,6 +153,60 @@ create table pending_questions (
 create index pending_questions_open_idx on pending_questions (booking_id) where resolved_at is null;
 
 -- ---------------------------------------------------------------------------
+-- invoices
+-- Stage 3. Line items are a variable list (whatever was actually agreed in
+-- negotiation), so they're stored as jsonb rather than a fixed-column set.
+-- subtotal/vat_amount/wht_amount/total_net_payable are always bot-calculated,
+-- never asked for (spec Section 2 invoice field spec).
+-- ---------------------------------------------------------------------------
+create table invoices (
+  id uuid primary key default gen_random_uuid(),
+  booking_id uuid not null references bookings (id),
+  invoice_number text not null unique, -- e.g. "BALI-2026-003"
+  date_issued date not null default current_date,
+  bill_to_name text,
+  bill_to_location text,
+  line_items jsonb not null default '[]'::jsonb, -- [{description, amount}]
+  payment_terms text, -- e.g. "100% Full Payment Due" or "60/40 split" -- extracted, not fixed
+  subtotal numeric,
+  vat_amount numeric,
+  wht_amount numeric,
+  total_net_payable numeric,
+  status text not null default 'pending_pm_approval'
+    check (status in ('pending_pm_approval', 'approved', 'sent_to_client', 'paid')),
+  proof_of_payment_media_id text,
+  created_at timestamptz not null default now()
+);
+
+create index invoices_booking_idx on invoices (booking_id);
+
+-- ---------------------------------------------------------------------------
+-- contracts
+-- Stage 4. The bot never drafts contract language -- it collects these five
+-- variable fields and relays them to the lawyer, who drafts the actual
+-- document (boilerplate: obligations, liability, cancellation, etc. --
+-- lawyer-owned, bot never touches it).
+-- ---------------------------------------------------------------------------
+create table contracts (
+  id uuid primary key default gen_random_uuid(),
+  booking_id uuid not null references bookings (id),
+  organizer_legal_name text, -- confirmed with the client directly, never assumed from WhatsApp profile
+  organizer_registered_address text,
+  total_fee numeric,
+  payment_terms text,
+  sent_to_lawyer_at timestamptz,
+  draft_media_id text,
+  draft_received_at timestamptz,
+  approved_by_pm_at timestamptz,
+  sent_to_client_at timestamptz,
+  signed_media_id text,
+  signed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create index contracts_booking_idx on contracts (booking_id);
+
+-- ---------------------------------------------------------------------------
 -- sops
 -- General process documents, category-tagged, generic across departments.
 -- ---------------------------------------------------------------------------

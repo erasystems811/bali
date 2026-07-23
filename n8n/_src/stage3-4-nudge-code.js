@@ -1,18 +1,6 @@
-// Stage 3 (Invoice) & Stage 4 (Contract) -- PARTIAL STUB.
-// Blocked on real invoice/contract samples (spec Section 10) so the bot knows
-// which fields to pull from the negotiation log. NOT built here:
-//   - drafting the invoice from the negotiation log (paid items only)
-//   - sending the invoice + collecting proof of payment
-//   - bot sending event details to the lawyer to kick off a contract draft
-//   - lawyer draft -> PM approval -> send to client
-// Ready-to-go once those exist: signature detection + PM confirmation is
-// already implemented in 02-stage1-sales-flow.json (booking.status ===
-// 'sent_to_client' branch) and 03-pm-toggle.json ('contract_confirmed').
-//
-// What IS built here: the 24h lawyer nudge (Section 5, bullet 5) -- it's a
-// standalone, self-contained rule ("nudge every 24h while awaiting_contract")
-// that doesn't depend on the missing samples, so it's live now and will just
-// start firing once bookings actually reach awaiting_contract.
+// Stage 3/4 -- 24h lawyer nudge (Section 5, bullet 5). This is the Schedule
+// Trigger half of the Stage 3/4 workflow; the Webhook half (draft invoice,
+// approvals, lawyer draft handling) lives in stage3-4-action-code.js.
 
 const helpers = this.helpers;
 const env = {

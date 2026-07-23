@@ -113,7 +113,8 @@
         "rules": {
           "values": [
             { "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{$json.role}}", "rightValue": "customer", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": true, "outputKey": "customer" },
-            { "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{$json.role}}", "rightValue": "pm", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": true, "outputKey": "pm" }
+            { "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{$json.role}}", "rightValue": "pm", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": true, "outputKey": "pm" },
+            { "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{$json.role}}", "rightValue": "lawyer", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": true, "outputKey": "lawyer" }
           ]
         },
         "options": { "fallbackOutput": "extra" }
@@ -153,13 +154,27 @@
     },
     {
       "parameters": {
+        "method": "POST",
+        "url": "={{$env.N8N_BASE_URL}}/webhook/stage3-4",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify($json)}}",
+        "options": {}
+      },
+      "name": "Forward to Stage 3-4",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 300]
+    },
+    {
+      "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Lawyer / other staff roles: no active flow yet beyond the Stage 4 lawyer stub\n// (see 99-stage3-4-invoice-contract.json). Log and stop here for now.\nconsole.log('Unrouted role, logging only:', $input.first().json.role);\nreturn $input.all();"
+        "jsCode": "// Other staff roles (HR, procurement, security, etc.): no inbound flow yet --\n// they're only ever messaged (Stage 5 fan-out), not expected to message the bot back.\nconsole.log('Unrouted role, logging only:', $input.first().json.role);\nreturn $input.all();"
       },
       "name": "Log Only (unrouted role)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1140, 380]
+      "position": [1140, 440]
     }
   ],
   "connections": {
@@ -174,6 +189,7 @@
       "main": [
         [{ "node": "Forward to Stage 1 Sales Flow", "type": "main", "index": 0 }],
         [{ "node": "Forward to PM Toggle", "type": "main", "index": 0 }],
+        [{ "node": "Forward to Stage 3-4", "type": "main", "index": 0 }],
         [{ "node": "Log Only (unrouted role)", "type": "main", "index": 0 }]
       ]
     }

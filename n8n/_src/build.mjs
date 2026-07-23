@@ -39,15 +39,19 @@ function scheduleNode(name, position, { field, interval }) {
 }
 
 function writeWorkflow(fileName, workflowName, triggerNode, codeNodeDef) {
-  const workflow = {
-    name: workflowName,
-    nodes: [triggerNode, codeNodeDef],
-    connections: {
-      [triggerNode.name]: { main: [[{ node: codeNodeDef.name, type: "main", index: 0 }]] },
-    },
-    active: false,
-    settings: { executionOrder: "v1" },
-  };
+  writeMultiTriggerWorkflow(fileName, workflowName, [[triggerNode, codeNodeDef]]);
+}
+
+// chains: array of independent [triggerNode, codeNodeDef] pairs -- each pair
+// is its own unconnected flow within the same workflow (e.g. a Schedule
+// Trigger for a recurring job alongside a Webhook Trigger for on-demand calls).
+function writeMultiTriggerWorkflow(fileName, workflowName, chains) {
+  const nodes = chains.flatMap(([t, c]) => [t, c]);
+  const connections = {};
+  for (const [t, c] of chains) {
+    connections[t.name] = { main: [[{ node: c.name, type: "main", index: 0 }]] };
+  }
+  const workflow = { name: workflowName, nodes, connections, active: false, settings: { executionOrder: "v1" } };
   writeFileSync(path.join(outDir, fileName), JSON.stringify(workflow, null, 2) + "\n");
   console.log("Wrote", fileName);
 }
@@ -80,9 +84,11 @@ writeWorkflow(
   codeNode("Fan Out Signed Bookings", "stage5-fanout-code.js", [40, 0])
 );
 
-writeWorkflow(
+writeMultiTriggerWorkflow(
   "99-stage3-4-invoice-contract.json",
-  "Bali - 99 Stage 3-4 Stub (Lawyer Nudge)",
-  scheduleNode("Every Hour", [-200, 0], { field: "hours", interval: 1 }),
-  codeNode("Lawyer 24h Nudge", "stage3-4-stub-code.js", [40, 0])
+  "Bali - 99 Stage 3-4 Invoice & Contract",
+  [
+    [scheduleNode("Every Hour", [-200, 0], { field: "hours", interval: 1 }), codeNode("Lawyer 24h Nudge", "stage3-4-nudge-code.js", [40, 0])],
+    [webhookNode("Stage3-4 Trigger", "stage3-4", "bali-stage3-4", [-200, 220]), codeNode("Handle Stage 3-4 Action", "stage3-4-action-code.js", [40, 220])],
+  ]
 );

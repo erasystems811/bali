@@ -5,6 +5,7 @@ const env = {
   OPENAI_KEY: $env.OPENAI_API_KEY,
   META_TOKEN: $env.META_ACCESS_TOKEN,
   META_PHONE_ID: $env.META_PHONE_NUMBER_ID,
+  N8N_BASE_URL: $env.N8N_BASE_URL,
 };
 
 const sbHeaders = {
@@ -149,6 +150,61 @@ if (!booking) {
     if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
   }
   return [{ json: { action: 'signature_pending_pm_confirmation', booking_id: booking.id } }];
+} else if (booking.status === 'invoiced' && (input.media_type === 'image' || input.media_type === 'document')) {
+  // Stage 3: client sent proof of payment -- forward to PM to confirm receipt.
+  logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: '[proof of payment received]', media_url: input.media_id, stage: booking.status });
+  await sbRequest('POST', 'conversations', logs);
+  const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
+  const pm = pmRows[0];
+  if (pm) {
+    const questionText = `"${booking.event_name}" — client sent proof of payment. Confirm receipt? Reply yes or no.`;
+    const pendingRows = await sbRequest('POST', 'pending_questions', {
+      booking_id: booking.id,
+      field_name: 'payment_confirmed',
+      question_text: questionText,
+    }, { Prefer: 'return=representation' });
+    const msgId = await sendWhatsApp(pm.phone_number, questionText);
+    if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
+  }
+  await sendWhatsApp(from_number, "Got it, thanks! Confirming with our team now.");
+  return [{ json: { action: 'payment_proof_pending_pm_confirmation', booking_id: booking.id } }];
+} else if (booking.status === 'awaiting_contract') {
+  // Stage 4: organizer legal name + registered address must be explicitly confirmed
+  // with the client, never assumed from their WhatsApp profile name.
+  const contractRows = await sbRequest('GET', `contracts?booking_id=eq.${booking.id}&order=created_at.desc&limit=1&select=*`);
+  const contract = contractRows[0];
+  logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: text, stage: booking.status });
+
+  if (contract && (!contract.organizer_legal_name || !contract.organizer_registered_address)) {
+    const extraction = await openaiExtract(
+      'Extract the organization\'s full legal name and its official registered address from this WhatsApp message. Reply ONLY with JSON: {"understood": true/false, "organizer_legal_name": "...", "organizer_registered_address": "..."}. Both fields must be present for understood to be true.',
+      text || ''
+    );
+    if (!extraction.understood) {
+      replyText = "Sorry, I need both the full legal name and the official registered address together -- could you send them again?";
+    } else {
+      await sbPatch(`contracts?id=eq.${contract.id}`, {
+        organizer_legal_name: extraction.organizer_legal_name,
+        organizer_registered_address: extraction.organizer_registered_address,
+      });
+      await helpers.httpRequest({
+        method: 'POST',
+        url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+        headers: { 'Content-Type': 'application/json' },
+        body: { action: 'send_to_lawyer', booking_id: booking.id },
+        json: true,
+      });
+      replyText = "Perfect, thank you! Passing this to our lawyer to draft the contract now.";
+    }
+  }
+  // If there's no contract row yet, or it's already fully collected, nothing to ask --
+  // just log passively (mirrors the general Stage 2+ passive rule below).
+  if (replyText) {
+    await sendWhatsApp(from_number, replyText);
+    logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: replyText, stage: booking.status });
+  }
+  await sbRequest('POST', 'conversations', logs);
+  return [{ json: { action: 'awaiting_contract_handled', booking_id: booking.id, replied: !!replyText } }];
 } else if (booking.status !== 'inquiry') {
   // Stage 1 already complete for this client (negotiating or later) -- bot stays
   // passive per Stage 2 / the PM-led toggle. Just log the inbound message.
