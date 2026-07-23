@@ -1,0 +1,201 @@
+const helpers = this.helpers;
+const env = {
+  SUPABASE_URL: $env.SUPABASE_URL,
+  SUPABASE_KEY: $env.SUPABASE_SERVICE_KEY,
+  OPENAI_KEY: $env.OPENAI_API_KEY,
+  META_TOKEN: $env.META_ACCESS_TOKEN,
+  META_PHONE_ID: $env.META_PHONE_NUMBER_ID,
+  N8N_BASE_URL: $env.N8N_BASE_URL,
+};
+
+const sbHeaders = {
+  apikey: env.SUPABASE_KEY,
+  Authorization: `Bearer ${env.SUPABASE_KEY}`,
+  'Content-Type': 'application/json',
+};
+
+async function sbRequest(method, path, body, extraHeaders) {
+  return helpers.httpRequest({
+    method,
+    url: `${env.SUPABASE_URL}/rest/v1/${path}`,
+    headers: { ...sbHeaders, ...(extraHeaders || {}) },
+    body,
+    json: true,
+  });
+}
+
+async function sbPatch(path, body) {
+  return sbRequest('PATCH', path, body, { Prefer: 'return=representation' });
+}
+
+async function sendWhatsApp(toNumber, text) {
+  return helpers.httpRequest({
+    method: 'POST',
+    url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
+    headers: {
+      Authorization: `Bearer ${env.META_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
+    json: true,
+  });
+}
+
+async function openaiExtract(fieldPrompt, userText) {
+  const res = await helpers.httpRequest({
+    method: 'POST',
+    url: 'https://api.openai.com/v1/chat/completions',
+    headers: { Authorization: `Bearer ${env.OPENAI_KEY}`, 'Content-Type': 'application/json' },
+    body: {
+      model: 'gpt-4o-mini',
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: fieldPrompt },
+        { role: 'user', content: userText || '' },
+      ],
+    },
+    json: true,
+  });
+  try {
+    return JSON.parse(res.choices[0].message.content);
+  } catch (e) {
+    return { understood: false };
+  }
+}
+
+const FIELD_PROMPTS = {
+  staffing_type: 'The PM is answering whether the event needs full-time or part-time staff. Reply ONLY with JSON: {"understood": true/false, "value": "full-time"|"part-time"}.',
+  security_count: 'The PM is answering how many security/bouncers are needed for the event. Reply ONLY with JSON: {"understood": true/false, "value": <integer>}.',
+  security_notes: 'The PM is answering a question about special security/"vigilante" needs for the event. Reply ONLY with JSON: {"understood": true/false, "value": "..."}.',
+};
+
+async function findContactByPhone(phone) {
+  const rows = await sbRequest('GET', `contacts?phone_number=eq.${encodeURIComponent(phone)}&select=*`);
+  return rows[0] || null;
+}
+
+async function findPmLedBooking() {
+  const rows = await sbRequest('GET', 'bookings?mode=eq.pm-led&limit=1&select=*');
+  return rows[0] || null;
+}
+
+async function findOpenPendingQuestions() {
+  return sbRequest('GET', 'pending_questions?resolved_at=is.null&select=*,bookings(*)');
+}
+
+async function logConversation(bookingId, senderContactId, direction, text, stage) {
+  await sbRequest('POST', 'conversations', [
+    { booking_id: bookingId, sender_contact_id: senderContactId, direction, message_text: text, stage },
+  ]);
+}
+
+const input = $input.first().json.body;
+const { from_number, text, reply_to_message_id, contact_id } = input;
+const trimmed = (text || '').trim();
+
+// --- Command: "open [event name]" -------------------------------------------------
+const openMatch = trimmed.match(/^open\s+(.+)$/i);
+if (openMatch) {
+  const eventName = openMatch[1].trim();
+  const alreadyOpen = await findPmLedBooking();
+  if (alreadyOpen) {
+    await sendWhatsApp(from_number, `You've still got "${alreadyOpen.event_name}" open — type "close" first before opening another one.`);
+    return [{ json: { action: 'open_blocked', open_booking: alreadyOpen.id } }];
+  }
+  const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(eventName)}*&status=neq.cancelled&select=*`);
+  if (matches.length === 0) {
+    await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}" — check the spelling?`);
+    return [{ json: { action: 'open_not_found', query: eventName } }];
+  }
+  const booking = matches[0];
+  await sbPatch(`bookings?id=eq.${booking.id}`, { mode: 'pm-led' });
+  await sendWhatsApp(from_number, `Opened "${booking.event_name}" — I'll relay everything straight through until you type "close".`);
+  return [{ json: { action: 'opened', booking_id: booking.id } }];
+}
+
+// --- Command: "close" --------------------------------------------------------------
+if (trimmed.toLowerCase() === 'close') {
+  const open = await findPmLedBooking();
+  if (!open) {
+    await sendWhatsApp(from_number, "Nothing's open right now.");
+    return [{ json: { action: 'close_noop' } }];
+  }
+  await sbPatch(`bookings?id=eq.${open.id}`, { mode: 'bot-led' });
+  await sendWhatsApp(from_number, `Closed "${open.event_name}" — back to automated.`);
+  return [{ json: { action: 'closed', booking_id: open.id } }];
+}
+
+// --- Relay: a PM-led booking is open, forward verbatim to that client --------------
+const pmLed = await findPmLedBooking();
+if (pmLed) {
+  const client = await sbRequest('GET', `contacts?id=eq.${pmLed.client_contact_id}&select=*`);
+  const clientPhone = client[0]?.phone_number;
+  if (clientPhone) {
+    await sendWhatsApp(clientPhone, text || '');
+  }
+  await logConversation(pmLed.id, contact_id, 'inbound', text, 'pm_led_relay');
+  await logConversation(pmLed.id, null, 'outbound', text, 'pm_led_relay');
+  return [{ json: { action: 'relayed', booking_id: pmLed.id } }];
+}
+
+// --- Otherwise: is this an answer to a pending question? ---------------------------
+const pending = await findOpenPendingQuestions();
+
+let target = null;
+if (reply_to_message_id) {
+  target = pending.find((p) => p.whatsapp_message_id === reply_to_message_id) || null;
+} else if (pending.length === 1) {
+  target = pending[0];
+}
+
+if (!target && pending.length > 1) {
+  await sendWhatsApp(from_number, "I've got a few things pending — reply directly to the specific message you're answering so I know which booking it's for.");
+  return [{ json: { action: 'disambiguation_needed', pending_count: pending.length } }];
+}
+
+if (!target) {
+  await sendWhatsApp(from_number, "Not sure what that's for — type \"open [event name]\" to take over a conversation, or let me know what you mean.");
+  return [{ json: { action: 'unclassified' } }];
+}
+
+// Resolve the matched pending question.
+if (target.field_name === 'kb_escalation' || target.field_name === 'kb_save_confirm') {
+  // Delegate to the KB workflow, which handles relaying the answer to the client
+  // and the opt-in KB-save prompt (Section 8).
+  const action = target.field_name === 'kb_escalation' ? 'resolve_escalation' : 'resolve_kb_save_confirm';
+  await helpers.httpRequest({
+    method: 'POST',
+    url: `${env.N8N_BASE_URL}/webhook/kb-check`,
+    headers: { 'Content-Type': 'application/json' },
+    body: { action, pending_question_id: target.id, answer_text: text },
+    json: true,
+  });
+  await sbPatch(`pending_questions?id=eq.${target.id}`, { resolved_at: new Date().toISOString() });
+  return [{ json: { action: `${target.field_name}_resolved`, pending_question_id: target.id } }];
+}
+
+if (target.field_name === 'contract_confirmed') {
+  const saysYes = /^y(es)?\b/i.test(trimmed);
+  if (saysYes) {
+    await sbPatch(`bookings?id=eq.${target.booking_id}`, { status: 'signed' });
+    await sendWhatsApp(from_number, "Marked as signed — fanning out to departments now.");
+  } else {
+    await sendWhatsApp(from_number, "Got it, not confirmed. Ask the client to resend a valid signed copy.");
+  }
+  await sbPatch(`pending_questions?id=eq.${target.id}`, { resolved_at: new Date().toISOString() });
+  return [{ json: { action: 'contract_confirmation_resolved', signed: saysYes } }];
+}
+
+const prompt = FIELD_PROMPTS[target.field_name];
+const extraction = prompt ? await openaiExtract(prompt, text || '') : { understood: true, value: text };
+
+if (!extraction.understood) {
+  await sendWhatsApp(from_number, `Sorry, I didn't catch that — ${target.question_text}`);
+  return [{ json: { action: 're_ask', pending_question_id: target.id } }];
+}
+
+await sbPatch(`bookings?id=eq.${target.booking_id}`, { [target.field_name]: extraction.value });
+await sbPatch(`pending_questions?id=eq.${target.id}`, { resolved_at: new Date().toISOString() });
+await logConversation(target.booking_id, contact_id, 'inbound', text, 'pm_answer');
+
+return [{ json: { action: 'field_resolved', booking_id: target.booking_id, field: target.field_name } }];

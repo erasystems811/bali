@@ -1,0 +1,183 @@
+{
+  "name": "Bali - 01 Inbound Router",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "whatsapp-inbound",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Meta Verify (GET)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-200, 0],
+      "webhookId": "bali-whatsapp-verify"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Meta webhook verification handshake.\n// Meta calls this once when you register the callback URL in the app dashboard.\nconst q = $input.first().json.query || {};\nconst verifyToken = $env.META_WEBHOOK_VERIFY_TOKEN;\nif (q['hub.mode'] === 'subscribe' && q['hub.verify_token'] === verifyToken) {\n  return [{ json: { status: 200, body: q['hub.challenge'] } }];\n}\nreturn [{ json: { status: 403, body: 'verification failed' } }];"
+      },
+      "name": "Verify Challenge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [20, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{$json.body}}",
+        "options": { "responseCode": "={{$json.status}}" }
+      },
+      "name": "Respond Verify",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-inbound",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "name": "Meta Inbound (POST)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-200, 220],
+      "webhookId": "bali-whatsapp-inbound"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Parse the Meta WhatsApp Cloud API webhook payload down to the fields we care about.\n// Meta's payload shape: entry[0].changes[0].value.messages[0]\nconst body = $input.first().json.body;\nconst value = body?.entry?.[0]?.changes?.[0]?.value;\nconst message = value?.messages?.[0];\n\nif (!message) {\n  // status callbacks (delivered/read) or other non-message events - nothing to route\n  return [{ json: { skip: true } }];\n}\n\nconst fromNumber = message.from; // E.164 without '+'\nconst text = message.text?.body || null;\nconst mediaId = message.image?.id || message.document?.id || null;\nconst mediaType = message.image ? 'image' : message.document ? 'document' : null;\nconst contextMessageId = message.context?.id || null; // set when the sender replied-to a specific message\n\nreturn [{\n  json: {\n    skip: false,\n    from_number: fromNumber,\n    text,\n    media_id: mediaId,\n    media_type: mediaType,\n    reply_to_message_id: contextMessageId,\n    whatsapp_message_id: message.id,\n    received_at: message.timestamp\n  }\n}];"
+      },
+      "name": "Parse Inbound Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [20, 220]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            { "leftValue": "={{$json.skip}}", "rightValue": true, "operator": { "type": "boolean", "operation": "true" } }
+          ],
+          "combinator": "and"
+        }
+      },
+      "name": "Has Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [240, 220]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{$env.SUPABASE_URL}}/rest/v1/contacts",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "phone_number", "value": "=eq.{{$('Parse Inbound Message').item.json.from_number}}" },
+            { "name": "select", "value": "*" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{$env.SUPABASE_SERVICE_KEY}}" },
+            { "name": "Authorization", "value": "=Bearer {{$env.SUPABASE_SERVICE_KEY}}" }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Lookup Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 160]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Section 9a: unrecognized number falls back to 'customer' and the sales flow.\nconst inbound = $('Parse Inbound Message').first().json;\nconst matches = $input.first().json || [];\nconst contact = Array.isArray(matches) && matches.length > 0 ? matches[0] : null;\n\nconst role = contact ? contact.role : 'customer';\n\nreturn [{\n  json: {\n    ...inbound,\n    contact_id: contact ? contact.id : null,\n    role\n  }\n}];"
+      },
+      "name": "Determine Role",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 160]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{$json.role}}", "rightValue": "customer", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": true, "outputKey": "customer" },
+            { "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{$json.role}}", "rightValue": "pm", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": true, "outputKey": "pm" }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "name": "Route by Role",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [900, 160]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.N8N_BASE_URL}}/webhook/stage1-sales-flow",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify($json)}}",
+        "options": {}
+      },
+      "name": "Forward to Stage 1 Sales Flow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.N8N_BASE_URL}}/webhook/pm-toggle",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify($json)}}",
+        "options": {}
+      },
+      "name": "Forward to PM Toggle",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 220]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Lawyer / other staff roles: no active flow yet beyond the Stage 4 lawyer stub\n// (see 99-stage3-4-invoice-contract.json). Log and stop here for now.\nconsole.log('Unrouted role, logging only:', $input.first().json.role);\nreturn $input.all();"
+      },
+      "name": "Log Only (unrouted role)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1140, 380]
+    }
+  ],
+  "connections": {
+    "Meta Verify (GET)": { "main": [[{ "node": "Verify Challenge", "type": "main", "index": 0 }]] },
+    "Verify Challenge": { "main": [[{ "node": "Respond Verify", "type": "main", "index": 0 }]] },
+    "Meta Inbound (POST)": { "main": [[{ "node": "Parse Inbound Message", "type": "main", "index": 0 }]] },
+    "Parse Inbound Message": { "main": [[{ "node": "Has Message?", "type": "main", "index": 0 }]] },
+    "Has Message?": { "main": [[], [{ "node": "Lookup Contact", "type": "main", "index": 0 }]] },
+    "Lookup Contact": { "main": [[{ "node": "Determine Role", "type": "main", "index": 0 }]] },
+    "Determine Role": { "main": [[{ "node": "Route by Role", "type": "main", "index": 0 }]] },
+    "Route by Role": {
+      "main": [
+        [{ "node": "Forward to Stage 1 Sales Flow", "type": "main", "index": 0 }],
+        [{ "node": "Forward to PM Toggle", "type": "main", "index": 0 }],
+        [{ "node": "Log Only (unrouted role)", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" }
+}

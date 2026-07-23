@@ -1,0 +1,54 @@
+{
+  "name": "Bali - 99 Stage 3-4 Stub (Lawyer Nudge)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Stage 3 (Invoice) & Stage 4 (Contract) -- PARTIAL STUB.\n// Blocked on real invoice/contract samples (spec Section 10) so the bot knows\n// which fields to pull from the negotiation log. NOT built here:\n//   - drafting the invoice from the negotiation log (paid items only)\n//   - sending the invoice + collecting proof of payment\n//   - bot sending event details to the lawyer to kick off a contract draft\n//   - lawyer draft -> PM approval -> send to client\n// Ready-to-go once those exist: signature detection + PM confirmation is\n// already implemented in 02-stage1-sales-flow.json (booking.status ===\n// 'sent_to_client' branch) and 03-pm-toggle.json ('contract_confirmed').\n//\n// What IS built here: the 24h lawyer nudge (Section 5, bullet 5) -- it's a\n// standalone, self-contained rule (\"nudge every 24h while awaiting_contract\")\n// that doesn't depend on the missing samples, so it's live now and will just\n// start firing once bookings actually reach awaiting_contract.\n\nconst helpers = this.helpers;\nconst env = {\n  SUPABASE_URL: $env.SUPABASE_URL,\n  SUPABASE_KEY: $env.SUPABASE_SERVICE_KEY,\n  META_TOKEN: $env.META_ACCESS_TOKEN,\n  META_PHONE_ID: $env.META_PHONE_NUMBER_ID,\n};\n\nconst sbHeaders = {\n  apikey: env.SUPABASE_KEY,\n  Authorization: `Bearer ${env.SUPABASE_KEY}`,\n  'Content-Type': 'application/json',\n};\n\nasync function sbRequest(method, path, body, extraHeaders) {\n  return helpers.httpRequest({\n    method,\n    url: `${env.SUPABASE_URL}/rest/v1/${path}`,\n    headers: { ...sbHeaders, ...(extraHeaders || {}) },\n    body,\n    json: true,\n  });\n}\n\nasync function sbPatch(path, body) {\n  return sbRequest('PATCH', path, body, { Prefer: 'return=representation' });\n}\n\nasync function sendWhatsApp(toNumber, text) {\n  return helpers.httpRequest({\n    method: 'POST',\n    url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,\n    headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },\n    body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },\n    json: true,\n  });\n}\n\nconst DAY_MS = 24 * 60 * 60 * 1000;\n\nconst lawyer = (await sbRequest('GET', 'contacts?role=eq.lawyer&select=*&limit=1'))[0];\nif (!lawyer) {\n  return [{ json: { skipped: true, reason: 'no lawyer contact configured yet' } }];\n}\n\nconst waiting = await sbRequest('GET', 'bookings?status=eq.awaiting_contract&select=*');\nlet nudged = 0;\n\nfor (const booking of waiting) {\n  const last = booking.last_lawyer_nudge_at ? new Date(booking.last_lawyer_nudge_at).getTime() : 0;\n  if (Date.now() - last >= DAY_MS) {\n    await sendWhatsApp(lawyer.phone_number, `Reminder: still waiting on the contract draft for \"${booking.event_name}\" (event date ${booking.event_date || 'TBD'}).`);\n    await sbPatch(`bookings?id=eq.${booking.id}`, { last_lawyer_nudge_at: new Date().toISOString() });\n    nudged += 1;\n  }\n}\n\nreturn [{ json: { checked: waiting.length, nudged } }];\n"
+      },
+      "name": "Lawyer 24h Nudge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [
+        [
+          {
+            "node": "Lawyer 24h Nudge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
