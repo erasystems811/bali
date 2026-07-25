@@ -47,7 +47,11 @@ create table bookings (
                        'signed', 'onboarded', 'cancelled')),
   mode text not null default 'bot-led' check (mode in ('bot-led', 'pm-led')),
   client_contact_id uuid not null references contacts (id),
-  is_existing_client boolean not null default false,
+  -- Starts null, not false: Stage 1 checks "is this field still missing"
+  -- via IS NULL, so a not-null default here would make the bot silently
+  -- skip ever asking "have you booked with us before?" (confirmed live --
+  -- it did exactly that until this was fixed).
+  is_existing_client boolean,
   client_reference text, -- IG handle / past event note, for existing clients
   staffing_type text check (staffing_type in ('full-time', 'part-time')),
   security_count int,

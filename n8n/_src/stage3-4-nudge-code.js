@@ -23,6 +23,7 @@ async function sbRequest(method, path, body, extraHeaders) {
     headers: { ...sbHeaders, ...(extraHeaders || {}) },
     body,
     json: true,
+    timeout: 15000,
   });
 }
 
@@ -37,6 +38,7 @@ async function sendWhatsApp(toNumber, text) {
     headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
     body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
     json: true,
+    timeout: 20000,
   });
 }
 

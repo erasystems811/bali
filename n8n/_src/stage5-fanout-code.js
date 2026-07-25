@@ -20,6 +20,7 @@ async function sbRequest(method, path, body, extraHeaders) {
     headers: { ...sbHeaders, ...(extraHeaders || {}) },
     body,
     json: true,
+    timeout: 15000,
   });
 }
 
@@ -38,6 +39,7 @@ async function sendWhatsApp(toNumber, text) {
     headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
     body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
     json: true,
+    timeout: 20000,
   });
   return res?.messages?.[0]?.id || null;
 }
@@ -59,6 +61,7 @@ async function askOpenAI(systemPrompt, userText) {
       ],
     },
     json: true,
+    timeout: 30000,
   });
   return res?.choices?.[0]?.message?.content || '';
 }
@@ -79,7 +82,7 @@ async function fanOutBooking(booking) {
   if (booking.staffing_type) {
     for (const c of hr) await sendWhatsApp(c.phone_number, `New event onboarded: "${booking.event_name}" on ${dateStr}. Staffing: ${booking.staffing_type}.`);
   } else {
-    await askPmDirectly(booking.id, 'staffing_type', `For "${booking.event_name}" (${dateStr}) — full-time or part-time staff needed?`);
+    await askPmDirectly(booking.id, 'staffing_type', `For "${booking.event_name}" (${dateStr}), full-time or part-time staff needed?`);
   }
 
   // Procurement: current stock + stock needed. Recipe-based inventory (Section 7) isn't
@@ -105,7 +108,7 @@ async function fanOutBooking(booking) {
       'Summarize this WhatsApp conversation into a short event overview brief for the on-site Event Assistant. Do NOT include any prices, payment amounts, or revenue figures. Warm, brief, plain language.',
       transcript
     );
-    for (const c of eventAssistant) await sendWhatsApp(c.phone_number, `Event brief — "${booking.event_name}" (${dateStr}):\n${brief}`);
+    for (const c of eventAssistant) await sendWhatsApp(c.phone_number, `Event brief for "${booking.event_name}" (${dateStr}):\n${brief}`);
   }
 
   // Security: bouncer count + "vigilante" needs, collected from PM if missing.
@@ -115,12 +118,12 @@ async function fanOutBooking(booking) {
       await sendWhatsApp(c.phone_number, `New event: "${booking.event_name}" on ${dateStr}. Security needed: ${booking.security_count}.${booking.security_notes ? ' Notes: ' + booking.security_notes : ''}`);
     }
   } else {
-    await askPmDirectly(booking.id, 'security_count', `For "${booking.event_name}" (${dateStr}) — how many security/bouncers are needed?`);
+    await askPmDirectly(booking.id, 'security_count', `For "${booking.event_name}" (${dateStr}), how many security/bouncers are needed?`);
   }
 
   // All staff: event date announcement.
   const allStaff = await sbRequest('GET', "contacts?role=in.(staff,hr,procurement,accounts,event_assistant,security,supervisor,facility_manager)&select=*");
-  for (const c of allStaff) await sendWhatsApp(c.phone_number, `Heads up — "${booking.event_name}" is confirmed for ${dateStr}.`);
+  for (const c of allStaff) await sendWhatsApp(c.phone_number, `Heads up, "${booking.event_name}" is confirmed for ${dateStr}.`);
 }
 
 async function sendDayOfChecklist(booking) {

@@ -20,6 +20,7 @@ async function sbRequest(method, path, body, extraHeaders) {
     headers: { ...sbHeaders, ...(extraHeaders || {}) },
     body,
     json: true,
+    timeout: 15000,
   });
 }
 
@@ -38,6 +39,7 @@ async function sendWhatsApp(toNumber, text) {
     headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
     body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
     json: true,
+    timeout: 20000,
   });
   return res?.messages?.[0]?.id || null;
 }
@@ -56,6 +58,7 @@ async function askOpenAI(systemPrompt, userText) {
       ],
     },
     json: true,
+    timeout: 30000,
   });
   try {
     return JSON.parse(res.choices[0].message.content);
@@ -100,26 +103,56 @@ if (action === 'check') {
     return [{ json: { action: 'kb_answered' } }];
   }
 
-  // Not found -- tell the client, escalate to the PM (identified by event name, not a ref code).
-  await sendWhatsApp(from_number, "Good question — let me check on that and get back to you!");
+  // Not found. If the client keeps asking while the PM still hasn't answered,
+  // repeating the exact same "let me check" line every time reads as broken --
+  // vary the wording by how many times this has already come up for this
+  // booking, and only actually ping the PM once per still-open matter.
+  const priorRows = bookingId
+    ? await sbRequest('GET', `pending_questions?booking_id=eq.${bookingId}&field_name=eq.kb_escalation&select=id,resolved_at&order=asked_at.asc`)
+    : [];
+  const openRow = priorRows.find((r) => !r.resolved_at) || null;
+  const STILL_WAITING_REPLIES = [
+    "Good question, let me check on that and get back to you!",
+    "Sorry, I'm still checking on that for you.",
+    "Still haven't been able to confirm that, sorry for the long wait.",
+  ];
+  const tier = Math.min(priorRows.length, STILL_WAITING_REPLIES.length - 1);
+  const waitingText = STILL_WAITING_REPLIES[tier];
+  await sendWhatsApp(from_number, waitingText);
+  if (bookingId) await logConversation(bookingId, contact_id, 'outbound', waitingText, 'kb_not_found');
 
   const pm = await findPm();
   if (!pm || !bookingId) {
     return [{ json: { action: 'kb_not_found_no_escalation_target' } }];
   }
 
-  const booking = (await sbRequest('GET', `bookings?id=eq.${bookingId}&select=event_name`))[0];
-  const pending = (await sbInsert('pending_questions', {
+  if (!openRow) {
+    // First time this has come up, or the previous one already got answered --
+    // create a fresh escalation and actually ping the PM.
+    const booking = (await sbRequest('GET', `bookings?id=eq.${bookingId}&select=event_name`))[0];
+    const pending = (await sbInsert('pending_questions', {
+      booking_id: bookingId,
+      field_name: 'kb_escalation',
+      question_text: text,
+    }))[0];
+
+    const escalationText = `New question on "${booking?.event_name || 'an inquiry'}": "${text}"\nReply directly to this message with the answer.`;
+    const msgId = await sendWhatsApp(pm.phone_number, escalationText);
+    if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
+
+    return [{ json: { action: 'kb_escalated', pending_question_id: pending.id } }];
+  }
+
+  // Already pending with the PM -- log a lightweight, auto-resolved tally row
+  // (it's not something the PM replies to) so a further repeat picks the next
+  // wording tier, without paging the PM again for the same still-open thing.
+  await sbInsert('pending_questions', {
     booking_id: bookingId,
     field_name: 'kb_escalation',
     question_text: text,
-  }))[0];
-
-  const escalationText = `New question on "${booking?.event_name || 'an inquiry'}": "${text}"\nReply directly to this message with the answer.`;
-  const msgId = await sendWhatsApp(pm.phone_number, escalationText);
-  if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
-
-  return [{ json: { action: 'kb_escalated', pending_question_id: pending.id } }];
+    resolved_at: new Date().toISOString(),
+  });
+  return [{ json: { action: 'kb_still_waiting', pending_question_id: openRow.id } }];
 }
 
 if (action === 'resolve_escalation') {

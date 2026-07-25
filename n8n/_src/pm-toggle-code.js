@@ -21,6 +21,7 @@ async function sbRequest(method, path, body, extraHeaders) {
     headers: { ...sbHeaders, ...(extraHeaders || {}) },
     body,
     json: true,
+    timeout: 15000,
   });
 }
 
@@ -38,6 +39,7 @@ async function sendWhatsApp(toNumber, text) {
     },
     body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
     json: true,
+    timeout: 20000,
   });
 }
 
@@ -55,6 +57,7 @@ async function openaiExtract(fieldPrompt, userText) {
       ],
     },
     json: true,
+    timeout: 30000,
   });
   try {
     return JSON.parse(res.choices[0].message.content);
@@ -99,7 +102,7 @@ if (invoiceMatch) {
   const eventName = invoiceMatch[1].trim();
   const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(eventName)}*&status=neq.cancelled&select=*`);
   if (matches.length === 0) {
-    await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}" — check the spelling?`);
+    await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}". Check the spelling?`);
     return [{ json: { action: 'invoice_command_not_found', query: eventName } }];
   }
   await helpers.httpRequest({
@@ -108,6 +111,7 @@ if (invoiceMatch) {
     headers: { 'Content-Type': 'application/json' },
     body: { action: 'draft_invoice', booking_id: matches[0].id },
     json: true,
+    timeout: 15000,
   });
   return [{ json: { action: 'invoice_command_triggered', booking_id: matches[0].id } }];
 }
@@ -118,17 +122,26 @@ if (openMatch) {
   const eventName = openMatch[1].trim();
   const alreadyOpen = await findPmLedBooking();
   if (alreadyOpen) {
-    await sendWhatsApp(from_number, `You've still got "${alreadyOpen.event_name}" open — type "close" first before opening another one.`);
+    await sendWhatsApp(from_number, `You've still got "${alreadyOpen.event_name}" open. Type "close" first before opening another one.`);
     return [{ json: { action: 'open_blocked', open_booking: alreadyOpen.id } }];
   }
   const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(eventName)}*&status=neq.cancelled&select=*`);
   if (matches.length === 0) {
-    await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}" — check the spelling?`);
+    await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}". Check the spelling?`);
     return [{ json: { action: 'open_not_found', query: eventName } }];
   }
   const booking = matches[0];
   await sbPatch(`bookings?id=eq.${booking.id}`, { mode: 'pm-led' });
-  await sendWhatsApp(from_number, `Opened "${booking.event_name}" — I'll relay everything straight through until you type "close".`);
+
+  // The PM shouldn't have to go dig through Retool to see what the bot and
+  // client already discussed before taking over.
+  const history = await sbRequest('GET', `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text`);
+  if (history.length > 0) {
+    const transcript = history.map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`).join('\n');
+    await sendWhatsApp(from_number, `Conversation so far for "${booking.event_name}":\n${transcript}`);
+  }
+
+  await sendWhatsApp(from_number, `Opened "${booking.event_name}". I'll relay everything straight through until you type "close".`);
   return [{ json: { action: 'opened', booking_id: booking.id } }];
 }
 
@@ -140,7 +153,7 @@ if (trimmed.toLowerCase() === 'close') {
     return [{ json: { action: 'close_noop' } }];
   }
   await sbPatch(`bookings?id=eq.${open.id}`, { mode: 'bot-led' });
-  await sendWhatsApp(from_number, `Closed "${open.event_name}" — back to automated.`);
+  await sendWhatsApp(from_number, `Closed "${open.event_name}". Back to automated.`);
 
   // Closing a still-negotiating booking is taken as "price agreed" -- kicks off Stage 3.
   // If that's wrong (PM just stepping away mid-negotiation), re-open with "open [event name]"
@@ -152,6 +165,7 @@ if (trimmed.toLowerCase() === 'close') {
       headers: { 'Content-Type': 'application/json' },
       body: { action: 'draft_invoice', booking_id: open.id },
       json: true,
+      timeout: 15000,
     });
   }
   return [{ json: { action: 'closed', booking_id: open.id } }];
@@ -181,12 +195,12 @@ if (reply_to_message_id) {
 }
 
 if (!target && pending.length > 1) {
-  await sendWhatsApp(from_number, "I've got a few things pending — reply directly to the specific message you're answering so I know which booking it's for.");
+  await sendWhatsApp(from_number, "I've got a few things pending. Reply directly to the specific message you're answering so I know which booking it's for.");
   return [{ json: { action: 'disambiguation_needed', pending_count: pending.length } }];
 }
 
 if (!target) {
-  await sendWhatsApp(from_number, "Not sure what that's for — type \"open [event name]\" to take over a conversation, or let me know what you mean.");
+  await sendWhatsApp(from_number, "Not sure what that's for. Type \"open [event name]\" to take over a conversation, or let me know what you mean.");
   return [{ json: { action: 'unclassified' } }];
 }
 
@@ -201,6 +215,7 @@ if (target.field_name === 'kb_escalation' || target.field_name === 'kb_save_conf
     headers: { 'Content-Type': 'application/json' },
     body: { action, pending_question_id: target.id, answer_text: text },
     json: true,
+    timeout: 15000,
   });
   await sbPatch(`pending_questions?id=eq.${target.id}`, { resolved_at: new Date().toISOString() });
   return [{ json: { action: `${target.field_name}_resolved`, pending_question_id: target.id } }];
@@ -218,6 +233,7 @@ if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
     headers: { 'Content-Type': 'application/json' },
     body: { action: STAGE3_4_DELEGATED_FIELDS[target.field_name], pending_question_id: target.id, answer_text: text },
     json: true,
+    timeout: 15000,
   });
   await sbPatch(`pending_questions?id=eq.${target.id}`, { resolved_at: new Date().toISOString() });
   return [{ json: { action: `${target.field_name}_resolved`, pending_question_id: target.id } }];
@@ -227,7 +243,7 @@ if (target.field_name === 'contract_confirmed') {
   const saysYes = /^y(es)?\b/i.test(trimmed);
   if (saysYes) {
     await sbPatch(`bookings?id=eq.${target.booking_id}`, { status: 'signed' });
-    await sendWhatsApp(from_number, "Marked as signed — fanning out to departments now.");
+    await sendWhatsApp(from_number, "Marked as signed. Fanning out to departments now.");
   } else {
     await sendWhatsApp(from_number, "Got it, not confirmed. Ask the client to resend a valid signed copy.");
   }
@@ -239,7 +255,7 @@ const prompt = FIELD_PROMPTS[target.field_name];
 const extraction = prompt ? await openaiExtract(prompt, text || '') : { understood: true, value: text };
 
 if (!extraction.understood) {
-  await sendWhatsApp(from_number, `Sorry, I didn't catch that — ${target.question_text}`);
+  await sendWhatsApp(from_number, `Sorry, I didn't catch that. ${target.question_text}`);
   return [{ json: { action: 're_ask', pending_question_id: target.id } }];
 }
 
