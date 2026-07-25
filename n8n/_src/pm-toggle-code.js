@@ -188,14 +188,31 @@ if (pmLed) {
 const pending = await findOpenPendingQuestions();
 
 let target = null;
+// The PM's actual reply text to act on -- normally the full message, but when
+// disambiguating by number (e.g. "2: yes") it's just the part after "2:".
+let answerText = text;
+
 if (reply_to_message_id) {
   target = pending.find((p) => p.whatsapp_message_id === reply_to_message_id) || null;
 } else if (pending.length === 1) {
   target = pending[0];
+} else if (pending.length > 1) {
+  const numberedMatch = trimmed.match(/^(\d+)[:.)]\s*([\s\S]+)$/);
+  const numbered = numberedMatch && pending[parseInt(numberedMatch[1], 10) - 1];
+  if (numbered) {
+    target = numbered;
+    answerText = numberedMatch[2];
+  }
 }
 
 if (!target && pending.length > 1) {
-  await sendWhatsApp(from_number, "I've got a few things pending. Reply directly to the specific message you're answering so I know which booking it's for.");
+  const list = pending
+    .map((p, i) => `${i + 1}. "${p.bookings?.event_name || 'unknown event'}" -- ${p.question_text}`)
+    .join('\n');
+  await sendWhatsApp(
+    from_number,
+    `I've got a few things pending:\n${list}\n\nReply directly to the specific message (swipe to reply), or just tell me the number and your answer, e.g. "2: yes".`
+  );
   return [{ json: { action: 'disambiguation_needed', pending_count: pending.length } }];
 }
 
@@ -213,7 +230,7 @@ if (target.field_name === 'kb_escalation' || target.field_name === 'kb_save_conf
     method: 'POST',
     url: `${env.N8N_BASE_URL}/webhook/kb-check`,
     headers: { 'Content-Type': 'application/json' },
-    body: { action, pending_question_id: target.id, answer_text: text },
+    body: { action, pending_question_id: target.id, answer_text: answerText },
     json: true,
     timeout: 15000,
   });
@@ -231,7 +248,7 @@ if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
     method: 'POST',
     url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
     headers: { 'Content-Type': 'application/json' },
-    body: { action: STAGE3_4_DELEGATED_FIELDS[target.field_name], pending_question_id: target.id, answer_text: text },
+    body: { action: STAGE3_4_DELEGATED_FIELDS[target.field_name], pending_question_id: target.id, answer_text: answerText },
     json: true,
     timeout: 15000,
   });
@@ -240,7 +257,7 @@ if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
 }
 
 if (target.field_name === 'contract_confirmed') {
-  const saysYes = /^y(es)?\b/i.test(trimmed);
+  const saysYes = /^y(es)?\b/i.test(answerText.trim());
   if (saysYes) {
     await sbPatch(`bookings?id=eq.${target.booking_id}`, { status: 'signed' });
     await sendWhatsApp(from_number, "Marked as signed. Fanning out to departments now.");
@@ -252,7 +269,7 @@ if (target.field_name === 'contract_confirmed') {
 }
 
 const prompt = FIELD_PROMPTS[target.field_name];
-const extraction = prompt ? await openaiExtract(prompt, text || '') : { understood: true, value: text };
+const extraction = prompt ? await openaiExtract(prompt, answerText || '') : { understood: true, value: answerText };
 
 if (!extraction.understood) {
   await sendWhatsApp(from_number, `Sorry, I didn't catch that. ${target.question_text}`);
@@ -261,6 +278,6 @@ if (!extraction.understood) {
 
 await sbPatch(`bookings?id=eq.${target.booking_id}`, { [target.field_name]: extraction.value });
 await sbPatch(`pending_questions?id=eq.${target.id}`, { resolved_at: new Date().toISOString() });
-await logConversation(target.booking_id, contact_id, 'inbound', text, 'pm_answer');
+await logConversation(target.booking_id, contact_id, 'inbound', answerText, 'pm_answer');
 
 return [{ json: { action: 'field_resolved', booking_id: target.booking_id, field: target.field_name } }];

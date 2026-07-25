@@ -218,14 +218,17 @@ function fieldOrder() {
 const input = $input.first().json.body;
 const { from_number, text, contact_id: routerContactId, media_type, media_id } = input;
 
-// 1. Upsert contact (creates if unrecognized, per Section 9a; no-op update if it already exists).
-const contactRows = await sbRequest(
-  'POST',
-  'contacts?on_conflict=phone_number',
-  { phone_number: from_number, role: 'customer' },
-  { Prefer: 'resolution=merge-duplicates,return=representation' }
-);
-const contact = contactRows[0];
+// 1. Look up the contact by phone; only create one (as 'customer') if none
+// exists yet. Must NEVER touch an existing contact's role -- that's
+// admin-managed (PM/lawyer/staff via Retool), and an upsert with role
+// hardcoded to 'customer' would silently clobber it back on conflict
+// (confirmed live: a misrouted PM message reset a real PM back to 'customer').
+const existingContacts = await sbRequest('GET', `contacts?phone_number=eq.${encodeURIComponent(from_number)}&select=*`);
+let contact = existingContacts[0];
+if (!contact) {
+  const created = await sbRequest('POST', 'contacts', { phone_number: from_number, role: 'customer' }, { Prefer: 'return=representation' });
+  contact = created[0];
+}
 
 // 2. Find the latest non-cancelled booking for this contact.
 const existingBookings = await sbRequest(
@@ -327,12 +330,70 @@ if (!booking) {
   }
   await sbRequest('POST', 'conversations', logs);
   return [{ json: { action: 'awaiting_contract_handled', booking_id: booking.id, replied: !!replyText } }];
-} else if (booking.status !== 'inquiry') {
-  // Stage 1 already complete for this client (negotiating or later) -- bot stays
-  // passive per Stage 2 / the PM-led toggle. Just log the inbound message.
+} else if (booking.status !== 'inquiry' && booking.mode === 'pm-led') {
+  // The PM has explicitly "opened" this booking and is live-driving the
+  // conversation (Section 3) -- pm-toggle-code.js relays the PM's replies to
+  // the client, but the client's own messages need the same relay in the
+  // other direction, or the PM never actually sees what the client says.
   logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: effectiveText, stage: booking.status });
+  const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
+  const pm = pmRows[0];
+  if (pm) {
+    await sendWhatsApp(pm.phone_number, `"${booking.event_name}": ${effectiveText}`);
+    logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed to PM] ${effectiveText}`, stage: booking.status });
+  }
   await sbRequest('POST', 'conversations', logs);
-  return [{ json: { skipped: true, reason: 'booking not in inquiry stage', booking_id: booking.id } }];
+  return [{ json: { action: 'relayed_to_pm', booking_id: booking.id } }];
+} else if (booking.status !== 'inquiry') {
+  // Intake is done but the PM hasn't opened this booking yet (still bot-led).
+  // Going completely silent here reads as broken -- actually answer genuine
+  // questions via the knowledge base, and give a warm, freshly-worded
+  // reassurance for anything else, instead of ignoring the client.
+  logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: effectiveText, stage: booking.status });
+
+  const history = await sbRequest(
+    'GET',
+    `conversations?booking_id=eq.${booking.id}&order=created_at.desc&select=direction,message_text&limit=10`
+  );
+  const recentTranscript = history.reverse().map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`).join('\n');
+
+  const check = await askOpenAIJson(
+    `A client is waiting to hear back about their booking "${booking.event_name}", already handed off to the team. They just said: "${effectiveText}".
+
+Decide: is the client asking about a NEW fact -- something about the venue or event itself that we'd have to look up or check (pricing, parking, capacity, what's included, timing details, etc.) -- or are they just checking on the STATUS of their own booking / whether anyone has gotten back to them yet?
+
+Asking for a status update is NOT a genuine question, even if it's phrased as one or ends with "?" -- it's not asking us to look anything up, there's nothing to check, it just needs a reassurance that we're still on it. Examples that are NOT genuine questions: "hey", "any update?", "did you see my message?", "??", "still there?", "just checking in", "hello?", "so?". Examples that ARE genuine questions: "do you have parking?", "how much does it cost?", "can we bring outside catering?", "what's the capacity?".
+
+Reply ONLY with JSON: {"is_question": true/false} -- true only if it's asking about a new fact that needs looking up.`,
+    effectiveText || ''
+  );
+
+  if (check?.is_question) {
+    await helpers.httpRequest({
+      method: 'POST',
+      url: `${env.N8N_BASE_URL}/webhook/kb-check`,
+      headers: { 'Content-Type': 'application/json' },
+      body: { action: 'check', from_number, text: effectiveText, contact_id: contact.id, booking_id: booking.id },
+      json: true,
+      timeout: 15000,
+    });
+  } else {
+    const waitingReplyResult = await askOpenAIJson(
+      `You're Bali's WhatsApp assistant. A client is waiting to hear back from the events manager about their booking "${booking.event_name}", which is already with the team. They just said: "${effectiveText}" -- just a check-in, not a real question.
+
+Recent conversation:
+${recentTranscript}
+
+Write one brief, warm, professional reassurance letting them know you're still on it -- vary the wording from anything you've said recently in this conversation, never "Awesome" or over-enthusiastic. Reply ONLY with JSON: {"reply": "..."}`,
+      effectiveText || ''
+    );
+    const waitingReply = waitingReplyResult?.reply || "Still with our team on this, I'll follow up as soon as I can.";
+    await sendWhatsApp(from_number, waitingReply);
+    logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: waitingReply, stage: booking.status });
+  }
+
+  await sbRequest('POST', 'conversations', logs);
+  return [{ json: { action: 'post_intake_handled', booking_id: booking.id } }];
 } else {
   // Mid-intake -- this is the part that actually needs to feel like a
   // conversation. Two passes: (1) read the whole conversation so far and
