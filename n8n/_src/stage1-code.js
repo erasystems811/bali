@@ -423,15 +423,15 @@ if (!booking) {
   const check = await askOpenAIJson(
     `A client is waiting to hear back about their booking "${booking.event_name}", already handed off to the team. They just said: "${effectiveText}".
 
-Decide: is the client asking about a NEW fact -- something about the venue or event itself that we'd have to look up or check (pricing, parking, capacity, what's included, timing details, etc.) -- or are they just checking on the STATUS of their own booking / whether anyone has gotten back to them yet?
+Decide: does this need real attention -- either a genuine question about the venue/event that needs looking up (pricing, parking, capacity, what's included, timing details, etc.), new information or details they're adding (or want to add) about their booking, or a request/instruction for the team -- or is it JUST a check-in/pleasantry with nothing to act on?
 
-Asking for a status update is NOT a genuine question, even if it's phrased as one or ends with "?" -- it's not asking us to look anything up, there's nothing to check, it just needs a reassurance that we're still on it. Examples that are NOT genuine questions: "hey", "any update?", "did you see my message?", "??", "still there?", "just checking in", "hello?", "so?". Examples that ARE genuine questions: "do you have parking?", "how much does it cost?", "can we bring outside catering?", "what's the capacity?".
+A plain status check-in is NOT something that needs attention, even if phrased as a question or ending in "?" -- there's nothing to look up or relay, it just needs a reassurance that you're still on it. Examples that need NO attention: "hey", "any update?", "did you see my message?", "??", "still there?", "just checking in", "hello?", "so?". Examples that DO need attention: "do you have parking?" (question), "how much does it cost?" (question), "actually make it 150 guests" (new info), "I want to add something" (intent to add, even without saying what yet), "can you also arrange decor?" (request).
 
-Reply ONLY with JSON: {"is_question": true/false} -- true only if it's asking about a new fact that needs looking up.`,
+Reply ONLY with JSON: {"needs_attention": true/false}.`,
     effectiveText || ''
   );
 
-  if (check?.is_question) {
+  if (check?.needs_attention) {
     await helpers.httpRequest({
       method: 'POST',
       url: `${env.N8N_BASE_URL}/webhook/kb-check`,
