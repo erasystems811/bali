@@ -393,6 +393,30 @@ if (!booking) {
   }
   await sbRequest('POST', 'conversations', logs);
   return [{ json: { action: 'awaiting_contract_handled', booking_id: booking.id, replied: !!replyText } }];
+} else if (booking.status === 'signed' || booking.status === 'onboarded') {
+  // Event is booked -- planning is an open-ended, ongoing relationship with
+  // the PM (decor tweaks, timing changes, etc.), not a single negotiation
+  // session, so there's no "open"/"close" toggle here: always relay straight
+  // through. Prefixed with the event name since the PM may have several of
+  // these going at once (see pm-toggle-code.js's planning-relay routing,
+  // which uses this exact prefix to route his replies back).
+  logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: effectiveText, stage: 'planning_relay' });
+  const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
+  const pm = pmRows[0];
+  if (pm) {
+    const forwardText = `${booking.event_name}: ${effectiveText}`;
+    const msgId = await sendWhatsApp(pm.phone_number, forwardText);
+    logs.push({
+      booking_id: booking.id,
+      sender_contact_id: null,
+      direction: 'outbound',
+      message_text: forwardText,
+      stage: 'planning_relay_to_pm',
+      whatsapp_message_id: msgId || null,
+    });
+  }
+  await sbRequest('POST', 'conversations', logs);
+  return [{ json: { action: 'planning_relayed_to_pm', booking_id: booking.id } }];
 } else if (booking.status !== 'inquiry' && booking.mode === 'pm-led') {
   // The PM has explicitly "opened" this booking and is live-driving the
   // conversation (Section 3) -- pm-toggle-code.js relays the PM's replies to

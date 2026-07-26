@@ -90,6 +90,10 @@ create table conversations (
   message_text text,
   media_url text,
   stage text, -- e.g. 'contact_availability', 'negotiation', 'invoice', 'contract'
+  -- Set on 'planning_relay_to_pm' rows (the PM-facing forward of a client's
+  -- planning-phase message) so a PM swipe-reply to that specific WhatsApp
+  -- message can be routed back to the right booking -- see pm-toggle-code.js.
+  whatsapp_message_id text,
   created_at timestamptz not null default now()
 );
 

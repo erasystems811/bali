@@ -92,6 +92,50 @@ Real-world testing by the owner surfaced that the original Stage 1 was a rigid s
 - The 24h lawyer nudge (`99-stage3-4-invoice-contract.json`'s schedule trigger) fires automatically while a booking sits in `awaiting_contract` with the draft not yet received.
 - Implementation note: the PM/client forwards reuse the lawyer's original WhatsApp media id directly (no download/re-upload) — standard for Cloud API, but only reliable while that media hasn't expired on Meta's side, so this should stay a same-day handoff in practice.
 
+## Post-signature planning relay (2026-07-26, new)
+
+Once a booking hits `signed` or `onboarded`, the client relationship becomes an
+open-ended, ongoing conversation (decor tweaks, timing changes, etc.) rather
+than a single bounded negotiation — there's no natural "done" moment to close
+on, so this deliberately does NOT reuse the `open`/`close` negotiation lock
+(`bookings.mode`, still single-slot, still only for pre-signature negotiating).
+Instead:
+
+- **Always-on, both directions, no toggle needed.** `stage1-code.js` relays
+  every client message for a `signed`/`onboarded` booking straight to the PM,
+  prefixed with the event name (`"<event name>: <message>"`) since several of
+  these can be running at once. Pure relay — no KB lookup, no bot reassurance,
+  the PM is the one actively handling it now.
+- **The PM's replies are routed back three ways, in order:**
+  1. **Explicit prefix** — starting a message with `[event name]: ...` (ilike
+     match against signed/onboarded bookings) always wins, whether replying or
+     messaging a client first. Falls through to normal handling if the name
+     doesn't match exactly one booking.
+  2. **Swipe-to-reply** — replying directly to a specific forwarded message
+     routes back to that exact booking, matched via a new
+     `conversations.whatsapp_message_id` column (only set on the
+     PM-facing `planning_relay_to_pm` forward, not the client-facing log).
+  3. **Auto-match** — if there's no explicit signal and only ONE thing needs
+     the PM's attention right now (a pending question OR an awaited planning
+     reply, combined into one pool), it goes there automatically. If there's
+     more than one, a single numbered list covering both kinds is sent —
+     deliberately never a silent "most recent thread" guess, since a wrong
+     guess here means leaking one client's details to another.
+- **`conversations.stage` tagging is load-bearing**, not just a label:
+  `planning_relay` (both directions) is the client-facing thread, used to
+  compute "is this booking currently awaiting a reply" (latest row is
+  `inbound`). `planning_relay_to_pm` (outbound only) is purely the PM-facing
+  forward, used only for swipe-reply matching — it must NOT count toward the
+  awaiting-reply check, or forwarding a message to the PM would look
+  indistinguishable from the PM having already replied.
+- **The negotiation lock releases automatically on signing** — `mode` resets
+  to `bot-led` in the same patch that sets `status: 'signed'`, so the PM's
+  single "open" slot frees up immediately instead of staying occupied until
+  someone remembers to `close` it.
+- Still ahead: a proper queue for the pre-signature negotiation phase itself
+  (sequential, one at a time, auto-advancing on `close`) — agreed on
+  separately, not yet built.
+
 ## Admin visibility (Retool) — now built
 
 Live dashboard: **https://erasystems--bali-dashboard.retool.app** — org `erasystems`, resource "Bali Database" (Supabase Postgres via the pooler, SSL on with Supabase's CA cert uploaded — plain `sslmode=require` failed with "self-signed certificate in certificate chain" until the CA cert was added). Tabs for all 8 tables (bookings, contacts, invoices, contracts, conversations, pending_questions, knowledge_base, sops), built via Retool's AI app builder against the real schema. Retool's free-tier API tokens don't expose `resources`/`apps` scopes (only RPC/Custom Component Libraries), so this had to be built via direct browser automation rather than the REST API — if it ever needs updating programmatically, that limitation is still there.

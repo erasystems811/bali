@@ -128,10 +128,41 @@ async function findOpenPendingQuestions() {
   return sbRequest('GET', 'pending_questions?resolved_at=is.null&select=*,bookings(*)');
 }
 
-async function logConversation(bookingId, senderContactId, direction, text, stage) {
+async function logConversation(bookingId, senderContactId, direction, text, stage, whatsappMessageId) {
   await sbRequest('POST', 'conversations', [
-    { booking_id: bookingId, sender_contact_id: senderContactId, direction, message_text: text, stage },
+    { booking_id: bookingId, sender_contact_id: senderContactId, direction, message_text: text, stage, whatsapp_message_id: whatsappMessageId || null },
   ]);
+}
+
+// Signed/onboarded bookings are always-on planning conversations (no
+// open/close toggle) -- "awaiting reply" means the client's latest message
+// on that thread hasn't been answered by the PM yet.
+async function findAwaitingPlanningBookings() {
+  const bookings = await sbRequest('GET', 'bookings?status=in.(signed,onboarded)&select=id,event_name,client_contact_id');
+  const awaiting = [];
+  for (const booking of bookings) {
+    const latest = await sbRequest(
+      'GET',
+      `conversations?booking_id=eq.${booking.id}&stage=eq.planning_relay&order=created_at.desc&limit=1&select=direction`
+    );
+    if (latest[0]?.direction === 'inbound') {
+      awaiting.push(booking);
+    }
+  }
+  return awaiting;
+}
+
+// Matches a PM swipe-reply against the specific "forwarded to PM" message
+// for a planning conversation (as opposed to the client-facing thread).
+async function findPlanningBookingByForwardedMessageId(messageId) {
+  if (!messageId) return null;
+  const rows = await sbRequest(
+    'GET',
+    `conversations?whatsapp_message_id=eq.${encodeURIComponent(messageId)}&stage=eq.planning_relay_to_pm&select=booking_id&limit=1`
+  );
+  if (!rows[0]) return null;
+  const booking = await sbRequest('GET', `bookings?id=eq.${rows[0].booking_id}&select=id,event_name,client_contact_id`);
+  return booking[0] || null;
 }
 
 const input = $input.first().json.body;
@@ -213,6 +244,29 @@ if (trimmed.toLowerCase() === 'close') {
   return [{ json: { action: 'closed', booking_id: open.id } }];
 }
 
+// --- Explicit "[event name]: message" -- always-on planning conversations ---------
+// Signed/onboarded bookings have no open/close toggle (see stage1-code.js) --
+// this is how the PM addresses one directly, unambiguously, whether replying
+// or messaging first. Checked before everything else since it's explicit.
+const prefixMatch = trimmed.match(/^([^:]{2,60}):\s*([\s\S]+)$/);
+if (prefixMatch) {
+  const prefixMatches = await sbRequest(
+    'GET',
+    `bookings?event_name=ilike.*${encodeURIComponent(prefixMatch[1].trim())}*&status=in.(signed,onboarded)&select=id,event_name,client_contact_id`
+  );
+  if (prefixMatches.length === 1) {
+    const booking = prefixMatches[0];
+    const client = (await sbRequest('GET', `contacts?id=eq.${booking.client_contact_id}&select=*`))[0];
+    const replyBody = prefixMatch[2];
+    if (client?.phone_number) {
+      await sendWhatsApp(client.phone_number, replyBody);
+      await logConversation(booking.id, null, 'outbound', replyBody, 'planning_relay');
+    }
+    await logConversation(booking.id, contact_id, 'inbound', replyBody, 'pm_message');
+    return [{ json: { action: 'planning_relayed_to_client', booking_id: booking.id } }];
+  }
+}
+
 // --- Relay: a PM-led booking is open, forward verbatim to that client --------------
 const pmLed = await findPmLedBooking();
 if (pmLed) {
@@ -226,40 +280,70 @@ if (pmLed) {
   return [{ json: { action: 'relayed', booking_id: pmLed.id } }];
 }
 
-// --- Otherwise: is this an answer to a pending question? ---------------------------
+// --- Otherwise: is this an answer to a pending question, or a reply on an
+// always-on planning conversation? Treat both as one pool of "things needing
+// the PM's attention" so a lone open item -- of either kind -- auto-matches,
+// and only a genuine mix asks which one. -------------------------------------
 const pending = await findOpenPendingQuestions();
+const planningCandidates = await findAwaitingPlanningBookings();
 
-let target = null;
+let target = null; // a pending_questions row
+let planningTarget = null; // a booking row (signed/onboarded, awaiting reply)
 // The PM's actual reply text to act on -- normally the full message, but when
 // disambiguating by number (e.g. "2: yes") it's just the part after "2:".
 let answerText = text;
 
 if (reply_to_message_id) {
   target = pending.find((p) => p.whatsapp_message_id === reply_to_message_id) || null;
-} else if (pending.length === 1) {
-  target = pending[0];
-} else if (pending.length > 1) {
-  const numberedMatch = trimmed.match(/^(\d+)[:.)]\s*([\s\S]+)$/);
-  const numbered = numberedMatch && pending[parseInt(numberedMatch[1], 10) - 1];
-  if (numbered) {
-    target = numbered;
-    answerText = numberedMatch[2];
+  if (!target) {
+    planningTarget = await findPlanningBookingByForwardedMessageId(reply_to_message_id);
+  }
+} else {
+  const totalCandidates = pending.length + planningCandidates.length;
+  if (totalCandidates === 1) {
+    if (pending.length === 1) target = pending[0];
+    else planningTarget = planningCandidates[0];
+  } else if (totalCandidates > 1) {
+    const numberedMatch = trimmed.match(/^(\d+)[:.)]\s*([\s\S]+)$/);
+    const idx = numberedMatch ? parseInt(numberedMatch[1], 10) - 1 : -1;
+    if (idx >= 0 && idx < pending.length) {
+      target = pending[idx];
+      answerText = numberedMatch[2];
+    } else if (idx >= pending.length && idx < totalCandidates) {
+      planningTarget = planningCandidates[idx - pending.length];
+      answerText = numberedMatch[2];
+    }
+
+    if (!target && !planningTarget) {
+      const items = [
+        ...pending.map((p) => `"${p.bookings?.event_name || 'unknown event'}" -- ${p.question_text}`),
+        ...planningCandidates.map((b) => `"${b.event_name}" -- ongoing conversation, awaiting your reply`),
+      ];
+      const list = items.map((line, i) => `${i + 1}. ${line}`).join('\n');
+      await sendWhatsApp(
+        from_number,
+        `I've got a few things pending:\n${list}\n\nReply directly to the specific message (swipe to reply), start with the event name (e.g. "${planningCandidates[0]?.event_name || items[0] || 'Event'}: ..."), or just give me the number.`
+      );
+      return [{ json: { action: 'disambiguation_needed', pending_count: pending.length, planning_count: planningCandidates.length } }];
+    }
   }
 }
 
-if (!target && pending.length > 1) {
-  const list = pending
-    .map((p, i) => `${i + 1}. "${p.bookings?.event_name || 'unknown event'}" -- ${p.question_text}`)
-    .join('\n');
-  await sendWhatsApp(
-    from_number,
-    `I've got a few things pending:\n${list}\n\nReply directly to the specific message (swipe to reply), or just tell me the number and your answer, e.g. "2: yes".`
-  );
-  return [{ json: { action: 'disambiguation_needed', pending_count: pending.length } }];
+if (planningTarget) {
+  const client = (await sbRequest('GET', `contacts?id=eq.${planningTarget.client_contact_id}&select=*`))[0];
+  if (client?.phone_number) {
+    await sendWhatsApp(client.phone_number, answerText);
+    await logConversation(planningTarget.id, null, 'outbound', answerText, 'planning_relay');
+  }
+  await logConversation(planningTarget.id, contact_id, 'inbound', answerText, 'pm_message');
+  return [{ json: { action: 'planning_relayed_to_client', booking_id: planningTarget.id } }];
 }
 
 if (!target) {
-  await sendWhatsApp(from_number, "Not sure what that's for. Type \"open [event name]\" to take over a conversation, or let me know what you mean.");
+  await sendWhatsApp(
+    from_number,
+    'Not sure what that\'s for. Type "open [event name]" to take over a negotiation, start your message with the event name (e.g. "Amara\'s Wedding: ...") to reach a client directly, or let me know what you mean.'
+  );
   return [{ json: { action: 'unclassified' } }];
 }
 
@@ -301,7 +385,12 @@ if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
 if (target.field_name === 'contract_confirmed') {
   const saysYes = /^y(es)?\b/i.test(answerText.trim());
   if (saysYes) {
-    await sbPatch(`bookings?id=eq.${target.booking_id}`, { status: 'signed' });
+    // Release the negotiation lock (mode) along with the status flip -- once
+    // signed, this booking moves to the always-on planning relay instead of
+    // the single-slot "open"/"close" negotiation toggle, so the slot should
+    // free up immediately rather than staying occupied until someone
+    // remembers to "close" it.
+    await sbPatch(`bookings?id=eq.${target.booking_id}`, { status: 'signed', mode: 'bot-led' });
     await sendWhatsApp(from_number, "Marked as signed. Fanning out to departments now.");
   } else {
     await sendWhatsApp(from_number, "Got it, not confirmed. Ask the client to resend a valid signed copy.");
