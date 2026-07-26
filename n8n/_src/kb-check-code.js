@@ -146,32 +146,29 @@ if (action === 'check') {
     return [{ json: { action: 'kb_answered' } }];
   }
 
-  // Not found. If the client keeps asking while the PM still hasn't answered,
-  // repeating the exact same "let me check" line every time reads as broken --
-  // vary the wording by how many times this has already come up for this
-  // booking, and only actually ping the PM once per still-open matter.
+  // Not found. If this is the first time this has come up, stall with a warm
+  // line and actually escalate to the PM.
   const priorRows = bookingId
-    ? await sbRequest('GET', `pending_questions?booking_id=eq.${bookingId}&field_name=eq.kb_escalation&select=id,resolved_at&order=asked_at.asc`)
+    ? await sbRequest('GET', `pending_questions?booking_id=eq.${bookingId}&field_name=eq.kb_escalation&select=id,question_text,resolved_at&order=asked_at.asc`)
     : [];
   const openRow = priorRows.find((r) => !r.resolved_at) || null;
-  const STILL_WAITING_REPLIES = [
-    "Good question, let me check on that and get back to you!",
-    "Sorry, I'm still checking on that for you.",
-    "Still haven't been able to confirm that, sorry for the long wait.",
-  ];
-  const tier = Math.min(priorRows.length, STILL_WAITING_REPLIES.length - 1);
-  const waitingText = STILL_WAITING_REPLIES[tier];
-  await sendWhatsApp(from_number, waitingText);
-  if (bookingId) await logConversation(bookingId, contact_id, 'outbound', waitingText, 'kb_not_found');
-
   const pm = await findPm();
-  if (!pm || !bookingId) {
-    return [{ json: { action: 'kb_not_found_no_escalation_target' } }];
-  }
 
   if (!openRow) {
-    // First time this has come up, or the previous one already got answered --
-    // create a fresh escalation and actually ping the PM.
+    const STILL_WAITING_REPLIES = [
+      "Good question, let me check on that and get back to you!",
+      "Sorry, I'm still checking on that for you.",
+      "Still haven't been able to confirm that, sorry for the long wait.",
+    ];
+    const tier = Math.min(priorRows.length, STILL_WAITING_REPLIES.length - 1);
+    const waitingText = STILL_WAITING_REPLIES[tier];
+    await sendWhatsApp(from_number, waitingText);
+    if (bookingId) await logConversation(bookingId, contact_id, 'outbound', waitingText, 'kb_not_found');
+
+    if (!pm || !bookingId) {
+      return [{ json: { action: 'kb_not_found_no_escalation_target' } }];
+    }
+
     const booking = (await sbRequest('GET', `bookings?id=eq.${bookingId}&select=event_name`))[0];
     const pending = (await sbInsert('pending_questions', {
       booking_id: bookingId,
@@ -186,16 +183,48 @@ if (action === 'check') {
     return [{ json: { action: 'kb_escalated', pending_question_id: pending.id } }];
   }
 
-  // Already pending with the PM -- log a lightweight, auto-resolved tally row
-  // (it's not something the PM replies to) so a further repeat picks the next
-  // wording tier, without paging the PM again for the same still-open thing.
+  // Already pending with the PM. Rather than always repeating the same
+  // generic "still checking" line, actually read what the client just said --
+  // they might be adding a detail worth relaying to the PM, asking for a
+  // clarification we can address from the conversation itself, or genuinely
+  // just checking in with nothing new.
+  if (!bookingId) {
+    return [{ json: { action: 'kb_still_waiting_no_booking' } }];
+  }
+
+  const history = await sbRequest(
+    'GET',
+    `conversations?booking_id=eq.${bookingId}&order=created_at.desc&select=direction,message_text&limit=10`
+  );
+  const recentTranscript = history.reverse().map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`).join('\n');
+
+  const followUp = await askOpenAI(
+    `A client asked "${openRow.question_text}" and it's still waiting on an answer from our events team -- not something you can answer yourself. They just followed up with: "${text}"\n\nRecent conversation:\n${recentTranscript}\n\nClassify their follow-up and reply ONLY with JSON: {"type": "additional_info" | "clarification" | "check_in", "forward_note": "..." or null, "reply": "..."}\n\n- "additional_info": they're adding a new detail relevant to their booking or open question (a preference, a correction, extra context) that the team should know about. "forward_note" is a short, concrete note of what they added, to relay to the team. "reply" briefly and warmly confirms you've passed it along.\n- "clarification": they're asking you to restate or clarify something about their own situation, answerable from the conversation above without needing anything new from the team. "forward_note" is null. "reply" directly answers it, warm and brief.\n- "check_in": just checking in, repeating impatience, or nothing new to act on -- you genuinely don't have an answer yet. "forward_note" is null. "reply" is a warm acknowledgment that you're still on it -- vary the wording, never repeat a line already used in the conversation above.\n\nNever sound like an AI or a hype machine: no "Awesome!", no exclamation-point enthusiasm.`,
+    text || ''
+  );
+
+  const followUpType = followUp?.type || 'check_in';
+  const replyText = followUp?.reply || "Still checking on that for you, sorry for the wait.";
+
+  if (followUpType === 'additional_info' && followUp.forward_note && pm) {
+    const booking = (await sbRequest('GET', `bookings?id=eq.${bookingId}&select=event_name`))[0];
+    const forwardText = `Update on "${booking?.event_name || 'an inquiry'}" (re: "${openRow.question_text}"): ${followUp.forward_note}`;
+    await sendWhatsApp(pm.phone_number, forwardText);
+    await logConversation(bookingId, null, 'outbound', `[relayed to PM] ${followUp.forward_note}`, 'kb_additional_info_forwarded');
+  }
+
+  await sendWhatsApp(from_number, replyText);
+  await logConversation(bookingId, null, 'outbound', replyText, `kb_${followUpType}`);
+
+  // Tally row, resolved immediately -- not something the PM replies to, just
+  // keeps the wording-tier count moving for any future genuinely-new question.
   await sbInsert('pending_questions', {
     booking_id: bookingId,
     field_name: 'kb_escalation',
     question_text: text,
     resolved_at: new Date().toISOString(),
   });
-  return [{ json: { action: 'kb_still_waiting', pending_question_id: openRow.id } }];
+  return [{ json: { action: `kb_still_waiting_${followUpType}`, pending_question_id: openRow.id } }];
 }
 
 if (action === 'resolve_escalation') {
