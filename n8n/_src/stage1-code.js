@@ -129,8 +129,13 @@ async function getPastBookings(contactId, excludeBookingId) {
   );
 }
 
-// Intake just finished -- give the PM a summary (not a play-by-play) and the
-// exact command to take over the live conversation directly with the client.
+// Intake just finished. Negotiation is a one-at-a-time, single-slot
+// conversation (bookings.mode = 'pm-led', DB-enforced to at most one row) --
+// if the PM is free, take this straight to the front and open it
+// automatically, no reason to make him type "open X" for the only thing
+// waiting. If he's already mid-negotiation with someone else, this joins
+// the FIFO queue instead (ordered by negotiation_queued_at) and opens
+// itself automatically the moment he types "close" -- see pm-toggle-code.js.
 async function notifyPmOfCompletedIntake(booking) {
   const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
   const pm = pmRows[0];
@@ -144,16 +149,46 @@ async function notifyPmOfCompletedIntake(booking) {
     }
   }
 
-  const lines = [
+  const summaryLines = [
     `New booking ready: "${booking.event_name}"`,
     `Date: ${booking.event_date}`,
     `Type: ${booking.event_type}`,
     `${booking.is_existing_client ? 'Returning' : 'New'} client${booking.client_reference ? ` -- ${booking.client_reference}` : ''}`,
     ...(historyLine ? [historyLine] : []),
-    '',
-    `Reply "open ${booking.event_name}" when you're ready to talk pricing directly with the client -- I'll relay everything through until you type "close".`,
   ];
-  await sendWhatsApp(pm.phone_number, lines.join('\n'));
+
+  const activeRows = await sbRequest('GET', 'bookings?mode=eq.pm-led&limit=1&select=id');
+  if (activeRows.length === 0) {
+    // Nobody's open right now -- take this straight to the front.
+    await sbPatch(`bookings?id=eq.${booking.id}`, { mode: 'pm-led' });
+    const history = await sbRequest(
+      'GET',
+      `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text`
+    );
+    const transcriptLines = history.length > 0
+      ? [`Conversation so far for "${booking.event_name}":`, ...history.map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`)]
+      : [];
+    await sendWhatsApp(pm.phone_number, [
+      ...summaryLines,
+      '',
+      ...transcriptLines,
+      ...(transcriptLines.length > 0 ? [''] : []),
+      `Opened "${booking.event_name}" -- I'll relay everything straight through until you type "close".`,
+    ].join('\n'));
+    return;
+  }
+
+  // Someone else is already open -- join the queue instead of asking the PM
+  // to juggle a manual "open" command he can't act on yet anyway.
+  const queued = await sbRequest('GET', 'bookings?status=eq.negotiating&mode=eq.bot-led&select=id');
+  const aheadCount = Math.max(queued.length - 1, 0); // this booking is included in queued
+  await sendWhatsApp(pm.phone_number, [
+    ...summaryLines,
+    '',
+    aheadCount === 0
+      ? "You're still with another client -- I'll bring this one up automatically as soon as you type \"close\"."
+      : `Queued behind ${aheadCount} other${aheadCount === 1 ? '' : 's'} -- I'll bring it up automatically once it's next.`,
+  ].join('\n'));
 }
 
 // Voice notes arrive as WhatsApp "audio" media -- download via Meta's media API
@@ -578,7 +613,7 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_name"?:
   );
   const justCompleted = missingAfter.length === 0 && booking.status === 'inquiry';
   if (justCompleted) {
-    await sbPatch(`bookings?id=eq.${booking.id}`, { status: 'negotiating' });
+    await sbPatch(`bookings?id=eq.${booking.id}`, { status: 'negotiating', negotiation_queued_at: new Date().toISOString() });
     booking.status = 'negotiating';
   }
 

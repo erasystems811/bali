@@ -132,9 +132,34 @@ Instead:
   to `bot-led` in the same patch that sets `status: 'signed'`, so the PM's
   single "open" slot frees up immediately instead of staying occupied until
   someone remembers to `close` it.
-- Still ahead: a proper queue for the pre-signature negotiation phase itself
-  (sequential, one at a time, auto-advancing on `close`) — agreed on
-  separately, not yet built.
+## Pre-signature negotiation queue (2026-07-26, new)
+
+Negotiation stays single-slot/sequential (`bookings.mode = 'pm-led'`, DB-enforced
+to at most one row) — unlike planning, a deal genuinely needs full attention
+one at a time until it's priced. What changed is the PM no longer needs to
+know who's next or type their name to get there:
+
+- **`negotiation_queued_at`** (new column) is stamped the moment a booking's
+  status flips to `negotiating` (intake just completed). It's the FIFO
+  ordering key for the queue: whoever finished intake first goes first.
+- **If the PM is free when intake completes, it opens automatically** —
+  `notifyPmOfCompletedIntake` checks for an active `pm-led` booking; if
+  there's none, it flips this one to `pm-led` itself and sends the same
+  conversation-so-far + "opened" message `open [event name]` would have, no
+  command needed. If the PM is already negotiating with someone else, this
+  one just joins the queue with a short "queued behind N others" note instead
+  of the old "reply open X" instruction (which he couldn't act on yet anyway).
+- **`close` auto-advances** — after closing (and, if the booking was still
+  `negotiating`, kicking off the invoice as before), it queries for the
+  oldest `negotiating` + `mode = 'bot-led'` booking and opens it automatically
+  via the same `openBookingForPm` helper the manual `open` command now also
+  uses, worded "Next up: ..." instead of "Opened ...".
+- **`open [event name]` still works as a manual override** — jumping to a
+  specific booking out of FIFO order doesn't remove anything else from the
+  queue, it just changes which one is currently active.
+- Not built: a way for the PM to see the queue on demand (e.g. a `queue`
+  command listing who's waiting) — worth adding if the "queued behind N
+  others" note ever isn't enough context.
 
 ## Admin visibility (Retool) — now built
 

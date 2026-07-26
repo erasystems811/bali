@@ -59,6 +59,10 @@ create table bookings (
   security_notes text, -- "vigilante" needs etc.
   day_of_checklist_sent_at timestamptz, -- Section 6: setup checklist to supervisor + facility manager
   last_lawyer_nudge_at timestamptz, -- Section 5: 24h nudge while awaiting_contract
+  -- Set when status becomes 'negotiating'. Drives the FIFO negotiation queue:
+  -- the oldest bot-led, still-negotiating booking is next up when the PM
+  -- closes whatever's currently open (see pm-toggle-code.js).
+  negotiation_queued_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

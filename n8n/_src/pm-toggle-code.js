@@ -124,6 +124,24 @@ async function findPmLedBooking() {
   return rows[0] || null;
 }
 
+// Shared by the manual "open [event name]" command and the auto-advance that
+// fires on "close" -- opening a booking always means the same thing: flip
+// the lock, show what's already been discussed, and tell the PM it's live.
+async function openBookingForPm(booking, fromNumber, { auto } = {}) {
+  await sbPatch(`bookings?id=eq.${booking.id}`, { mode: 'pm-led' });
+
+  const history = await sbRequest('GET', `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text`);
+  if (history.length > 0) {
+    const transcript = history.map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`).join('\n');
+    await sendWhatsApp(fromNumber, `Conversation so far for "${booking.event_name}":\n${transcript}`);
+  }
+
+  const openedLine = auto
+    ? `Next up: "${booking.event_name}". I'll relay everything straight through until you type "close".`
+    : `Opened "${booking.event_name}". I'll relay everything straight through until you type "close".`;
+  await sendWhatsApp(fromNumber, openedLine);
+}
+
 async function findOpenPendingQuestions() {
   return sbRequest('GET', 'pending_questions?resolved_at=is.null&select=*,bookings(*)');
 }
@@ -204,17 +222,7 @@ if (openMatch) {
     return [{ json: { action: 'open_not_found', query: eventName } }];
   }
   const booking = matches[0];
-  await sbPatch(`bookings?id=eq.${booking.id}`, { mode: 'pm-led' });
-
-  // The PM shouldn't have to go dig through Retool to see what the bot and
-  // client already discussed before taking over.
-  const history = await sbRequest('GET', `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text`);
-  if (history.length > 0) {
-    const transcript = history.map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`).join('\n');
-    await sendWhatsApp(from_number, `Conversation so far for "${booking.event_name}":\n${transcript}`);
-  }
-
-  await sendWhatsApp(from_number, `Opened "${booking.event_name}". I'll relay everything straight through until you type "close".`);
+  await openBookingForPm(booking, from_number);
   return [{ json: { action: 'opened', booking_id: booking.id } }];
 }
 
@@ -241,7 +249,18 @@ if (trimmed.toLowerCase() === 'close') {
       timeout: 15000,
     });
   }
-  return [{ json: { action: 'closed', booking_id: open.id } }];
+
+  // FIFO auto-advance: whoever's been waiting longest opens automatically,
+  // no need for the PM to know their name or type "open" himself.
+  const nextInQueue = await sbRequest(
+    'GET',
+    'bookings?status=eq.negotiating&mode=eq.bot-led&order=negotiation_queued_at.asc&limit=1&select=*'
+  );
+  if (nextInQueue.length > 0) {
+    await openBookingForPm(nextInQueue[0], from_number, { auto: true });
+  }
+
+  return [{ json: { action: 'closed', booking_id: open.id, next_booking_id: nextInQueue[0]?.id || null } }];
 }
 
 // --- Explicit "[event name]: message" -- always-on planning conversations ---------
