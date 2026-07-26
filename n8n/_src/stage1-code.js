@@ -55,24 +55,78 @@ async function askOpenAIJson(systemPrompt, userText) {
   }
 }
 
-async function sendWhatsApp(toNumber, text) {
+function sanitizeTemplateParam(text) {
+  return String(text || '')
+    .replace(/[\r\n]+/g, ' -- ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+    .slice(0, 1000) || '(see details)';
+}
+
+// WhatsApp rejects free-form text once 24h have passed since the recipient's
+// last inbound message (error 131047) -- many of our sends (PM notifications,
+// escalations, staff pings) are proactive and can easily land outside that
+// window. Fall back to the approved "bali_notification" utility template
+// (single body variable) instead of the send just failing.
+async function sendWhatsAppTemplate(toNumber, text) {
   const res = await helpers.httpRequest({
     method: 'POST',
     url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
-    headers: {
-      Authorization: `Bearer ${env.META_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
     body: {
       messaging_product: 'whatsapp',
       to: toNumber,
-      type: 'text',
-      text: { body: text },
+      type: 'template',
+      template: {
+        name: 'bali_notification',
+        language: { code: 'en_US' },
+        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(text) }] }],
+      },
     },
     json: true,
     timeout: 20000,
   });
   return res?.messages?.[0]?.id || null;
+}
+
+async function sendWhatsApp(toNumber, text) {
+  try {
+    const res = await helpers.httpRequest({
+      method: 'POST',
+      url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
+      headers: {
+        Authorization: `Bearer ${env.META_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: {
+        messaging_product: 'whatsapp',
+        to: toNumber,
+        type: 'text',
+        text: { body: text },
+      },
+      json: true,
+      timeout: 20000,
+    });
+    return res?.messages?.[0]?.id || null;
+  } catch (err) {
+    let errStr;
+    try { errStr = JSON.stringify(err, Object.getOwnPropertyNames(err)); } catch (e) { errStr = String(err); }
+    errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
+    if (errStr.includes('131047')) {
+      return sendWhatsAppTemplate(toNumber, text);
+    }
+    throw err;
+  }
+}
+
+// Real booking history for this contact (signed/onboarded only -- not just
+// self-reported) so "returning client" means something verified, not just
+// whatever the client happened to claim.
+async function getPastBookings(contactId, excludeBookingId) {
+  return sbRequest(
+    'GET',
+    `bookings?client_contact_id=eq.${contactId}&status=in.(signed,onboarded)&id=neq.${excludeBookingId}&select=event_name,event_date&order=event_date.desc&limit=5`
+  );
 }
 
 // Intake just finished -- give the PM a summary (not a play-by-play) and the
@@ -82,11 +136,20 @@ async function notifyPmOfCompletedIntake(booking) {
   const pm = pmRows[0];
   if (!pm) return;
 
+  let historyLine = null;
+  if (booking.is_existing_client) {
+    const past = await getPastBookings(booking.client_contact_id, booking.id);
+    if (past.length > 0) {
+      historyLine = `Past bookings: ${past.map((b) => `"${b.event_name}" (${b.event_date || 'date unknown'})`).join(', ')}`;
+    }
+  }
+
   const lines = [
     `New booking ready: "${booking.event_name}"`,
     `Date: ${booking.event_date}`,
     `Type: ${booking.event_type}`,
     `${booking.is_existing_client ? 'Returning' : 'New'} client${booking.client_reference ? ` -- ${booking.client_reference}` : ''}`,
+    ...(historyLine ? [historyLine] : []),
     '',
     `Reply "open ${booking.event_name}" when you're ready to talk pricing directly with the client -- I'll relay everything through until you type "close".`,
   ];
@@ -403,6 +466,18 @@ Write one brief, warm, professional reassurance letting them know you're still o
   // (2) write ONE fresh reply grounded in what actually just happened (a real
   // DB-checked date result, what's still missing) -- never a fixed canned
   // string, so two visits to the same field never sound identical.
+
+  // If we can already PROVE this is a returning client from real booking
+  // history, don't bother asking -- a self-report is only needed when we
+  // genuinely don't know.
+  if (booking.is_existing_client === null || booking.is_existing_client === undefined) {
+    const pastBookings = await getPastBookings(contact.id, booking.id);
+    if (pastBookings.length > 0) {
+      await sbPatch(`bookings?id=eq.${booking.id}`, { is_existing_client: true });
+      booking.is_existing_client = true;
+    }
+  }
+
   const history = await sbRequest(
     'GET',
     `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text&limit=40`

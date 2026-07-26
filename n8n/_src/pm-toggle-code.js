@@ -29,18 +29,60 @@ async function sbPatch(path, body) {
   return sbRequest('PATCH', path, body, { Prefer: 'return=representation' });
 }
 
-async function sendWhatsApp(toNumber, text) {
+function sanitizeTemplateParam(text) {
+  return String(text || '')
+    .replace(/[\r\n]+/g, ' -- ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+    .slice(0, 1000) || '(see details)';
+}
+
+// WhatsApp rejects free-form text once 24h have passed since the recipient's
+// last inbound message (error 131047) -- fall back to the approved
+// "bali_notification" utility template (single body variable) instead of
+// the send just failing.
+async function sendWhatsAppTemplate(toNumber, text) {
   return helpers.httpRequest({
     method: 'POST',
     url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
-    headers: {
-      Authorization: `Bearer ${env.META_TOKEN}`,
-      'Content-Type': 'application/json',
+    headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
+    body: {
+      messaging_product: 'whatsapp',
+      to: toNumber,
+      type: 'template',
+      template: {
+        name: 'bali_notification',
+        language: { code: 'en_US' },
+        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(text) }] }],
+      },
     },
-    body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
     json: true,
     timeout: 20000,
   });
+}
+
+async function sendWhatsApp(toNumber, text) {
+  try {
+    return await helpers.httpRequest({
+      method: 'POST',
+      url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
+      headers: {
+        Authorization: `Bearer ${env.META_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
+      json: true,
+      timeout: 20000,
+    });
+  } catch (err) {
+    let errStr;
+    try { errStr = JSON.stringify(err, Object.getOwnPropertyNames(err)); } catch (e) { errStr = String(err); }
+    errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
+    if (errStr.includes('131047')) {
+      return sendWhatsAppTemplate(toNumber, text);
+    }
+    throw err;
+  }
 }
 
 async function openaiExtract(fieldPrompt, userText) {
