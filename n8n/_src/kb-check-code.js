@@ -207,9 +207,15 @@ if (action === 'check') {
   const replyText = followUp?.reply || "Still checking on that for you, sorry for the wait.";
 
   if (followUpType === 'additional_info' && followUp.forward_note && pm) {
+    // Actually resend the open question to the PM (not just a passive FYI) --
+    // restate it in full with the new detail attached, and re-point the
+    // pending question's whatsapp_message_id at this message so a swipe-reply
+    // to it still matches correctly (the original escalation message may be
+    // scrolled past by now).
     const booking = (await sbRequest('GET', `bookings?id=eq.${bookingId}&select=event_name`))[0];
-    const forwardText = `Update on "${booking?.event_name || 'an inquiry'}" (re: "${openRow.question_text}"): ${followUp.forward_note}`;
-    await sendWhatsApp(pm.phone_number, forwardText);
+    const forwardText = `Following up on "${booking?.event_name || 'an inquiry'}": "${openRow.question_text}"\n\nClient just added: ${followUp.forward_note}\n\nReply directly to this message with the answer.`;
+    const msgId = await sendWhatsApp(pm.phone_number, forwardText);
+    if (msgId) await sbPatch(`pending_questions?id=eq.${openRow.id}`, { whatsapp_message_id: msgId });
     await logConversation(bookingId, null, 'outbound', `[relayed to PM] ${followUp.forward_note}`, 'kb_additional_info_forwarded');
   }
 
