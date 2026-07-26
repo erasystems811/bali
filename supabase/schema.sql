@@ -17,7 +17,8 @@ create table contacts (
   role text not null default 'customer'
     check (role in ('customer', 'pm', 'lawyer', 'hr', 'procurement', 'accounts',
                      'event_assistant', 'security', 'supervisor', 'facility_manager',
-                     'staff', 'vendor')),
+                     'staff', 'vendor', 'floor_manager', 'stage_manager', 'bar_lead',
+                     'social_media_manager')),
   permission_level text not null default 'standard',
   tags text[] not null default '{}',
   created_at timestamptz not null default now()
