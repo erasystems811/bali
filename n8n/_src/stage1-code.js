@@ -297,14 +297,14 @@ function resolveRelativeDate(rawText) {
   return null; // not a relative phrase we handle -- let the model's own reading stand
 }
 
-const GREETING = "Hey! 😊 Would you be interested in booking Bali for your event? To get started, let me know: the date you're looking at, what kind of event it is, a short name for it, and any Instagram, TikTok, or website you have for it.";
+const GREETING = "Hey! 😊 Interested in booking Bali? Just share: the date, event type, event name, and any IG/website you've got.";
 
 const FIELD_LABELS = {
-  event_date: 'the event date',
-  event_name: 'a short name for the event',
-  event_type: 'what type of event it is and how we can help make it work',
-  is_existing_client: 'whether they have booked with us before',
-  client_reference: 'their Instagram, TikTok, website, or other page for the event/business',
+  event_date: 'the date',
+  event_name: 'a short name for it',
+  event_type: 'what type of event it is',
+  is_existing_client: 'if they have booked with us before',
+  client_reference: 'their IG, TikTok, or website',
 };
 
 // Asked of every client now, not just returning ones -- useful context for the
@@ -654,6 +654,8 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_name"?:
   const replyResult = await askOpenAIJson(
     `You're Bali, an event venue's WhatsApp assistant, texting a client during booking intake. Warm, professional, and helpful -- brief and human, like a staff member texting. Never sound like an AI or a hype machine: no "Awesome!", no exclamation-point enthusiasm, no repeating a phrase you've already used earlier in this conversation.
 
+KEEP IT SHORT -- this is WhatsApp, not email. One short sentence, occasionally two. Never a paragraph, never more than about 25 words, no line breaks, no bullet points or numbered lists -- the client shouldn't have to scroll to read it. Even when asking about several missing details at once, fit them into one tight, casual sentence (e.g. "What's the date, event type, and do you have an IG or website for it?"), not a formal itemized list.
+
 Conversation so far:
 ${transcript}
 Client: ${effectiveText || ''}
@@ -667,7 +669,7 @@ What actually happened this turn: ${JSON.stringify({
       intake_just_completed: justCompleted,
     })}
 
-Write the next message to send the client, in plain text (not JSON, this field's value IS the message). Rules: if still_missing_event_details has more than one item, ask for all of them together in ONE natural, warmly-phrased message -- not a rigid numbered/bulleted list, just a normal sentence covering all of them, the way a person would ask. If it has exactly one item, just ask that one thing. If a date was just rejected as already booked, say so plainly and ask for an alternative -- don't apologize excessively -- and still fold in any other still_missing_event_details into the same message. When asking about event type, ask it open-ended -- never offer a multiple-choice list like "a birthday, a wedding, or something else", just ask what kind of event it is and how we can help. If still_need_returning_client_question_alone is true, ask ONLY "have you booked with us before?" (or similar) by itself, nothing else bundled in. If intake_just_completed is true, say only something brief like "Give me a moment, I'll follow up with you shortly" -- do NOT mention an events manager or any other person, just that you'll follow up, and don't ask anything further. If a knowledge base question is pending, briefly acknowledge you're checking on it, then still ask about whatever's in still_missing_event_details or still_need_returning_client_question_alone (or note you'll follow up if both are empty/false). If nothing new was understood at all, ask again for whatever's still missing, phrased differently than however you might have asked it earlier in this conversation.
+Write the next message to send the client, in plain text (not JSON, this field's value IS the message). Rules: if still_missing_event_details has more than one item, ask for all of them together in ONE short sentence -- not a list. If it has exactly one item, just ask that one thing. If a date was just rejected as already booked, say so plainly and ask for an alternative -- don't apologize excessively -- and still fold in any other still_missing_event_details into the same short message. When asking about event type, ask it open-ended -- never offer a multiple-choice list like "a birthday, a wedding, or something else", just ask what kind of event it is. If still_need_returning_client_question_alone is true, ask ONLY "have you booked with us before?" (or similar) by itself, nothing else bundled in. If intake_just_completed is true, say only something brief like "Give me a moment, I'll follow up with you shortly" -- do NOT mention an events manager or any other person, just that you'll follow up, and don't ask anything further. If a knowledge base question is pending, briefly acknowledge you're checking on it, then still ask about whatever's in still_missing_event_details or still_need_returning_client_question_alone (or note you'll follow up if both are empty/false) -- still one short sentence total. If nothing new was understood at all, ask again for whatever's still missing, phrased differently than however you might have asked it earlier in this conversation, still short.
 
 Reply ONLY with JSON: {"reply": "..."}`,
     effectiveText || ''
