@@ -10,6 +10,7 @@ const env = {
   META_TOKEN: $env.META_ACCESS_TOKEN,
   META_PHONE_ID: $env.META_PHONE_NUMBER_ID,
   GOTENBERG_URL: $env.GOTENBERG_URL,
+  N8N_BASE_URL: $env.N8N_BASE_URL,
 };
 
 const sbHeaders = {
@@ -127,40 +128,40 @@ async function sendWhatsAppDocument(toNumber, mediaId, filename, caption) {
   return res?.messages?.[0]?.id || null;
 }
 
-// Renders invoice HTML (styled to match the real BALI-2026-003 template) via the
-// self-hosted Gotenberg service and returns the PDF as a Buffer.
+// Renders invoice HTML (styled to match the real BALI-2026-003 template) to a
+// PDF Buffer. Goes through a small internal sub-workflow (Webhook -> Code
+// [prepareBinaryData] -> HTTP Request -> Respond to Webhook) instead of
+// calling Gotenberg directly from this Code node -- confirmed live that this
+// n8n version's Code-node `helpers.httpRequest` cannot correctly send
+// multipart/form-data (every construction attempt either sent 0 bytes,
+// mangled the buffer into something ~100x larger than intended, or got the
+// Content-Type/boundary wrong -- verified via Gotenberg's own server logs,
+// not guesswork). The dedicated HTTP Request node has mature native
+// multipart/binary support and is confirmed working. See the "Render PDF"
+// node chain in this workflow (Webhook path `bali-render-pdf`).
 async function renderPdf(html) {
   return helpers.httpRequest({
     method: 'POST',
-    url: `${env.GOTENBERG_URL}/forms/chromium/convert/html`,
-    formData: {
-      files: {
-        value: Buffer.from(html, 'utf8'),
-        options: { filename: 'index.html', contentType: 'text/html' },
-      },
-    },
+    url: `${env.N8N_BASE_URL}/webhook/bali-render-pdf`,
+    body: { html },
+    json: true,
     encoding: 'arraybuffer',
-    returnFullResponse: false,
-    json: false,
     timeout: 30000,
   });
 }
 
 // Uploads a PDF buffer to Meta's media library so it can be attached to a
-// WhatsApp document message. Returns the media id.
+// WhatsApp document message. Returns the media id. Same reason as renderPdf:
+// goes through a dedicated HTTP Request node sub-workflow (Webhook ->
+// prepareBinaryData -> HTTP Request -> Respond) instead of a direct
+// helpers.httpRequest formData call, which is confirmed broken in this
+// n8n version for multipart uploads.
 async function uploadWhatsAppMedia(pdfBuffer, filename) {
+  const buf = Buffer.isBuffer(pdfBuffer) ? pdfBuffer : Buffer.from(pdfBuffer);
   const res = await helpers.httpRequest({
     method: 'POST',
-    url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/media`,
-    headers: { Authorization: `Bearer ${env.META_TOKEN}` },
-    formData: {
-      messaging_product: 'whatsapp',
-      type: 'application/pdf',
-      file: {
-        value: Buffer.isBuffer(pdfBuffer) ? pdfBuffer : Buffer.from(pdfBuffer),
-        options: { filename, contentType: 'application/pdf' },
-      },
-    },
+    url: `${env.N8N_BASE_URL}/webhook/bali-upload-media`,
+    body: { pdfBase64: buf.toString('base64'), filename },
     json: true,
     timeout: 30000,
   });
