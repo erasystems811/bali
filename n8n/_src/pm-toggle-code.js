@@ -408,6 +408,7 @@ if (target.field_name === 'kb_escalation' || target.field_name === 'kb_save_conf
 }
 
 const STAGE3_4_DELEGATED_FIELDS = {
+  invoice_draft_confirm: 'resolve_invoice_draft_confirm',
   invoice_approval: 'resolve_invoice_approval',
   contract_approval: 'resolve_contract_approval',
   payment_confirmed: 'resolve_payment_confirmed',

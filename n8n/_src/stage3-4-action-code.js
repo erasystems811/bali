@@ -329,6 +329,52 @@ async function nextInvoiceNumber() {
   return `BALI-${year}-${String(seq).padStart(3, '0')}`;
 }
 
+// Plain-text summary of the extracted line items/terms, sent to the PM
+// BEFORE any PDF is generated -- owner's call: confirm the underlying
+// numbers are right first, don't waste a PDF render on a misread.
+function formatInvoiceDraftText(invoice, booking) {
+  const lines = [
+    `Draft invoice details for "${booking.event_name}" -- please confirm this is accurate before I generate the PDF:`,
+    ...invoice.line_items.map((li) => `- ${li.description}: ${formatMoney(li.amount)}`),
+    `- Payment terms: ${invoice.payment_terms || '(not specified)'}`,
+    `- Bill to: ${invoice.bill_to_name ? invoice.bill_to_name + (invoice.bill_to_location ? `, ${invoice.bill_to_location}` : '') : '(not specified)'}`,
+    '',
+    'Reply "yes" if this is accurate, or tell me what to add or change.',
+  ];
+  return lines.join('\n');
+}
+
+// Extracts a corrected {line_items, payment_terms, bill_to_name,
+// bill_to_location} from the PM's free-text correction against the
+// invoice's current values -- shared by both the pre-PDF draft-confirm
+// loop and the post-PDF approval loop.
+async function extractInvoiceCorrection(invoice, answerText) {
+  return askOpenAIJson(
+    `Here is a draft invoice's current line items and payment terms as JSON: ${JSON.stringify({ line_items: invoice.line_items, payment_terms: invoice.payment_terms, bill_to_name: invoice.bill_to_name, bill_to_location: invoice.bill_to_location })}\n\nThe PM has requested this correction: "${answerText}"\n\nReply ONLY with the corrected JSON in the exact same shape: {"line_items": [{"description": "...", "amount": <number>}], "payment_terms": "...", "bill_to_name": "...", "bill_to_location": "..."}.`,
+    answerText
+  );
+}
+
+function recomputeInvoiceTotals(lineItems) {
+  const subtotal = lineItems.reduce((s, li) => s + Number(li.amount || 0), 0);
+  const vat = subtotal * 0.075;
+  const wht = subtotal * 0.02;
+  const total = subtotal + vat - wht;
+  return { subtotal, vat, wht, total };
+}
+
+// Phase 2: generates the actual PDF from the now-confirmed invoice and
+// sends it to the PM for final visual approval before it goes to the client.
+async function sendInvoiceForFinalApproval(invoice, booking) {
+  const pm = await findPm();
+  const caption = `Invoice ${invoice.invoice_number} for "${booking.event_name}" -- reply to THIS message with any corrections, or reply "yes" to approve and send to the client.`;
+  const pending = (await sbInsert('pending_questions', { booking_id: booking.id, field_name: 'invoice_approval', question_text: caption }))[0];
+  if (pm) {
+    const msgId = await sendInvoicePdf(pm.phone_number, invoice, booking, caption);
+    if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
+  }
+}
+
 async function draftInvoice(bookingId) {
   const booking = await getBooking(bookingId);
   const convo = await sbRequest('GET', `conversations?booking_id=eq.${bookingId}&order=created_at.asc&select=direction,message_text`);
@@ -344,10 +390,7 @@ async function draftInvoice(bookingId) {
     return { ok: false, reason: 'extraction_failed' };
   }
 
-  const subtotal = extraction.line_items.reduce((s, li) => s + Number(li.amount || 0), 0);
-  const vat = subtotal * 0.075;
-  const wht = subtotal * 0.02;
-  const total = subtotal + vat - wht;
+  const { subtotal, vat, wht, total } = recomputeInvoiceTotals(extraction.line_items);
   const invoiceNumber = await nextInvoiceNumber();
 
   const invoice = (await sbInsert('invoices', {
@@ -364,11 +407,13 @@ async function draftInvoice(bookingId) {
     status: 'pending_pm_approval',
   }))[0];
 
+  // Phase 1: confirm the underlying numbers as plain text before spending a
+  // PDF render on them -- see formatInvoiceDraftText.
   const pm = await findPm();
-  const caption = `Invoice ${invoiceNumber} for "${booking.event_name}" -- reply to THIS message with any corrections, or reply "yes" to approve and send to the client.`;
-  const pending = (await sbInsert('pending_questions', { booking_id: bookingId, field_name: 'invoice_approval', question_text: caption }))[0];
+  const draftText = formatInvoiceDraftText(invoice, booking);
+  const pending = (await sbInsert('pending_questions', { booking_id: bookingId, field_name: 'invoice_draft_confirm', question_text: draftText }))[0];
   if (pm) {
-    const msgId = await sendInvoicePdf(pm.phone_number, invoice, booking, caption);
+    const msgId = await sendWhatsApp(pm.phone_number, draftText);
     if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
   }
 
@@ -381,6 +426,48 @@ async function draftInvoice(bookingId) {
   return { ok: true, invoice_id: invoice.id };
 }
 
+// Phase 1 resolution: PM confirming/correcting the plain-text draft, before
+// any PDF exists yet.
+async function resolveInvoiceDraftConfirm(pendingId, answerText) {
+  const pq = (await sbRequest('GET', `pending_questions?id=eq.${pendingId}&select=*`))[0];
+  const booking = await getBooking(pq.booking_id);
+  const invoice = (await sbRequest('GET', `invoices?booking_id=eq.${pq.booking_id}&order=created_at.desc&limit=1&select=*`))[0];
+
+  if (/^y(es)?\b/i.test((answerText || '').trim())) {
+    await sendInvoiceForFinalApproval(invoice, booking);
+    return { ok: true, action: 'invoice_draft_confirmed_pdf_sent' };
+  }
+
+  const extraction = await extractInvoiceCorrection(invoice, answerText);
+  if (!extraction) {
+    const pm = await findPm();
+    if (pm) await sendWhatsApp(pm.phone_number, "Didn't catch that correction -- can you say it again?");
+    return { ok: false };
+  }
+
+  const { subtotal, vat, wht, total } = recomputeInvoiceTotals(extraction.line_items);
+  const updated = (await sbPatch(`invoices?id=eq.${invoice.id}`, {
+    line_items: extraction.line_items,
+    payment_terms: extraction.payment_terms || invoice.payment_terms,
+    bill_to_name: extraction.bill_to_name || invoice.bill_to_name,
+    bill_to_location: extraction.bill_to_location || invoice.bill_to_location,
+    subtotal,
+    vat_amount: vat,
+    wht_amount: wht,
+    total_net_payable: total,
+  }))[0];
+
+  const pm = await findPm();
+  const draftText = formatInvoiceDraftText(updated, booking);
+  const pending = (await sbInsert('pending_questions', { booking_id: booking.id, field_name: 'invoice_draft_confirm', question_text: draftText }))[0];
+  if (pm) {
+    const msgId = await sendWhatsApp(pm.phone_number, draftText);
+    if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
+  }
+  return { ok: true, action: 'invoice_draft_corrected' };
+}
+
+// Phase 2 resolution: PM approving/correcting the actual PDF.
 async function resolveInvoiceApproval(pendingId, answerText) {
   const pq = (await sbRequest('GET', `pending_questions?id=eq.${pendingId}&select=*`))[0];
   const booking = await getBooking(pq.booking_id);
@@ -396,21 +483,14 @@ async function resolveInvoiceApproval(pendingId, answerText) {
     return { ok: true, action: 'invoice_sent_to_client' };
   }
 
-  const extraction = await askOpenAIJson(
-    `Here is a draft invoice's current line items and payment terms as JSON: ${JSON.stringify({ line_items: invoice.line_items, payment_terms: invoice.payment_terms, bill_to_name: invoice.bill_to_name, bill_to_location: invoice.bill_to_location })}\n\nThe PM has requested this correction: "${answerText}"\n\nReply ONLY with the corrected JSON in the exact same shape: {"line_items": [{"description": "...", "amount": <number>}], "payment_terms": "...", "bill_to_name": "...", "bill_to_location": "..."}.`,
-    answerText
-  );
+  const extraction = await extractInvoiceCorrection(invoice, answerText);
   if (!extraction) {
     const pm = await findPm();
     if (pm) await sendWhatsApp(pm.phone_number, "Didn't catch that correction -- can you say it again?");
     return { ok: false };
   }
 
-  const subtotal = extraction.line_items.reduce((s, li) => s + Number(li.amount || 0), 0);
-  const vat = subtotal * 0.075;
-  const wht = subtotal * 0.02;
-  const total = subtotal + vat - wht;
-
+  const { subtotal, vat, wht, total } = recomputeInvoiceTotals(extraction.line_items);
   const updated = (await sbPatch(`invoices?id=eq.${invoice.id}`, {
     line_items: extraction.line_items,
     payment_terms: extraction.payment_terms || invoice.payment_terms,
@@ -422,13 +502,7 @@ async function resolveInvoiceApproval(pendingId, answerText) {
     total_net_payable: total,
   }))[0];
 
-  const pm = await findPm();
-  const caption = `Updated invoice for "${booking.event_name}" -- reply to THIS message with corrections, or "yes" to approve.`;
-  const pending = (await sbInsert('pending_questions', { booking_id: booking.id, field_name: 'invoice_approval', question_text: caption }))[0];
-  if (pm) {
-    const msgId = await sendInvoicePdf(pm.phone_number, updated, booking, caption);
-    if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
-  }
+  await sendInvoiceForFinalApproval(updated, booking);
   return { ok: true, action: 'invoice_corrected' };
 }
 
@@ -515,6 +589,7 @@ const action = input.action;
 
 let result;
 if (action === 'draft_invoice') result = await draftInvoice(input.booking_id);
+else if (action === 'resolve_invoice_draft_confirm') result = await resolveInvoiceDraftConfirm(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_invoice_approval') result = await resolveInvoiceApproval(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_payment_confirmed') result = await resolvePaymentConfirmed(input.pending_question_id, input.answer_text);
 else if (action === 'send_to_lawyer') result = await sendToLawyer(input.booking_id);
