@@ -180,7 +180,10 @@ async function notifyPmOfCompletedIntake(booking) {
     pmFirstName ? `Hey ${pmFirstName}, you have a booking from "${booking.event_name}":` : `You have a booking from "${booking.event_name}":`,
     `- Date: ${booking.event_date}`,
     `- Type: ${booking.event_type}`,
-    `- ${booking.is_existing_client ? 'Returning' : 'New'} client${booking.client_reference ? ` -- ${booking.client_reference}` : ''}`,
+    // "Experienced"/"First-time" describes general event-hosting experience
+    // (anywhere, not specifically with us) -- the separate "Past bookings"
+    // line below is what actually signals a real Bali repeat customer.
+    `- ${booking.is_existing_client ? 'Experienced' : 'First-time'} client${booking.client_reference ? ` -- ${booking.client_reference}` : ''}`,
     ...(historyLine ? [`- ${historyLine}`] : []),
   ];
 
@@ -333,7 +336,7 @@ const FIELD_LABELS = {
   event_date: 'the date',
   event_type: 'the event type',
   event_name: 'a short name to call the event (e.g. for scheduling, not a person\'s name)',
-  is_existing_client: 'whether they have hosted an event with us before',
+  is_existing_client: 'whether they have hosted an event before, anywhere at all (not specifically with us) -- just gauging their general experience level',
   client_reference: 'their IG, TikTok, or website',
 };
 
@@ -601,9 +604,9 @@ Write one brief, warm, professional reassurance letting them know you're still o
   // DB-checked date result, what's still missing) -- never a fixed canned
   // string, so two visits to the same field never sound identical.
 
-  // If we can already PROVE this is a returning client from real booking
-  // history, don't bother asking -- a self-report is only needed when we
-  // genuinely don't know.
+  // A real past Bali booking is sufficient proof they've hosted an event
+  // before (it's a subset of "anywhere at all") -- don't bother asking in
+  // that case. A self-report is only needed when we genuinely don't know.
   if (booking.is_existing_client === null || booking.is_existing_client === undefined) {
     const pastBookings = await getPastBookings(contact.id, booking.id);
     if (pastBookings.length > 0) {
