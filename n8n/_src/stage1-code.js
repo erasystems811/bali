@@ -482,9 +482,11 @@ if (!booking) {
   const check = await askOpenAIJson(
     `A client is waiting to hear back about their booking "${booking.event_name}", already handed off to the team. They just said: "${effectiveText}".
 
-Decide: does this need real attention -- either a genuine question about the venue/event that needs looking up (pricing, parking, capacity, what's included, timing details, etc.), new information or details they're adding (or want to add) about their booking, or a request/instruction for the team -- or is it JUST a check-in/pleasantry with nothing to act on?
+Decide: does this message contain ANYTHING the team needs to know or act on -- a genuine question about the venue/event (pricing, parking, capacity, what's included, timing, etc.), new or corrected information about their booking, something they explicitly say they forgot to send or still need to send, or a request/instruction -- or is the ENTIRE message just a greeting/pleasantry/impatience with zero informational content?
 
-A plain status check-in is NOT something that needs attention, even if phrased as a question or ending in "?" -- there's nothing to look up or relay, it just needs a reassurance that you're still on it. Examples that need NO attention: "hey", "any update?", "did you see my message?", "??", "still there?", "just checking in", "hello?", "so?". Examples that DO need attention: "do you have parking?" (question), "how much does it cost?" (question), "actually make it 150 guests" (new info), "I want to add something" (intent to add, even without saying what yet), "can you also arrange decor?" (request).
+Judge the full message, not just its opening words. A casual opener like "hey" or "so" does NOT make the rest of the message a check-in if real content follows it -- e.g. "hey I didn't send my ig" needs attention because of "I didn't send my ig", even though it starts with "hey". When genuinely unsure, prefer needs_attention:true -- missing something real is worse than an unnecessary check-in reassurance.
+
+Examples that need NO attention (nothing but a greeting or impatience, no content at all): "hey", "any update?", "did you see my message?", "??", "still there?", "just checking in", "hello?", "so?", "how far?". Examples that DO need attention: "do you have parking?", "how much does it cost?", "actually make it 150 guests", "I want to add something", "can you also arrange decor?", "hey I didn't send my ig" (forgot to send something, wants to now), "also check my instagram" (pointing them to something to look at/add), "I want to change something" (signals a change is coming).
 
 Reply ONLY with JSON: {"needs_attention": true/false}.`,
     effectiveText || ''
