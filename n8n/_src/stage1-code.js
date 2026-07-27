@@ -353,6 +353,20 @@ function fieldOrder(booking) {
 
 const STEP_GROUPS = [['event_date'], ['event_type', 'event_name'], ['is_existing_client'], ['client_reference']];
 
+// Owner asked for this exact phrasing twice after the model paraphrased it
+// differently each time -- lock it down instead of leaving it to the LLM.
+// This combined step can only ever occur with date_confirmed_available
+// either true (same turn the date was just resolved) or false (a later
+// turn, e.g. the client asked something else without answering this yet);
+// dateRejected can't co-occur with it since event_date re-enters the
+// missing list and takes priority again before this step is ever reached.
+const TYPE_NAME_QUESTION = "What's the name of the event, and what type of event is it?";
+const DATE_CONFIRMED_LEAD_INS = ["That date's available!", "Good news, that date's free!", "That date works!"];
+
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
 // Which fields to ask about THIS turn, in priority order, grouping event
 // type+name into one combined question but keeping every other field its
 // own separate step. Deciding WHICH fields belong in the ask is done here
@@ -702,35 +716,42 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
   // decide on its own.
   const stepFields = currentStepFields(missingAfter);
   const stepLabels = stepFields.map((f) => FIELD_LABELS[f]);
+  const isTypeNameStep = stepFields.length === 2 && stepFields.includes('event_type') && stepFields.includes('event_name');
 
-  const replyResult = await askOpenAIJson(
-    `You're Bali, an event venue's WhatsApp assistant, texting a client during booking intake. Warm, professional, brief and human -- never sound like an AI, no "Awesome!", no repeating earlier phrasing. Keep it SHORT -- one short sentence, no lists, no line breaks, this is WhatsApp not email.
+  if (isTypeNameStep) {
+    // Fixed question, no LLM call -- see the comment on TYPE_NAME_QUESTION.
+    const leadIn = dateConfirmed ? pick(DATE_CONFIRMED_LEAD_INS) : (kbPending ? "Let me check on that for you." : null);
+    replyText = leadIn ? `${leadIn} ${TYPE_NAME_QUESTION}` : TYPE_NAME_QUESTION;
+  } else {
+    const replyResult = await askOpenAIJson(
+      `You're Bali, an event venue's WhatsApp assistant, texting a client during booking intake. Warm, professional, brief and human -- never sound like an AI, no "Awesome!", no repeating earlier phrasing. Keep it SHORT -- one short sentence, no lists, no line breaks, this is WhatsApp not email.
 
 Conversation so far:
 ${transcript}
 Client: ${effectiveText || ''}
 
 What actually happened this turn: ${JSON.stringify({
-      saved_this_turn: patch,
-      date_confirmed_available: dateConfirmed,
-      date_rejected_already_booked: dateRejected,
-      knowledge_base_question_pending: kbPending,
-      ask_about: stepLabels,
-      intake_just_completed: justCompleted,
-    })}
+        saved_this_turn: patch,
+        date_confirmed_available: dateConfirmed,
+        date_rejected_already_booked: dateRejected,
+        knowledge_base_question_pending: kbPending,
+        ask_about: stepLabels,
+        intake_just_completed: justCompleted,
+      })}
 
-Write the next short message to the client. Rules: ask ONLY about the items in ask_about -- if it has 2 items, weave them into one natural single question, never invent or add anything not listed and not in ask_about. If date_confirmed_available is true, briefly confirm the date's available (e.g. "That date's available!") before asking about ask_about. If ask_about is empty and intake_just_completed is true, say only something brief like "Give me a moment, I'll follow up with you shortly" -- don't mention a person/manager, don't ask anything further. If a date was just rejected as already booked, mention that plainly first, then still ask about ask_about if not empty. If a knowledge base question is pending, briefly acknowledge you're checking on it, then still ask about ask_about if not empty (or just the acknowledgment if ask_about is empty).
+Write the next short message to the client. Rules: ask ONLY about the items in ask_about -- never invent or add anything not listed and not in ask_about. If date_confirmed_available is true, briefly confirm the date's available (e.g. "That date's available!") before asking about ask_about. If ask_about is empty and intake_just_completed is true, say only something brief like "Give me a moment, I'll follow up with you shortly" -- don't mention a person/manager, don't ask anything further. If a date was just rejected as already booked, mention that plainly first, then still ask about ask_about if not empty. If a knowledge base question is pending, briefly acknowledge you're checking on it, then still ask about ask_about if not empty (or just the acknowledgment if ask_about is empty).
 
 Reply ONLY with JSON: {"reply": "..."}`,
-    effectiveText || ''
-  );
+      effectiveText || ''
+    );
 
-  replyText = replyResult?.reply || null;
-  if (!replyText) {
-    // Model call failed outright -- fall back to something serviceable.
-    replyText = stepLabels.length > 0
-      ? `Could you let me know ${stepLabels.join(' and ')}?`
-      : "Give me a moment, I'll follow up with you shortly.";
+    replyText = replyResult?.reply || null;
+    if (!replyText) {
+      // Model call failed outright -- fall back to something serviceable.
+      replyText = stepLabels.length > 0
+        ? `Could you let me know ${stepLabels.join(' and ')}?`
+        : "Give me a moment, I'll follow up with you shortly.";
+    }
   }
 
   if (justCompleted) {
