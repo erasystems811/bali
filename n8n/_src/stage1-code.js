@@ -303,7 +303,6 @@ const FIELD_LABELS = {
   event_date: 'date',
   event_name: 'event name',
   event_type: 'event type',
-  is_existing_client: 'have you booked with us before',
   client_reference: 'IG, TikTok, or website',
 };
 
@@ -311,17 +310,15 @@ const FIELD_LABELS = {
 // variety when only that one field is missing. Kept as fixed phrase pools
 // instead of an LLM call -- live-testing the LLM version of this exact
 // decision showed gpt-4o-mini unreliably inventing fields that were never
-// actually missing, or dropping the question outright, in compound
-// situations (date rejected + 1 field left, KB question pending + only the
-// returning-client question left). Structure/content is too easy to get
-// wrong to leave to a model call here; a small phrase pool still avoids
-// sounding robotic without that risk.
+// actually missing, or dropping a required question outright, in compound
+// situations. Structure/content is too easy to get wrong to leave to a
+// model call here; a small phrase pool still avoids sounding robotic
+// without that risk.
 const FIELD_QUESTIONS = {
   event_date: ["What date are you looking at?", "What date works for you?", "When's the event?"],
   event_type: ["What type of event is it?", "What kind of event are you planning?"],
   event_name: ["What should we call the event?", "Got a short name for it?"],
   client_reference: ["Got an IG, TikTok, or website for it?", "Do you have a social handle or website for it?"],
-  is_existing_client: ["Have you booked with us before?", "Have you used Bali before?"],
 };
 
 const MULTI_ASK_LEAD_INS = ["Just need a few things:", "A couple more details:", "To lock this in, I'll need:"];
@@ -337,7 +334,7 @@ function pick(arr) {
 // call. dateRejected's own line already implies "give me the date", so any
 // still-missing event_date is dropped from the bullet list to avoid asking
 // for it twice in the same message.
-function buildIntakeReply({ missingUpfront, askingReturningClientAlone, dateRejected, kbPending, justCompleted }) {
+function buildIntakeReply({ missingUpfront, dateRejected, kbPending, justCompleted }) {
   if (justCompleted) {
     return "Give me a moment, I'll follow up with you shortly.";
   }
@@ -352,8 +349,6 @@ function buildIntakeReply({ missingUpfront, askingReturningClientAlone, dateReje
     parts.push(pick(FIELD_QUESTIONS[askFields[0]]));
   } else if (askFields.length > 1) {
     parts.push(`${pick(MULTI_ASK_LEAD_INS)}\n${askFields.map((f) => `- ${FIELD_LABELS[f]}`).join('\n')}`);
-  } else if (askingReturningClientAlone) {
-    parts.push(pick(FIELD_QUESTIONS.is_existing_client));
   }
 
   if (parts.length === 0) {
@@ -364,19 +359,18 @@ function buildIntakeReply({ missingUpfront, askingReturningClientAlone, dateReje
   return parts.join('\n\n');
 }
 
-// Asked of every client now, not just returning ones -- useful context for the
-// PM regardless of whether this is their first booking or not.
+// "Have you booked with us before?" is deliberately not asked at all --
+// owner's call. is_existing_client is still set automatically further down
+// when real booking history proves it (see getPastBookings), it's just
+// never turned into a question if it can't be proven.
 function fieldOrder() {
-  return ['event_date', 'event_name', 'event_type', 'is_existing_client', 'client_reference'];
+  return ['event_date', 'event_name', 'event_type', 'client_reference'];
 }
 
-// These 4 are asked together, up front, in the greeting -- matches how a
-// person would naturally describe their event in one go, rather than
-// interrogating them field by field. "Have you booked with us before?" is
-// deliberately NOT in this group -- it doesn't fit naturally into "tell me
-// about your event" and reads better as its own short follow-up once the
-// event itself is nailed down.
-const UPFRONT_FIELDS = ['event_date', 'event_type', 'event_name', 'client_reference'];
+// All 4 remaining fields are asked together, up front, in the greeting --
+// matches how a person would naturally describe their event in one go,
+// rather than interrogating them field by field.
+const UPFRONT_FIELDS = fieldOrder();
 
 const input = $input.first().json.body;
 const { from_number, text, contact_id: routerContactId, media_type, media_id } = input;
@@ -616,7 +610,6 @@ Write one brief, warm, professional reassurance letting them know you're still o
     event_date: booking.event_date,
     event_name: booking.event_name,
     event_type: booking.event_type,
-    is_existing_client: booking.is_existing_client,
     client_reference: booking.client_reference,
   };
   const missingBefore = fieldOrder().filter(
@@ -636,7 +629,7 @@ Client's latest message: "${effectiveText || ''}"
 
 Extract EVERY still-needed field this message provides, not just the one you were "expecting" next -- e.g. "birthday party for my sister" gives you both event_type ("birthday party") AND enough for event_name ("Sister's Birthday Party"), extract both in the same pass rather than leaving event_type blank because event_name came first in priority order. Resolve relative dates ("next Friday", "this weekend", a bare day name) against today's date. If the message is instead (or also) a genuine question or comment not covered by the fields above (pricing, parking, capacity, "what dates are open", small talk, etc.), note it as off_topic -- something the venue needs to actually answer, not guess at.
 
-Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_name"?: "...", "event_type"?: "...", "is_existing_client"?: true/false, "client_reference"?: "..."}, "off_topic": "..." or null}`,
+Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_name"?: "...", "event_type"?: "...", "client_reference"?: "..."}, "off_topic": "..." or null}`,
     effectiveText || ''
   );
 
@@ -702,13 +695,10 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_name"?:
 
   // Upfront fields (date, event type, name, social/website) are asked
   // together as a batch, like a person naturally describing their event in
-  // one go -- only once all of those are in do we ask the one-off "have you
-  // booked with us before?" by itself, since it doesn't fit naturally
-  // bundled with "tell me about your event."
+  // one go.
   const missingUpfront = missingAfter.filter((f) => UPFRONT_FIELDS.includes(f));
-  const askingReturningClientAlone = missingUpfront.length === 0 && missingAfter.includes('is_existing_client');
 
-  replyText = buildIntakeReply({ missingUpfront, askingReturningClientAlone, dateRejected, kbPending, justCompleted });
+  replyText = buildIntakeReply({ missingUpfront, dateRejected, kbPending, justCompleted });
 
   if (justCompleted) {
     await notifyPmOfCompletedIntake(booking);
