@@ -297,7 +297,7 @@ function resolveRelativeDate(rawText) {
   return null; // not a relative phrase we handle -- let the model's own reading stand
 }
 
-const GREETING = "Hey! 😊 Would you be interested in booking Bali for your event? Just let me know the date you're looking at and I'll check what's available.";
+const GREETING = "Hey! 😊 Would you be interested in booking Bali for your event? To get started, let me know: the date you're looking at, what kind of event it is, a short name for it, and any Instagram, TikTok, or website you have for it.";
 
 const FIELD_LABELS = {
   event_date: 'the event date',
@@ -312,6 +312,14 @@ const FIELD_LABELS = {
 function fieldOrder() {
   return ['event_date', 'event_name', 'event_type', 'is_existing_client', 'client_reference'];
 }
+
+// These 4 are asked together, up front, in the greeting -- matches how a
+// person would naturally describe their event in one go, rather than
+// interrogating them field by field. "Have you booked with us before?" is
+// deliberately NOT in this group -- it doesn't fit naturally into "tell me
+// about your event" and reads better as its own short follow-up once the
+// event itself is nailed down.
+const UPFRONT_FIELDS = ['event_date', 'event_type', 'event_name', 'client_reference'];
 
 const input = $input.first().json.body;
 const { from_number, text, contact_id: routerContactId, media_type, media_id } = input;
@@ -635,10 +643,16 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_name"?:
     });
   }
 
-  const nextField = missingAfter[0] || null;
+  // Upfront fields (date, event type, name, social/website) are asked
+  // together as a batch, like a person naturally describing their event in
+  // one go -- only once all of those are in do we ask the one-off "have you
+  // booked with us before?" by itself, since it doesn't fit naturally
+  // bundled with "tell me about your event."
+  const missingUpfront = missingAfter.filter((f) => UPFRONT_FIELDS.includes(f));
+  const askingReturningClientAlone = missingUpfront.length === 0 && missingAfter.includes('is_existing_client');
 
   const replyResult = await askOpenAIJson(
-    `You're Bali, an event venue's WhatsApp assistant, texting a client during booking intake. Warm, professional, and helpful -- brief and human, like a staff member texting. Never sound like an AI or a hype machine: no "Awesome!", no exclamation-point enthusiasm, no repeating a phrase you've already used earlier in this conversation. Ask about exactly ONE thing in your message, never a checklist of several questions at once -- even if more than one thing is still missing.
+    `You're Bali, an event venue's WhatsApp assistant, texting a client during booking intake. Warm, professional, and helpful -- brief and human, like a staff member texting. Never sound like an AI or a hype machine: no "Awesome!", no exclamation-point enthusiasm, no repeating a phrase you've already used earlier in this conversation.
 
 Conversation so far:
 ${transcript}
@@ -648,11 +662,12 @@ What actually happened this turn: ${JSON.stringify({
       saved_this_turn: patch,
       date_rejected_already_booked: dateRejected,
       knowledge_base_question_pending: kbPending,
-      next_single_thing_to_ask_about: nextField ? FIELD_LABELS[nextField] : null,
+      still_missing_event_details: missingUpfront.map((f) => FIELD_LABELS[f]),
+      still_need_returning_client_question_alone: askingReturningClientAlone,
       intake_just_completed: justCompleted,
     })}
 
-Write the next message to send the client, in plain text (not JSON, this field's value IS the message). Rules: if a date was just rejected as already booked, say so plainly and ask for an alternative -- don't apologize excessively. If a date was just confirmed available, acknowledge it in one brief phrase (not "Awesome" or similar), THEN ask about next_single_thing_to_ask_about -- that acknowledgment plus that one question, nothing else. When asking about event type, ask it open-ended -- never offer a multiple-choice list like "a birthday, a wedding, or something else", just ask what kind of event it is and how we can help. If intake_just_completed is true, say only something brief like "Give me a moment, I'll follow up with you shortly" -- do NOT mention an events manager or any other person, just that you'll follow up, and don't ask anything further. If a knowledge base question is pending, briefly acknowledge you're checking on it, then still ask about next_single_thing_to_ask_about if it's not null (or note you'll follow up if it is null). If nothing new was understood at all, ask about next_single_thing_to_ask_about again, phrased differently than however you might have asked it earlier in this conversation.
+Write the next message to send the client, in plain text (not JSON, this field's value IS the message). Rules: if still_missing_event_details has more than one item, ask for all of them together in ONE natural, warmly-phrased message -- not a rigid numbered/bulleted list, just a normal sentence covering all of them, the way a person would ask. If it has exactly one item, just ask that one thing. If a date was just rejected as already booked, say so plainly and ask for an alternative -- don't apologize excessively -- and still fold in any other still_missing_event_details into the same message. When asking about event type, ask it open-ended -- never offer a multiple-choice list like "a birthday, a wedding, or something else", just ask what kind of event it is and how we can help. If still_need_returning_client_question_alone is true, ask ONLY "have you booked with us before?" (or similar) by itself, nothing else bundled in. If intake_just_completed is true, say only something brief like "Give me a moment, I'll follow up with you shortly" -- do NOT mention an events manager or any other person, just that you'll follow up, and don't ask anything further. If a knowledge base question is pending, briefly acknowledge you're checking on it, then still ask about whatever's in still_missing_event_details or still_need_returning_client_question_alone (or note you'll follow up if both are empty/false). If nothing new was understood at all, ask again for whatever's still missing, phrased differently than however you might have asked it earlier in this conversation.
 
 Reply ONLY with JSON: {"reply": "..."}`,
     effectiveText || ''
@@ -662,9 +677,13 @@ Reply ONLY with JSON: {"reply": "..."}`,
   if (!replyText) {
     // Model call failed outright -- fall back to something serviceable rather
     // than sending nothing.
-    replyText = missingAfter.length > 0
-      ? `Could you let me know ${FIELD_LABELS[missingAfter[0]]}?`
-      : "Give me a moment, I'll follow up with you shortly.";
+    if (missingUpfront.length > 0) {
+      replyText = `Could you let me know ${missingUpfront.map((f) => FIELD_LABELS[f]).join(', ')}?`;
+    } else if (askingReturningClientAlone) {
+      replyText = `Could you let me know ${FIELD_LABELS.is_existing_client}?`;
+    } else {
+      replyText = "Give me a moment, I'll follow up with you shortly.";
+    }
   }
 
   if (justCompleted) {
