@@ -297,15 +297,72 @@ function resolveRelativeDate(rawText) {
   return null; // not a relative phrase we handle -- let the model's own reading stand
 }
 
-const GREETING = "Hey! 😊 Interested in booking Bali? Just share: the date, event type, event name, and any IG/website you've got.";
+const GREETING = "Hey! 😊 Interested in booking Bali? Just share:\n- Date\n- Event type\n- Event name\n- IG/TikTok/website (if any)";
 
 const FIELD_LABELS = {
-  event_date: 'the date',
-  event_name: 'a short name for it',
-  event_type: 'what type of event it is',
-  is_existing_client: 'if they have booked with us before',
-  client_reference: 'their IG, TikTok, or website',
+  event_date: 'date',
+  event_name: 'event name',
+  event_type: 'event type',
+  is_existing_client: 'have you booked with us before',
+  client_reference: 'IG, TikTok, or website',
 };
+
+// Natural single-question phrasings, one per field, picked at random for
+// variety when only that one field is missing. Kept as fixed phrase pools
+// instead of an LLM call -- live-testing the LLM version of this exact
+// decision showed gpt-4o-mini unreliably inventing fields that were never
+// actually missing, or dropping the question outright, in compound
+// situations (date rejected + 1 field left, KB question pending + only the
+// returning-client question left). Structure/content is too easy to get
+// wrong to leave to a model call here; a small phrase pool still avoids
+// sounding robotic without that risk.
+const FIELD_QUESTIONS = {
+  event_date: ["What date are you looking at?", "What date works for you?", "When's the event?"],
+  event_type: ["What type of event is it?", "What kind of event are you planning?"],
+  event_name: ["What should we call the event?", "Got a short name for it?"],
+  client_reference: ["Got an IG, TikTok, or website for it?", "Do you have a social handle or website for it?"],
+  is_existing_client: ["Have you booked with us before?", "Have you used Bali before?"],
+};
+
+const MULTI_ASK_LEAD_INS = ["Just need a few things:", "A couple more details:", "To lock this in, I'll need:"];
+const DATE_REJECTED_LINES = ["That date's already booked, could you share an alternative?", "That date's taken, what about another one?"];
+const KB_PENDING_LINES = ["Let me check on that for you.", "Good question, checking on that now.", "Checking on that for you."];
+
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// Builds the actual next message deterministically from what's really still
+// missing -- see the comment on FIELD_QUESTIONS for why this isn't an LLM
+// call. dateRejected's own line already implies "give me the date", so any
+// still-missing event_date is dropped from the bullet list to avoid asking
+// for it twice in the same message.
+function buildIntakeReply({ missingUpfront, askingReturningClientAlone, dateRejected, kbPending, justCompleted }) {
+  if (justCompleted) {
+    return "Give me a moment, I'll follow up with you shortly.";
+  }
+
+  const askFields = missingUpfront.filter((f) => !(dateRejected && f === 'event_date'));
+  const parts = [];
+
+  if (kbPending) parts.push(pick(KB_PENDING_LINES));
+  if (dateRejected) parts.push(pick(DATE_REJECTED_LINES));
+
+  if (askFields.length === 1) {
+    parts.push(pick(FIELD_QUESTIONS[askFields[0]]));
+  } else if (askFields.length > 1) {
+    parts.push(`${pick(MULTI_ASK_LEAD_INS)}\n${askFields.map((f) => `- ${FIELD_LABELS[f]}`).join('\n')}`);
+  } else if (askingReturningClientAlone) {
+    parts.push(pick(FIELD_QUESTIONS.is_existing_client));
+  }
+
+  if (parts.length === 0) {
+    // Nothing left to ask and no kb/date note either -- shouldn't normally
+    // happen mid-intake, but keep a safe fallback rather than sending nothing.
+    return "Give me a moment, I'll follow up with you shortly.";
+  }
+  return parts.join('\n\n');
+}
 
 // Asked of every client now, not just returning ones -- useful context for the
 // PM regardless of whether this is their first booking or not.
@@ -651,42 +708,7 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_name"?:
   const missingUpfront = missingAfter.filter((f) => UPFRONT_FIELDS.includes(f));
   const askingReturningClientAlone = missingUpfront.length === 0 && missingAfter.includes('is_existing_client');
 
-  const replyResult = await askOpenAIJson(
-    `You're Bali, an event venue's WhatsApp assistant, texting a client during booking intake. Warm, professional, and helpful -- brief and human, like a staff member texting. Never sound like an AI or a hype machine: no "Awesome!", no exclamation-point enthusiasm, no repeating a phrase you've already used earlier in this conversation.
-
-KEEP IT SHORT -- this is WhatsApp, not email. One short sentence, occasionally two. Never a paragraph, never more than about 25 words, no line breaks, no bullet points or numbered lists -- the client shouldn't have to scroll to read it. Even when asking about several missing details at once, fit them into one tight, casual sentence (e.g. "What's the date, event type, and do you have an IG or website for it?"), not a formal itemized list.
-
-Conversation so far:
-${transcript}
-Client: ${effectiveText || ''}
-
-What actually happened this turn: ${JSON.stringify({
-      saved_this_turn: patch,
-      date_rejected_already_booked: dateRejected,
-      knowledge_base_question_pending: kbPending,
-      still_missing_event_details: missingUpfront.map((f) => FIELD_LABELS[f]),
-      still_need_returning_client_question_alone: askingReturningClientAlone,
-      intake_just_completed: justCompleted,
-    })}
-
-Write the next message to send the client, in plain text (not JSON, this field's value IS the message). Rules: if still_missing_event_details has more than one item, ask for all of them together in ONE short sentence -- not a list. If it has exactly one item, just ask that one thing. If a date was just rejected as already booked, say so plainly and ask for an alternative -- don't apologize excessively -- and still fold in any other still_missing_event_details into the same short message. When asking about event type, ask it open-ended -- never offer a multiple-choice list like "a birthday, a wedding, or something else", just ask what kind of event it is. If still_need_returning_client_question_alone is true, ask ONLY "have you booked with us before?" (or similar) by itself, nothing else bundled in. If intake_just_completed is true, say only something brief like "Give me a moment, I'll follow up with you shortly" -- do NOT mention an events manager or any other person, just that you'll follow up, and don't ask anything further. If a knowledge base question is pending, briefly acknowledge you're checking on it, then still ask about whatever's in still_missing_event_details or still_need_returning_client_question_alone (or note you'll follow up if both are empty/false) -- still one short sentence total. If nothing new was understood at all, ask again for whatever's still missing, phrased differently than however you might have asked it earlier in this conversation, still short.
-
-Reply ONLY with JSON: {"reply": "..."}`,
-    effectiveText || ''
-  );
-
-  replyText = replyResult?.reply || null;
-  if (!replyText) {
-    // Model call failed outright -- fall back to something serviceable rather
-    // than sending nothing.
-    if (missingUpfront.length > 0) {
-      replyText = `Could you let me know ${missingUpfront.map((f) => FIELD_LABELS[f]).join(', ')}?`;
-    } else if (askingReturningClientAlone) {
-      replyText = `Could you let me know ${FIELD_LABELS.is_existing_client}?`;
-    } else {
-      replyText = "Give me a moment, I'll follow up with you shortly.";
-    }
-  }
+  replyText = buildIntakeReply({ missingUpfront, askingReturningClientAlone, dateRejected, kbPending, justCompleted });
 
   if (justCompleted) {
     await notifyPmOfCompletedIntake(booking);
