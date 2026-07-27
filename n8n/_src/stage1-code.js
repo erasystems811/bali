@@ -332,7 +332,7 @@ const GREETING = "Hey! 😊 Would you be interested in booking Bali for your eve
 const FIELD_LABELS = {
   event_date: 'the date',
   event_type: 'the event type',
-  event_name: 'the event name',
+  event_name: 'a short name to call the event (e.g. for scheduling, not a person\'s name)',
   is_existing_client: 'whether they have hosted an event with us before',
   client_reference: 'their IG, TikTok, or website',
 };
@@ -661,6 +661,10 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
       delete patch.event_date;
     }
   }
+  // Only true when a date was newly given THIS turn and passed the
+  // collision check -- patch.event_date is deleted above if rejected, so
+  // its survival here already means "just confirmed available."
+  const dateConfirmed = !!patch.event_date;
 
   if (Object.keys(patch).length > 0) {
     await sbPatch(`bookings?id=eq.${booking.id}`, patch);
@@ -708,13 +712,14 @@ Client: ${effectiveText || ''}
 
 What actually happened this turn: ${JSON.stringify({
       saved_this_turn: patch,
+      date_confirmed_available: dateConfirmed,
       date_rejected_already_booked: dateRejected,
       knowledge_base_question_pending: kbPending,
       ask_about: stepLabels,
       intake_just_completed: justCompleted,
     })}
 
-Write the next short message to the client. Rules: ask ONLY about the items in ask_about -- if it has 2 items, weave them into one natural single question, never invent or add anything not listed and not in ask_about. If ask_about is empty and intake_just_completed is true, say only something brief like "Give me a moment, I'll follow up with you shortly" -- don't mention a person/manager, don't ask anything further. If a date was just rejected as already booked, mention that plainly first, then still ask about ask_about if not empty. If a knowledge base question is pending, briefly acknowledge you're checking on it, then still ask about ask_about if not empty (or just the acknowledgment if ask_about is empty).
+Write the next short message to the client. Rules: ask ONLY about the items in ask_about -- if it has 2 items, weave them into one natural single question, never invent or add anything not listed and not in ask_about. If date_confirmed_available is true, briefly confirm the date's available (e.g. "That date's available!") before asking about ask_about. If ask_about is empty and intake_just_completed is true, say only something brief like "Give me a moment, I'll follow up with you shortly" -- don't mention a person/manager, don't ask anything further. If a date was just rejected as already booked, mention that plainly first, then still ask about ask_about if not empty. If a knowledge base question is pending, briefly acknowledge you're checking on it, then still ask about ask_about if not empty (or just the acknowledgment if ask_about is empty).
 
 Reply ONLY with JSON: {"reply": "..."}`,
     effectiveText || ''
