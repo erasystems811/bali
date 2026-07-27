@@ -361,7 +361,9 @@ const STEP_GROUPS = [['event_date'], ['event_type', 'event_name'], ['is_existing
 // dateRejected can't co-occur with it since event_date re-enters the
 // missing list and takes priority again before this step is ever reached.
 const TYPE_NAME_QUESTION = "What's the name of the event, and what type of event is it?";
-const DATE_CONFIRMED_LEAD_INS = ["That date's available!", "Good news, that date's free!", "That date works!"];
+// Owner's call: keep this professional, not casual -- no "Good news!" /
+// "works!" style phrasing.
+const DATE_CONFIRMED_LEAD_INS = ["That date is available.", "That date is available for booking."];
 
 function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
