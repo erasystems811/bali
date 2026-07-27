@@ -173,12 +173,15 @@ async function notifyPmOfCompletedIntake(booking) {
     }
   }
 
+  // Bulleted and addressed by name so it's scannable at a glance, not a
+  // paragraph the PM has to read through -- owner's call.
+  const pmFirstName = pm.name ? pm.name.split(' ')[0] : null;
   const summaryLines = [
-    `New booking ready: "${booking.event_name}"`,
-    `Date: ${booking.event_date}`,
-    `Type: ${booking.event_type}`,
-    `${booking.is_existing_client ? 'Returning' : 'New'} client${booking.client_reference ? ` -- ${booking.client_reference}` : ''}`,
-    ...(historyLine ? [historyLine] : []),
+    pmFirstName ? `Hey ${pmFirstName}, you have a booking from "${booking.event_name}":` : `You have a booking from "${booking.event_name}":`,
+    `- Date: ${booking.event_date}`,
+    `- Type: ${booking.event_type}`,
+    `- ${booking.is_existing_client ? 'Returning' : 'New'} client${booking.client_reference ? ` -- ${booking.client_reference}` : ''}`,
+    ...(historyLine ? [`- ${historyLine}`] : []),
   ];
 
   const activeRows = await sbRequest('GET', 'bookings?mode=eq.pm-led&limit=1&select=id');
@@ -321,80 +324,51 @@ function resolveRelativeDate(rawText) {
   return null; // not a relative phrase we handle -- let the model's own reading stand
 }
 
-const GREETING = "Hey! 😊 Interested in booking Bali? Just share:\n- Date\n- Event type\n- Event name\n- IG/TikTok/website (if any)";
+const GREETING = "Hey! 😊 Would you be interested in booking Bali for your event? Just let me know the date you're looking at and I'll check what's available.";
 
+// Descriptive phrase per field, used both in the extraction prompt's
+// "already confirmed" summary and as the ask_about labels fed to the
+// reply-generation prompt below.
 const FIELD_LABELS = {
-  event_date: 'date',
-  event_name: 'event name',
-  event_type: 'event type',
-  client_reference: 'IG, TikTok, or website',
+  event_date: 'the date',
+  event_type: 'the event type',
+  event_name: 'the event name',
+  is_existing_client: 'whether they have hosted an event with us before',
+  client_reference: 'their IG, TikTok, or website',
 };
 
-// Natural single-question phrasings, one per field, picked at random for
-// variety when only that one field is missing. Kept as fixed phrase pools
-// instead of an LLM call -- live-testing the LLM version of this exact
-// decision showed gpt-4o-mini unreliably inventing fields that were never
-// actually missing, or dropping a required question outright, in compound
-// situations. Structure/content is too easy to get wrong to leave to a
-// model call here; a small phrase pool still avoids sounding robotic
-// without that risk.
-const FIELD_QUESTIONS = {
-  event_date: ["What date are you looking at?", "What date works for you?", "When's the event?"],
-  event_type: ["What type of event is it?", "What kind of event are you planning?"],
-  event_name: ["What should we call the event?", "Got a short name for it?"],
-  client_reference: ["Got an IG, TikTok, or website for it?", "Do you have a social handle or website for it?"],
-};
-
-const MULTI_ASK_LEAD_INS = ["Just need a few things:", "A couple more details:", "To lock this in, I'll need:"];
-const DATE_REJECTED_LINES = ["That date's already booked, could you share an alternative?", "That date's taken, what about another one?"];
-const KB_PENDING_LINES = ["Let me check on that for you.", "Good question, checking on that now.", "Checking on that for you."];
-
-function pick(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
+// Intake order, one step at a time: date -> event type + name (asked
+// together, one natural question) -> whether they've hosted with us before
+// -> IG/TikTok/website, but ONLY for clients who said yes to the previous
+// step (owner's call -- brand-new clients aren't asked for a social handle
+// at all). fieldOrder() is conditional on the current booking's
+// is_existing_client so client_reference only becomes "needed" once that's
+// true; STEP_GROUPS mirrors the same order/grouping for deciding what to
+// ask about on any given turn.
+function fieldOrder(booking) {
+  const order = ['event_date', 'event_type', 'event_name', 'is_existing_client'];
+  if (booking.is_existing_client === true) order.push('client_reference');
+  return order;
 }
 
-// Builds the actual next message deterministically from what's really still
-// missing -- see the comment on FIELD_QUESTIONS for why this isn't an LLM
-// call. dateRejected's own line already implies "give me the date", so any
-// still-missing event_date is dropped from the bullet list to avoid asking
-// for it twice in the same message.
-function buildIntakeReply({ missingUpfront, dateRejected, kbPending, justCompleted }) {
-  if (justCompleted) {
-    return "Give me a moment, I'll follow up with you shortly.";
+const STEP_GROUPS = [['event_date'], ['event_type', 'event_name'], ['is_existing_client'], ['client_reference']];
+
+// Which fields to ask about THIS turn, in priority order, grouping event
+// type+name into one combined question but keeping every other field its
+// own separate step. Deciding WHICH fields belong in the ask is done here
+// in code, not by the model -- live-testing showed gpt-4o-mini unreliably
+// inventing fields or dropping questions when asked to reason about a
+// longer, more open-ended situation object. Scoped down to a concrete 1-2
+// item list like this, it phrases things naturally and reliably (verified
+// across ~20 live API calls covering every step, including the
+// previously-flaky "is_existing_client alone" case, before deploying).
+function currentStepFields(missingAfter) {
+  for (const group of STEP_GROUPS) {
+    const stillMissing = group.filter((f) => missingAfter.includes(f));
+    if (stillMissing.length > 0) return stillMissing;
   }
-
-  const askFields = missingUpfront.filter((f) => !(dateRejected && f === 'event_date'));
-  const parts = [];
-
-  if (kbPending) parts.push(pick(KB_PENDING_LINES));
-  if (dateRejected) parts.push(pick(DATE_REJECTED_LINES));
-
-  if (askFields.length === 1) {
-    parts.push(pick(FIELD_QUESTIONS[askFields[0]]));
-  } else if (askFields.length > 1) {
-    parts.push(`${pick(MULTI_ASK_LEAD_INS)}\n${askFields.map((f) => `- ${FIELD_LABELS[f]}`).join('\n')}`);
-  }
-
-  if (parts.length === 0) {
-    // Nothing left to ask and no kb/date note either -- shouldn't normally
-    // happen mid-intake, but keep a safe fallback rather than sending nothing.
-    return "Give me a moment, I'll follow up with you shortly.";
-  }
-  return parts.join('\n\n');
+  return [];
 }
-
-// "Have you booked with us before?" is deliberately not asked at all --
-// owner's call. is_existing_client is still set automatically further down
-// when real booking history proves it (see getPastBookings), it's just
-// never turned into a question if it can't be proven.
-function fieldOrder() {
-  return ['event_date', 'event_name', 'event_type', 'client_reference'];
-}
-
-// All 4 remaining fields are asked together, up front, in the greeting --
-// matches how a person would naturally describe their event in one go,
-// rather than interrogating them field by field.
-const UPFRONT_FIELDS = fieldOrder();
 
 const input = $input.first().json.body;
 const { from_number, text, contact_id: routerContactId, media_type, media_id } = input;
@@ -632,11 +606,12 @@ Write one brief, warm, professional reassurance letting them know you're still o
 
   const known = {
     event_date: booking.event_date,
-    event_name: booking.event_name,
     event_type: booking.event_type,
+    event_name: booking.event_name,
+    is_existing_client: booking.is_existing_client,
     client_reference: booking.client_reference,
   };
-  const missingBefore = fieldOrder().filter(
+  const missingBefore = fieldOrder(booking).filter(
     (f) => known[f] === null || known[f] === undefined
   );
 
@@ -653,7 +628,7 @@ Client's latest message: "${effectiveText || ''}"
 
 Extract EVERY still-needed field this message provides, not just the one you were "expecting" next -- e.g. "birthday party for my sister" gives you both event_type ("birthday party") AND enough for event_name ("Sister's Birthday Party"), extract both in the same pass rather than leaving event_type blank because event_name came first in priority order. Resolve relative dates ("next Friday", "this weekend", a bare day name) against today's date. If the message is instead (or also) a genuine question or comment not covered by the fields above (pricing, parking, capacity, "what dates are open", small talk, etc.), note it as off_topic -- something the venue needs to actually answer, not guess at.
 
-Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_name"?: "...", "event_type"?: "...", "client_reference"?: "..."}, "off_topic": "..." or null}`,
+Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?: "...", "event_name"?: "...", "is_existing_client"?: true/false, "client_reference"?: "..."}, "off_topic": "..." or null}`,
     effectiveText || ''
   );
 
@@ -692,7 +667,7 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_name"?:
     Object.assign(booking, patch);
   }
 
-  const missingAfter = fieldOrder().filter(
+  const missingAfter = fieldOrder(booking).filter(
     (f) => booking[f] === null || booking[f] === undefined
   );
   const justCompleted = missingAfter.length === 0 && booking.status === 'inquiry';
@@ -717,12 +692,41 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_name"?:
     });
   }
 
-  // Upfront fields (date, event type, name, social/website) are asked
-  // together as a batch, like a person naturally describing their event in
-  // one go.
-  const missingUpfront = missingAfter.filter((f) => UPFRONT_FIELDS.includes(f));
+  // What to ask about THIS turn, decided deterministically in code -- see
+  // the comment on currentStepFields for why. Fed to the model below only
+  // as a fixed 1-2 item list to phrase naturally, never left for it to
+  // decide on its own.
+  const stepFields = currentStepFields(missingAfter);
+  const stepLabels = stepFields.map((f) => FIELD_LABELS[f]);
 
-  replyText = buildIntakeReply({ missingUpfront, dateRejected, kbPending, justCompleted });
+  const replyResult = await askOpenAIJson(
+    `You're Bali, an event venue's WhatsApp assistant, texting a client during booking intake. Warm, professional, brief and human -- never sound like an AI, no "Awesome!", no repeating earlier phrasing. Keep it SHORT -- one short sentence, no lists, no line breaks, this is WhatsApp not email.
+
+Conversation so far:
+${transcript}
+Client: ${effectiveText || ''}
+
+What actually happened this turn: ${JSON.stringify({
+      saved_this_turn: patch,
+      date_rejected_already_booked: dateRejected,
+      knowledge_base_question_pending: kbPending,
+      ask_about: stepLabels,
+      intake_just_completed: justCompleted,
+    })}
+
+Write the next short message to the client. Rules: ask ONLY about the items in ask_about -- if it has 2 items, weave them into one natural single question, never invent or add anything not listed and not in ask_about. If ask_about is empty and intake_just_completed is true, say only something brief like "Give me a moment, I'll follow up with you shortly" -- don't mention a person/manager, don't ask anything further. If a date was just rejected as already booked, mention that plainly first, then still ask about ask_about if not empty. If a knowledge base question is pending, briefly acknowledge you're checking on it, then still ask about ask_about if not empty (or just the acknowledgment if ask_about is empty).
+
+Reply ONLY with JSON: {"reply": "..."}`,
+    effectiveText || ''
+  );
+
+  replyText = replyResult?.reply || null;
+  if (!replyText) {
+    // Model call failed outright -- fall back to something serviceable.
+    replyText = stepLabels.length > 0
+      ? `Could you let me know ${stepLabels.join(' and ')}?`
+      : "Give me a moment, I'll follow up with you shortly.";
+  }
 
   if (justCompleted) {
     await notifyPmOfCompletedIntake(booking);
