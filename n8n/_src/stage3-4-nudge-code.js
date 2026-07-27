@@ -62,7 +62,31 @@ async function sendWhatsAppTemplate(toNumber, text) {
   });
 }
 
+// Confirmed live: a direct text send to a contact whose last inbound message
+// was well over 24h old returned 200 with a real message id from Meta, but
+// never actually delivered -- outside the messaging window, Meta accepts the
+// call and silently drops it instead of rejecting it synchronously with
+// 131047 (delivery failure only shows up later via a status webhook we don't
+// listen for). Catching 131047 reactively therefore doesn't reliably work.
+// Check the window proactively instead, from the contact's own last inbound
+// message, and go straight to the template when it's closed.
+async function isWithinMessagingWindow(toNumber) {
+  const contacts = await sbRequest('GET', `contacts?phone_number=eq.${encodeURIComponent(toNumber)}&select=id`);
+  const contactId = contacts[0]?.id;
+  if (!contactId) return false;
+  const rows = await sbRequest(
+    'GET',
+    `conversations?sender_contact_id=eq.${contactId}&direction=eq.inbound&select=created_at&order=created_at.desc&limit=1`
+  );
+  if (!rows[0]) return false;
+  const hoursSinceLastInbound = (Date.now() - new Date(rows[0].created_at).getTime()) / (1000 * 60 * 60);
+  return hoursSinceLastInbound < 23; // stay a safety margin under the real 24h cutoff
+}
+
 async function sendWhatsApp(toNumber, text) {
+  if (!(await isWithinMessagingWindow(toNumber))) {
+    return sendWhatsAppTemplate(toNumber, text);
+  }
   try {
     return await helpers.httpRequest({
       method: 'POST',
