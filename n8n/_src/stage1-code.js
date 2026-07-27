@@ -153,6 +153,32 @@ async function getPastBookings(contactId, excludeBookingId) {
   );
 }
 
+// 7 days after the event date, a booking's chat stops staying permanently
+// connected to the PM and falls back to the normal automated flow -- see
+// the comment on bookings.connected_to_pm_at in schema.sql. No event_date
+// yet means it can't have happened, so never past cutoff.
+function isPastConnectionCutoff(booking) {
+  if (!booking.event_date) return false;
+  const cutoff = new Date(`${booking.event_date}T00:00:00Z`);
+  cutoff.setUTCDate(cutoff.getUTCDate() + 7);
+  return Date.now() >= cutoff.getTime();
+}
+
+// Same KB-lookup logic as kb-check-code.js's own inline check -- duplicated
+// rather than called cross-workflow (matching this codebase's existing
+// pattern of small per-file helper duplication) so the "connected" branch
+// below can get a synchronous found/answer decision without a network
+// round-trip through another workflow.
+async function checkKnowledgeBase(text) {
+  const kb = await sbRequest('GET', 'knowledge_base?select=question,answer&order=last_updated.desc');
+  const kbText = kb.map((row, i) => `${i + 1}. Q: ${row.question}\n   A: ${row.answer}`).join('\n') || '(knowledge base is empty)';
+  const result = await askOpenAIJson(
+    `You are answering a WhatsApp question for an event venue called Bali, in a warm, brief, conversational tone (never sound like an AI or a company bot). Use ONLY the knowledge base below to answer -- do not make anything up. If the knowledge base doesn't confidently cover the client's question, say so.\n\nKnowledge base:\n${kbText}\n\nReply ONLY with JSON: {"found": true/false, "answer": "..."} -- "answer" is the warm reply to send if found, or omitted/empty if not found.`,
+    text || ''
+  );
+  return result || { found: false };
+}
+
 // Intake just finished. Negotiation is a one-at-a-time, single-slot
 // conversation (bookings.mode = 'pm-led', DB-enforced to at most one row) --
 // if the PM is free, take this straight to the front and open it
@@ -190,7 +216,9 @@ async function notifyPmOfCompletedIntake(booking) {
   const activeRows = await sbRequest('GET', 'bookings?mode=eq.pm-led&limit=1&select=id');
   if (activeRows.length === 0) {
     // Nobody's open right now -- take this straight to the front.
-    await sbPatch(`bookings?id=eq.${booking.id}`, { mode: 'pm-led' });
+    // connected_to_pm_at is set once and never cleared -- see the comment on
+    // that column in schema.sql.
+    await sbPatch(`bookings?id=eq.${booking.id}`, { mode: 'pm-led', connected_to_pm_at: new Date().toISOString() });
     const history = await sbRequest(
       'GET',
       `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text`
@@ -504,49 +532,41 @@ if (!booking) {
   }
   await sbRequest('POST', 'conversations', logs);
   return [{ json: { action: 'awaiting_contract_handled', booking_id: booking.id, replied: !!replyText } }];
-} else if (booking.status === 'signed' || booking.status === 'onboarded') {
-  // Event is booked -- planning is an open-ended, ongoing relationship with
-  // the PM (decor tweaks, timing changes, etc.), not a single negotiation
-  // session, so there's no "open"/"close" toggle here: always relay straight
-  // through. Prefixed with the event name since the PM may have several of
-  // these going at once (see pm-toggle-code.js's planning-relay routing,
-  // which uses this exact prefix to route his replies back).
-  logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: effectiveText, stage: 'planning_relay' });
-  const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
-  const pm = pmRows[0];
-  if (pm) {
-    const forwardText = `${booking.event_name}: ${effectiveText}`;
-    const msgId = await sendWhatsApp(pm.phone_number, forwardText);
-    logs.push({
-      booking_id: booking.id,
-      sender_contact_id: null,
-      direction: 'outbound',
-      message_text: forwardText,
-      stage: 'planning_relay_to_pm',
-      whatsapp_message_id: msgId || null,
-    });
-  }
-  await sbRequest('POST', 'conversations', logs);
-  return [{ json: { action: 'planning_relayed_to_pm', booking_id: booking.id } }];
-} else if (booking.status !== 'inquiry' && booking.mode === 'pm-led') {
-  // The PM has explicitly "opened" this booking and is live-driving the
-  // conversation (Section 3) -- pm-toggle-code.js relays the PM's replies to
-  // the client, but the client's own messages need the same relay in the
-  // other direction, or the PM never actually sees what the client says.
+} else if (booking.status !== 'inquiry' && booking.connected_to_pm_at && !isPastConnectionCutoff(booking)) {
+  // Once the PM has opened this booking at least once, the chat stays
+  // connected to him -- through invoicing, contract, and the ongoing
+  // signed/onboarded relationship -- regardless of the FIFO "mode" toggle
+  // (which only governs the single-slot live-negotiation lock and flips
+  // back to 'bot-led' once "close" hands this booking off to invoicing).
+  // The one exception: if the bot has a confident knowledge-base answer, it
+  // answers directly instead of bothering him. This connected period ends
+  // 7 days after the event date (see isPastConnectionCutoff), after which
+  // it falls through to the normal automated/KB-escalation flow below.
   logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: effectiveText, stage: booking.status });
-  const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
-  const pm = pmRows[0];
-  if (pm) {
-    await sendWhatsApp(pm.phone_number, `"${booking.event_name}": ${effectiveText}`);
-    logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed to PM] ${effectiveText}`, stage: booking.status });
+
+  const kb = await checkKnowledgeBase(effectiveText);
+  if (kb?.found && kb.answer) {
+    await sendWhatsApp(from_number, kb.answer);
+    logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: kb.answer, stage: 'kb_answered' });
+  } else {
+    const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
+    const pm = pmRows[0];
+    if (pm) {
+      const forwardText = `"${booking.event_name}": ${effectiveText}`;
+      const msgId = await sendWhatsApp(pm.phone_number, forwardText);
+      logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed to PM] ${effectiveText}`, stage: 'connected_relay_to_pm', whatsapp_message_id: msgId || null });
+    }
   }
+
   await sbRequest('POST', 'conversations', logs);
-  return [{ json: { action: 'relayed_to_pm', booking_id: booking.id } }];
+  return [{ json: { action: 'connected_relay_handled', booking_id: booking.id } }];
 } else if (booking.status !== 'inquiry') {
-  // Intake is done but the PM hasn't opened this booking yet (still bot-led).
-  // Going completely silent here reads as broken -- actually answer genuine
-  // questions via the knowledge base, and give a warm, freshly-worded
-  // reassurance for anything else, instead of ignoring the client.
+  // Never connected yet (still queued in the FIFO, PM hasn't opened it), or
+  // past the 7-day-post-event connection cutoff -- either way, back to the
+  // normal automated flow. Going completely silent here reads as broken --
+  // actually answer genuine questions via the knowledge base, and give a
+  // warm, freshly-worded reassurance for anything else, instead of ignoring
+  // the client.
   logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: effectiveText, stage: booking.status });
 
   const history = await sbRequest(

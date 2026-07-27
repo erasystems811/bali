@@ -63,6 +63,14 @@ create table bookings (
   -- the oldest bot-led, still-negotiating booking is next up when the PM
   -- closes whatever's currently open (see pm-toggle-code.js).
   negotiation_queued_at timestamptz,
+  -- Set once, the first time the PM opens this booking (mode -> 'pm-led'),
+  -- and never cleared -- unlike `mode`, which toggles back to 'bot-led' for
+  -- the FIFO negotiation-queue lock alone. From that point on, the client's
+  -- messages relay straight to the PM (bot only intercepts if it has a
+  -- confident knowledge-base answer) regardless of status or the current
+  -- mode toggle, until 7 days after event_date, when it reverts to the
+  -- normal automated/KB-escalation flow (see stage1-code.js).
+  connected_to_pm_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

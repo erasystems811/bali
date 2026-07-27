@@ -152,7 +152,12 @@ async function findPmLedBooking() {
 // fires on "close" -- opening a booking always means the same thing: flip
 // the lock, show what's already been discussed, and tell the PM it's live.
 async function openBookingForPm(booking, fromNumber, { auto } = {}) {
-  await sbPatch(`bookings?id=eq.${booking.id}`, { mode: 'pm-led' });
+  // connected_to_pm_at is set once and never cleared -- see the comment on
+  // that column in schema.sql. It's what keeps the client's messages
+  // relaying straight to the PM even after "close" flips mode back to
+  // 'bot-led' for the FIFO negotiation lock (e.g. once this booking moves
+  // on to invoicing).
+  await sbPatch(`bookings?id=eq.${booking.id}`, { mode: 'pm-led', connected_to_pm_at: new Date().toISOString() });
 
   const history = await sbRequest('GET', `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text`);
   if (history.length > 0) {
@@ -287,15 +292,17 @@ if (trimmed.toLowerCase() === 'close') {
   return [{ json: { action: 'closed', booking_id: open.id, next_booking_id: nextInQueue[0]?.id || null } }];
 }
 
-// --- Explicit "[event name]: message" -- always-on planning conversations ---------
-// Signed/onboarded bookings have no open/close toggle (see stage1-code.js) --
-// this is how the PM addresses one directly, unambiguously, whether replying
-// or messaging first. Checked before everything else since it's explicit.
+// --- Explicit "[event name]: message" -- always-on connected conversations -------
+// Any booking connected_to_pm_at (see schema.sql) has no open/close toggle
+// once past the live-negotiation stage -- this is how the PM addresses one
+// directly and unambiguously, whether replying or messaging first, since
+// several can be connected at once (invoiced, awaiting contract, signed,
+// onboarded...). Checked before everything else since it's explicit.
 const prefixMatch = trimmed.match(/^([^:]{2,60}):\s*([\s\S]+)$/);
 if (prefixMatch) {
   const prefixMatches = await sbRequest(
     'GET',
-    `bookings?event_name=ilike.*${encodeURIComponent(prefixMatch[1].trim())}*&status=in.(signed,onboarded)&select=id,event_name,client_contact_id`
+    `bookings?event_name=ilike.*${encodeURIComponent(prefixMatch[1].trim())}*&connected_to_pm_at=not.is.null&status=neq.cancelled&select=id,event_name,client_contact_id`
   );
   if (prefixMatches.length === 1) {
     const booking = prefixMatches[0];

@@ -418,7 +418,12 @@ async function draftInvoice(bookingId) {
     if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
   }
 
-  await sbPatch(`bookings?id=eq.${bookingId}`, { status: 'invoiced' });
+  // Safety net for the manual "invoice [event]" command, which can trigger
+  // this without the booking ever having gone through openBookingForPm --
+  // connected_to_pm_at (see schema.sql) needs to be set regardless, or the
+  // client's subsequent messages would fall through to the pre-connection
+  // automated flow instead of staying connected to the PM.
+  await sbPatch(`bookings?id=eq.${bookingId}`, { status: 'invoiced', connected_to_pm_at: booking.connected_to_pm_at || new Date().toISOString() });
 
   if (booking.staffing_type === null || booking.staffing_type === undefined) {
     await askPmDirectly(bookingId, 'staffing_type', `For "${booking.event_name}" -- full-time or part-time staff needed?`);
