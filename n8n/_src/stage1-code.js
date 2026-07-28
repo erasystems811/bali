@@ -547,12 +547,18 @@ if (!booking) {
   // answers directly instead of bothering him. This connected period ends
   // 7 days after the event date (see isPastConnectionCutoff), after which
   // it falls through to the normal automated/KB-escalation flow below.
-  logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: effectiveText, stage: booking.status });
+  // whatsapp_message_id must be present (even if null) on every row here --
+  // PostgREST's bulk insert rejects the whole batch (PGRST102 "All object
+  // keys must match") if one row in the array has a key another doesn't.
+  // Confirmed live: this silently broke every post-intake customer message
+  // once the relay path (which adds whatsapp_message_id) ran alongside the
+  // inbound log (which didn't).
+  logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: effectiveText, stage: booking.status, whatsapp_message_id: null });
 
   const kb = await checkKnowledgeBase(effectiveText);
   if (kb?.found && kb.answer) {
     await sendWhatsApp(from_number, kb.answer);
-    logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: kb.answer, stage: 'kb_answered' });
+    logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: kb.answer, stage: 'kb_answered', whatsapp_message_id: null });
   } else {
     const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
     const pm = pmRows[0];
@@ -562,7 +568,6 @@ if (!booking) {
       logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed to PM] ${effectiveText}`, stage: 'connected_relay_to_pm', whatsapp_message_id: msgId || null });
     }
   }
-
   await sbRequest('POST', 'conversations', logs);
   return [{ json: { action: 'connected_relay_handled', booking_id: booking.id } }];
 } else if (booking.status !== 'inquiry') {
