@@ -166,11 +166,11 @@ async function openBookingForPm(booking, fromNumber, { auto } = {}) {
   }
 
   const openedLine = auto
-    ? `Next up: "${booking.event_name}". I'll relay everything straight through until you type "close".`
-    : `Opened "${booking.event_name}". I'll relay everything straight through until you type "close".`;
+    ? `Next up: "${booking.event_name}".`
+    : `Opened "${booking.event_name}".`;
   const tipLines = [
     'Note:',
-    `- Start replies with the event name, e.g. "${booking.event_name}: your message" -- helps me tell customers apart when more than one is texting at once.`,
+    `- Every message you want the customer to see must start with the event name, e.g. "${booking.event_name}: your message" -- otherwise it stays between just us, it will NOT reach them.`,
     `- Once you've agreed a price, say something like "generate invoice for ${booking.event_name}" and I'll send it out.`,
     `- "${booking.event_name}: close" ends that conversation and hands the customer back to me.`,
     `- "${booking.event_name}: open" reconnects it.`,
@@ -367,35 +367,20 @@ if (prefixMatch) {
   }
 }
 
-// --- Relay: a PM-led booking is open, forward verbatim to that client --------------
-// Only when there's nothing else this reply could be answering -- `mode`
-// stays 'pm-led' all the way through invoicing (only the explicit "close"
-// command resets it), so the bot can still ask the PM a direct question
-// (e.g. staffing_type right after invoicing) while a booking is open.
-// Confirmed live: without this check, a plain "full time" answer to that
-// question got blindly relayed straight to the customer instead of being
-// captured, and a swipe-reply to a specific pending question would have hit
-// the same bug. Skip the blind relay whenever this is an explicit reply to
-// an earlier message, or this booking itself has something open waiting on
-// the PM -- either way, fall through to the pending-question matching below.
-const pmLed = await findPmLedBooking();
-if (pmLed) {
-  const ownPending = reply_to_message_id
-    ? []
-    : await sbRequest('GET', `pending_questions?booking_id=eq.${pmLed.id}&resolved_at=is.null&limit=1&select=id`);
-  if (!reply_to_message_id && ownPending.length === 0) {
-    const client = await sbRequest('GET', `contacts?id=eq.${pmLed.client_contact_id}&select=*`);
-    const clientPhone = client[0]?.phone_number;
-    if (clientPhone) {
-      await sendWhatsApp(clientPhone, text || '');
-    }
-    await logConversation(pmLed.id, contact_id, 'inbound', text, 'pm_led_relay');
-    await logConversation(pmLed.id, null, 'outbound', text, 'pm_led_relay');
-    return [{ json: { action: 'relayed', booking_id: pmLed.id } }];
-  }
-}
+// --- No implicit relay path. A message only ever reaches a client via the
+// explicit "[event name]: message" syntax above -- never as a side effect of
+// a booking merely being open/pm-led. There used to be a catch-all here that
+// forwarded any plain reply verbatim whenever a booking was pm-led; removed
+// entirely (owner's explicit call, zero tolerance for accidental leaks) --
+// it already caused a real leak once (a plain "full time" answer to the
+// bot's own staffing_type question reached the customer instead of being
+// captured) and gating it on "is there a pending question" was judged not
+// safe enough. Any plain-text reply from here on is checked ONLY against
+// open pending questions / planning conversations below; if it's not
+// explicitly prefixed and doesn't match one of those, it never leaves this
+// chat with the PM.
 
-// --- Otherwise: is this an answer to a pending question, or a reply on an
+// --- Is this an answer to a pending question, or a reply on an
 // always-on planning conversation? Treat both as one pool of "things needing
 // the PM's attention" so a lone open item -- of either kind -- auto-matches,
 // and only a genuine mix asks which one. -------------------------------------
