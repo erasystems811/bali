@@ -293,19 +293,59 @@ if (trimmed.toLowerCase() === 'close') {
 }
 
 // --- Explicit "[event name]: message" -- always-on connected conversations -------
-// Any booking connected_to_pm_at (see schema.sql) has no open/close toggle
-// once past the live-negotiation stage -- this is how the PM addresses one
-// directly and unambiguously, whether replying or messaging first, since
-// several can be connected at once (invoiced, awaiting contract, signed,
-// onboarded...). Checked before everything else since it's explicit.
+// This is how the PM addresses a specific booking directly and
+// unambiguously, whether replying, messaging first, or running the
+// per-event "close"/"open" commands below -- several bookings can be
+// connected at once (invoiced, awaiting contract, signed, onboarded...), so
+// there's no single implicit target the way there is during live
+// negotiation. Matching is fuzzy (case, spacing, and punctuation all
+// ignored) so the PM doesn't have to type the event name exactly -- see
+// normalizeEventRef. Checked before everything else since it's explicit.
+function normalizeEventRef(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
 const prefixMatch = trimmed.match(/^([^:]{2,60}):\s*([\s\S]+)$/);
 if (prefixMatch) {
-  const prefixMatches = await sbRequest(
-    'GET',
-    `bookings?event_name=ilike.*${encodeURIComponent(prefixMatch[1].trim())}*&connected_to_pm_at=not.is.null&status=neq.cancelled&select=id,event_name,client_contact_id`
-  );
-  if (prefixMatches.length === 1) {
-    const booking = prefixMatches[0];
+  const typedRef = normalizeEventRef(prefixMatch[1]);
+  const candidates = typedRef
+    ? await sbRequest('GET', 'bookings?status=neq.cancelled&event_name=not.is.null&select=id,event_name,client_contact_id,connected_to_pm_at')
+    : [];
+  const matches = candidates.filter((b) => {
+    const ref = normalizeEventRef(b.event_name);
+    return ref && (ref.includes(typedRef) || typedRef.includes(ref));
+  });
+
+  if (matches.length === 1) {
+    const booking = matches[0];
+    const suffix = prefixMatch[2].trim().toLowerCase();
+
+    // Per-event close/open -- separate from the bare "close" command below,
+    // which only ever affects whichever single booking is currently live-
+    // negotiating (mode='pm-led'). This one can disconnect or reconnect any
+    // booking by name, regardless of its status or the negotiation lock.
+    if (suffix === 'close') {
+      if (!booking.connected_to_pm_at) {
+        await sendWhatsApp(from_number, `"${booking.event_name}" isn't connected right now.`);
+      } else {
+        await sbPatch(`bookings?id=eq.${booking.id}`, { connected_to_pm_at: null });
+        await sendWhatsApp(from_number, `Closed "${booking.event_name}". Back to automated.`);
+      }
+      return [{ json: { action: 'connected_closed', booking_id: booking.id } }];
+    }
+    if (suffix === 'open') {
+      await sbPatch(`bookings?id=eq.${booking.id}`, { connected_to_pm_at: new Date().toISOString() });
+      await sendWhatsApp(from_number, `Reopened "${booking.event_name}". I'll relay everything straight through until you say "${booking.event_name}: close".`);
+      return [{ json: { action: 'connected_reopened', booking_id: booking.id } }];
+    }
+
+    // A plain message to a not-yet-connected booking counts as the PM
+    // engaging with it directly -- connect it as a side effect, same as
+    // "open", so future client messages keep relaying to him too.
+    if (!booking.connected_to_pm_at) {
+      await sbPatch(`bookings?id=eq.${booking.id}`, { connected_to_pm_at: new Date().toISOString() });
+    }
+
     const client = (await sbRequest('GET', `contacts?id=eq.${booking.client_contact_id}&select=*`))[0];
     const replyBody = prefixMatch[2];
     if (client?.phone_number) {

@@ -552,7 +552,7 @@ if (!booking) {
     const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
     const pm = pmRows[0];
     if (pm) {
-      const forwardText = `"${booking.event_name}": ${effectiveText}`;
+      const forwardText = `${booking.event_name}: ${effectiveText}`;
       const msgId = await sendWhatsApp(pm.phone_number, forwardText);
       logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed to PM] ${effectiveText}`, stage: 'connected_relay_to_pm', whatsapp_message_id: msgId || null });
     }
