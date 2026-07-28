@@ -412,7 +412,9 @@ async function draftInvoice(bookingId) {
   const extraction = await askOpenAIJson(
     `Extract invoice details from this WhatsApp negotiation transcript for an event venue called Bali. "PM" is the venue's own negotiator -- treat PM lines as authoritative for what was agreed, alongside anything the Client said.
 
-Typical items for this venue: stage, sound, screen, power (sometimes called "light" or "electricity"), staff, security (sometimes "vigilante"), vendors/vendor management, ticketing, internet, payment system, technical support, police. Not every client wants every item -- only include items actually discussed/agreed for this specific booking, however they're phrased (comma-separated, listed plainly, spread across separate messages, casual wording).
+A negotiation is not a shopping list -- items and prices get proposed, countered, dropped, and changed as the conversation goes on. Only extract what was FINALLY agreed, not everything that was ever mentioned. If an item was discussed but later removed, replaced, or never confirmed, leave it out. If a price for an item changed partway through, use the LATEST stated figure, not an earlier offer. Read the whole conversation in order and settle on its end state before extracting -- don't just collect every item/number that appears anywhere in it.
+
+Typical items for this venue: stage, sound, screen, power (sometimes called "light" or "electricity"), staff, security (sometimes "vigilante"), vendors/vendor management, ticketing, internet, payment system, technical support, police. Not every client wants every item -- only include items that ended up actually agreed for this specific booking, however they're phrased (comma-separated, listed plainly, spread across separate messages, casual wording).
 
 Two pricing patterns to watch for:
 1. ITEMIZED -- each item has its own stated amount: extract one line item per item with its own amount.
