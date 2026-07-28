@@ -132,6 +132,24 @@ async function openaiExtract(fieldPrompt, userText) {
   }
 }
 
+async function askOpenAIText(systemPrompt, userText) {
+  const res = await helpers.httpRequest({
+    method: 'POST',
+    url: 'https://api.openai.com/v1/chat/completions',
+    headers: { Authorization: `Bearer ${env.OPENAI_KEY}`, 'Content-Type': 'application/json' },
+    body: {
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userText || '' },
+      ],
+    },
+    json: true,
+    timeout: 30000,
+  });
+  return res.choices?.[0]?.message?.content?.trim() || null;
+}
+
 const FIELD_PROMPTS = {
   staffing_type: 'The PM is answering whether the event needs full-time or part-time staff. Reply ONLY with JSON: {"understood": true/false, "value": "full-time"|"part-time"}.',
   security_count: 'The PM is answering how many security/bouncers are needed for the event. Reply ONLY with JSON: {"understood": true/false, "value": <integer>}.',
@@ -449,23 +467,24 @@ if (planningTarget) {
 
 if (!target) {
   // A message with no event-name prefix is always to me directly, never to a
-  // client -- see the header comment above. But the PM doesn't always
-  // remember that, and the generic "that's for me" reply isn't much help
-  // when he actually meant it for a customer -- so actually read the message
-  // and tell him which situation he's in, rather than one static line
-  // regardless of content.
+  // client -- see the header comment above. Owner's explicit call: no more
+  // pre-classifying and picking between canned replies -- this is meant to
+  // be an operational system, so just let the model actually answer the
+  // question or help with the task, and be honest about what it can't do
+  // yet, rather than routing through fixed template text.
   const pmLed = await findPmLedBooking();
-  const readAsClientReply = await openaiExtract(
-    'A venue PM just sent this WhatsApp message to Bali (the venue\'s own operational bot) with no event-name prefix, so it was NOT sent to any client. Decide: does this read like something the PM actually meant a CUSTOMER to see -- a reply, confirmation, answer, greeting, or instruction addressed to a client -- or does it read like a note, question, or request directed at the bot/venue staff itself, not meant for any customer? A short generic confirmation ("sure", "ok noted", "that works", "sorry for the delay") is genuinely ambiguous out of context -- when unsure, default to true, since wrongly guessing customer-directed just reminds the PM about the event-name prefix (harmless), while wrongly guessing bot-directed silently drops a real attempt to reply to a client. Only answer false when the message clearly reads as a request/note about the venue\'s own operations (reports, staff, schedules, SOPs, internal questions) with nothing that could plausibly be client-facing. Reply ONLY with JSON: {"looks_customer_directed": true/false}.',
-    text || ''
-  );
+  const reply = await askOpenAIText(
+    `You are Bali, an event venue's own WhatsApp operational assistant. You're talking directly with venue staff (the PM) here -- no client is on this thread, and nothing you say here is ever sent to a client. Answer their question or help with what they're asking, using anything below that's relevant.
 
-  const exampleEvent = pmLed?.event_name || "Amara's Wedding";
-  const reply = readAsClientReply?.looks_customer_directed
-    ? `That stayed with me -- looks like it might've been meant for a client. If so, start it with the event name (e.g. "${exampleEvent}: ...") and I'll send it through.`
-    : 'Got it -- that\'s for me, but I don\'t have a way to handle it yet.';
+What you can actually do today: manage one client negotiation at a time ("open [event name]" / "close"), generate invoices ("generate invoice for [event name]"), and relay a message to a specific client only when a message starts with "[event name]: ". Reaching a client always requires that exact prefix -- if the PM seems to want something sent to a client, say so and tell them to prefix it with the event name.
+
+For anything else -- messaging other staff, pulling reports, other operational tasks -- you don't have that built yet. If asked for something like that, say plainly that you can't do it yet rather than pretending to. Keep your reply short, natural, and professional -- no filler, no fake enthusiasm.
+
+${pmLed ? `Currently open with a client: "${pmLed.event_name}".` : 'Nothing currently open with a client.'}`,
+    text || ''
+  ) || "Sorry, I couldn't process that -- try rephrasing?";
   await sendWhatsApp(from_number, reply);
-  return [{ json: { action: 'unclassified', looks_customer_directed: !!readAsClientReply?.looks_customer_directed } }];
+  return [{ json: { action: 'unclassified' } }];
 }
 
 // Resolve the matched pending question.
