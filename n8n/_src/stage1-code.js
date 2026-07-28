@@ -235,6 +235,7 @@ async function notifyPmOfCompletedIntake(booking) {
       '',
       'Note:',
       `- Start replies with the event name, e.g. "${booking.event_name}: your message" -- helps me tell customers apart when more than one is texting at once.`,
+      `- Once you've agreed a price, say something like "generate invoice for ${booking.event_name}" and I'll send it out.`,
       `- "${booking.event_name}: close" ends that conversation and hands the customer back to me.`,
       `- "${booking.event_name}: open" reconnects it.`,
     ].join('\n'));

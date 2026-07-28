@@ -171,6 +171,7 @@ async function openBookingForPm(booking, fromNumber, { auto } = {}) {
   const tipLines = [
     'Note:',
     `- Start replies with the event name, e.g. "${booking.event_name}: your message" -- helps me tell customers apart when more than one is texting at once.`,
+    `- Once you've agreed a price, say something like "generate invoice for ${booking.event_name}" and I'll send it out.`,
     `- "${booking.event_name}: close" ends that conversation and hands the customer back to me.`,
     `- "${booking.event_name}: open" reconnects it.`,
   ].join('\n');
@@ -223,7 +224,10 @@ const { from_number, text, reply_to_message_id, contact_id } = input;
 const trimmed = (text || '').trim();
 
 // --- Command: "invoice [event name]" -- manual trigger to draft the invoice --------
-const invoiceMatch = trimmed.match(/^invoice\s+(.+)$/i);
+// Fuzzy on purpose -- the PM shouldn't have to remember an exact phrase.
+// Matches "invoice X", "generate invoice for X", "please create an invoice
+// for X", "send invoice to X", etc.
+const invoiceMatch = trimmed.match(/^(?:please\s+)?(?:generate|create|make|send|draft)?\s*(?:an?\s+)?invoice(?:\s+(?:for|to))?\s+(.+)$/i);
 if (invoiceMatch) {
   const eventName = invoiceMatch[1].trim();
   const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(eventName)}*&status=neq.cancelled&select=*`);
