@@ -375,10 +375,18 @@ if (prefixMatch) {
 // it already caused a real leak once (a plain "full time" answer to the
 // bot's own staffing_type question reached the customer instead of being
 // captured) and gating it on "is there a pending question" was judged not
-// safe enough. Any plain-text reply from here on is checked ONLY against
-// open pending questions / planning conversations below; if it's not
-// explicitly prefixed and doesn't match one of those, it never leaves this
-// chat with the PM.
+// safe enough.
+//
+// Bigger picture, per the owner: Bali isn't just a sales bot with client
+// relay as its default mode -- it's meant to grow into a full operational
+// system the PM (and eventually other staff) talks to directly for many
+// things beyond this one sales/onboarding workflow (messaging other staff,
+// pulling reports, etc. -- not built yet). So the default for any PM message
+// is "this is a request to me", full stop -- reaching a client is the one
+// deliberate exception, gated behind an explicit prefix, never the fallback.
+// Any plain-text reply from here on is checked ONLY against open pending
+// questions / planning conversations below; if it's not explicitly prefixed
+// and doesn't match one of those, it never leaves this chat with the PM.
 
 // --- Is this an answer to a pending question, or a reply on an
 // always-on planning conversation? Treat both as one pool of "things needing
@@ -440,9 +448,13 @@ if (planningTarget) {
 }
 
 if (!target) {
+  // A message with no event-name prefix is always to me directly, never to a
+  // client -- see the header comment above. I just don't have a workflow
+  // built yet for whatever this one was asking. Say so plainly rather than
+  // implying it was a mistake.
   await sendWhatsApp(
     from_number,
-    'Not sure what that\'s for. Type "open [event name]" to take over a negotiation, start your message with the event name (e.g. "Amara\'s Wedding: ...") to reach a client directly, or let me know what you mean.'
+    'That one\'s for me, but I don\'t have a way to handle it yet. Start your message with the event name (e.g. "Amara\'s Wedding: ...") if you want it to reach a client, or "open [event name]" to take over a negotiation.'
   );
   return [{ json: { action: 'unclassified' } }];
 }
