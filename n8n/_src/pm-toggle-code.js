@@ -449,14 +449,23 @@ if (planningTarget) {
 
 if (!target) {
   // A message with no event-name prefix is always to me directly, never to a
-  // client -- see the header comment above. I just don't have a workflow
-  // built yet for whatever this one was asking. Say so plainly rather than
-  // implying it was a mistake.
-  await sendWhatsApp(
-    from_number,
-    'That one\'s for me, but I don\'t have a way to handle it yet. Start your message with the event name (e.g. "Amara\'s Wedding: ...") if you want it to reach a client, or "open [event name]" to take over a negotiation.'
+  // client -- see the header comment above. But the PM doesn't always
+  // remember that, and the generic "that's for me" reply isn't much help
+  // when he actually meant it for a customer -- so actually read the message
+  // and tell him which situation he's in, rather than one static line
+  // regardless of content.
+  const pmLed = await findPmLedBooking();
+  const readAsClientReply = await openaiExtract(
+    'A venue PM just sent this WhatsApp message to Bali (the venue\'s own operational bot) with no event-name prefix, so it was NOT sent to any client. Decide: does this read like something the PM actually meant a CUSTOMER to see -- a reply, confirmation, answer, greeting, or instruction addressed to a client -- or does it read like a note, question, or request directed at the bot/venue staff itself, not meant for any customer? A short generic confirmation ("sure", "ok noted", "that works", "sorry for the delay") is genuinely ambiguous out of context -- when unsure, default to true, since wrongly guessing customer-directed just reminds the PM about the event-name prefix (harmless), while wrongly guessing bot-directed silently drops a real attempt to reply to a client. Only answer false when the message clearly reads as a request/note about the venue\'s own operations (reports, staff, schedules, SOPs, internal questions) with nothing that could plausibly be client-facing. Reply ONLY with JSON: {"looks_customer_directed": true/false}.',
+    text || ''
   );
-  return [{ json: { action: 'unclassified' } }];
+
+  const exampleEvent = pmLed?.event_name || "Amara's Wedding";
+  const reply = readAsClientReply?.looks_customer_directed
+    ? `That stayed with me -- looks like it might've been meant for a client. If so, start it with the event name (e.g. "${exampleEvent}: ...") and I'll send it through.`
+    : 'Got it -- that\'s for me, but I don\'t have a way to handle it yet.';
+  await sendWhatsApp(from_number, reply);
+  return [{ json: { action: 'unclassified', looks_customer_directed: !!readAsClientReply?.looks_customer_directed } }];
 }
 
 // Resolve the matched pending question.
