@@ -368,16 +368,31 @@ if (prefixMatch) {
 }
 
 // --- Relay: a PM-led booking is open, forward verbatim to that client --------------
+// Only when there's nothing else this reply could be answering -- `mode`
+// stays 'pm-led' all the way through invoicing (only the explicit "close"
+// command resets it), so the bot can still ask the PM a direct question
+// (e.g. staffing_type right after invoicing) while a booking is open.
+// Confirmed live: without this check, a plain "full time" answer to that
+// question got blindly relayed straight to the customer instead of being
+// captured, and a swipe-reply to a specific pending question would have hit
+// the same bug. Skip the blind relay whenever this is an explicit reply to
+// an earlier message, or this booking itself has something open waiting on
+// the PM -- either way, fall through to the pending-question matching below.
 const pmLed = await findPmLedBooking();
 if (pmLed) {
-  const client = await sbRequest('GET', `contacts?id=eq.${pmLed.client_contact_id}&select=*`);
-  const clientPhone = client[0]?.phone_number;
-  if (clientPhone) {
-    await sendWhatsApp(clientPhone, text || '');
+  const ownPending = reply_to_message_id
+    ? []
+    : await sbRequest('GET', `pending_questions?booking_id=eq.${pmLed.id}&resolved_at=is.null&limit=1&select=id`);
+  if (!reply_to_message_id && ownPending.length === 0) {
+    const client = await sbRequest('GET', `contacts?id=eq.${pmLed.client_contact_id}&select=*`);
+    const clientPhone = client[0]?.phone_number;
+    if (clientPhone) {
+      await sendWhatsApp(clientPhone, text || '');
+    }
+    await logConversation(pmLed.id, contact_id, 'inbound', text, 'pm_led_relay');
+    await logConversation(pmLed.id, null, 'outbound', text, 'pm_led_relay');
+    return [{ json: { action: 'relayed', booking_id: pmLed.id } }];
   }
-  await logConversation(pmLed.id, contact_id, 'inbound', text, 'pm_led_relay');
-  await logConversation(pmLed.id, null, 'outbound', text, 'pm_led_relay');
-  return [{ json: { action: 'relayed', booking_id: pmLed.id } }];
 }
 
 // --- Otherwise: is this an answer to a pending question, or a reply on an
