@@ -168,7 +168,7 @@ async function uploadWhatsAppMedia(pdfBuffer, filename) {
   return res?.id || null;
 }
 
-async function askOpenAIJson(systemPrompt, userText) {
+async function askOpenAIJson(systemPrompt, userText, temperature) {
   const res = await helpers.httpRequest({
     method: 'POST',
     url: 'https://api.openai.com/v1/chat/completions',
@@ -176,6 +176,7 @@ async function askOpenAIJson(systemPrompt, userText) {
     body: {
       model: 'gpt-4o-mini',
       response_format: { type: 'json_object' },
+      ...(temperature !== undefined ? { temperature } : {}),
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userText || '' },
@@ -351,8 +352,9 @@ function formatInvoiceDraftText(invoice, booking) {
 // loop and the post-PDF approval loop.
 async function extractInvoiceCorrection(invoice, answerText) {
   return askOpenAIJson(
-    `Here is a draft invoice's current line items and payment terms as JSON: ${JSON.stringify({ line_items: invoice.line_items, payment_terms: invoice.payment_terms, bill_to_name: invoice.bill_to_name, bill_to_location: invoice.bill_to_location })}\n\nThe PM has requested this correction: "${answerText}"\n\nReply ONLY with the corrected JSON in the exact same shape: {"line_items": [{"description": "...", "amount": <number>}], "payment_terms": "...", "bill_to_name": "...", "bill_to_location": "..."}.`,
-    answerText
+    `Here is a draft invoice's current line items and payment terms as JSON: ${JSON.stringify({ line_items: invoice.line_items, payment_terms: invoice.payment_terms, bill_to_name: invoice.bill_to_name, bill_to_location: invoice.bill_to_location })}\n\nThe PM has requested this correction: "${answerText}"\n\nAmounts are in Nigerian Naira -- shorthand like "6m" means 6,000,000 and "500k" means 500,000, convert to a plain number. If the correction states one collective price for multiple items, use exactly ONE line item listing all those items with that one amount -- never repeat the same amount across several line items. Reply ONLY with the corrected JSON in the exact same shape: {"line_items": [{"description": "...", "amount": <number>}], "payment_terms": "...", "bill_to_name": "...", "bill_to_location": "..."}.`,
+    answerText,
+    0
   );
 }
 
@@ -376,14 +378,60 @@ async function sendInvoiceForFinalApproval(invoice, booking) {
   }
 }
 
+// Some stages log the same relayed message twice (once as the PM/client's
+// own line, once as the verbatim copy delivered to the other side) -- a
+// naive inbound=Client/outbound=Bali mapping over the raw table would
+// misattribute the PM's own words to the client and duplicate every line.
+// Confirmed live: this is exactly why invoice extraction failed on a real
+// booking -- the PM's own "6m" and item list came through unattributed and
+// doubled, and the model gave up rather than guess who said what.
+const RELAY_ECHO_STAGES = new Set(['connected_relay_to_pm', 'planning_relay']);
+function speakerFor(row) {
+  if (RELAY_ECHO_STAGES.has(row.stage) || (row.stage === 'pm_led_relay' && row.direction === 'outbound')) {
+    return null; // redundant client-facing copy of a message already captured under its PM/Bali line
+  }
+  if (row.direction === 'inbound') {
+    return row.stage === 'pm_message' || row.stage === 'pm_led_relay' ? 'PM' : 'Client';
+  }
+  return 'Bali';
+}
+
+async function buildNegotiationTranscript(bookingId) {
+  const convo = await sbRequest('GET', `conversations?booking_id=eq.${bookingId}&order=created_at.asc&select=direction,message_text,stage`);
+  return convo
+    .map((m) => ({ speaker: speakerFor(m), text: m.message_text }))
+    .filter((m) => m.speaker)
+    .map((m) => `${m.speaker}: ${m.text}`)
+    .join('\n');
+}
+
 async function draftInvoice(bookingId) {
   const booking = await getBooking(bookingId);
-  const convo = await sbRequest('GET', `conversations?booking_id=eq.${bookingId}&order=created_at.asc&select=direction,message_text`);
-  const transcript = convo.map((m) => `${m.direction}: ${m.message_text}`).join('\n');
+  const transcript = await buildNegotiationTranscript(bookingId);
 
   const extraction = await askOpenAIJson(
-    'Extract invoice details from this WhatsApp negotiation between a PM and a client for an event venue called Bali. Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}], "payment_terms": "<e.g. \'100% Full Payment Due\', or \'60/40 split\', exactly as agreed>", "bill_to_name": "<client org/person name if mentioned, else null>", "bill_to_location": "<client city/location if mentioned, else null>"}. Only include PAID items (things the client is being charged for) as line items -- amounts are numbers in Nigerian Naira, no currency symbols or commas.',
-    transcript
+    `Extract invoice details from this WhatsApp negotiation transcript for an event venue called Bali. "PM" is the venue's own negotiator -- treat PM lines as authoritative for what was agreed, alongside anything the Client said.
+
+Typical items for this venue: stage, sound, screen, power (sometimes called "light" or "electricity"), staff, security (sometimes "vigilante"), vendors/vendor management, ticketing, internet, payment system, technical support, police. Not every client wants every item -- only include items actually discussed/agreed for this specific booking, however they're phrased (comma-separated, listed plainly, spread across separate messages, casual wording).
+
+Two pricing patterns to watch for:
+1. ITEMIZED -- each item has its own stated amount: extract one line item per item with its own amount.
+2. COLLECTIVE -- a single overall price is agreed for a set of items with no per-item breakdown (e.g. a list of items in one message and one lump amount in another): output exactly ONE line item whose description lists all the agreed items (comma-separated) and whose amount is that collective price. Never invent a per-item split that was never stated.
+
+If the transcript mixes both patterns (some items individually priced, the rest priced as one group), represent that mix faithfully: one line item per individually-priced item, plus one combined line item for whatever was priced together.
+
+Worked example of the COLLECTIVE case -- get this exactly right:
+PM: 6m
+PM: Sound, screen, power, staff, ticketing
+-> This is ONE collective price for FIVE items. Correct output has exactly ONE line item: {"description": "Sound, screen, power, staff, ticketing", "amount": 6000000}. WRONG: five line items each at 6000000 (that inflates the real total 5x -- never repeat one stated price across multiple line items).
+
+Amounts are in Nigerian Naira. Shorthand like "6m" means 6,000,000 and "500k" means 500,000 -- convert to a plain number, no currency symbols or commas. Only include PAID items (things the client is actually being charged for).
+
+payment_terms must be null unless the transcript explicitly states one -- if it does, phrase it the way it was actually agreed (things like "100% Full Payment Due" or "60/40 split" are just illustrations of the KIND of value this field holds, not something to output when nothing was actually said).
+
+Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}], "payment_terms": "<string exactly as agreed in the transcript, or null if not discussed>", "bill_to_name": "<the client's real name or organization ONLY if actually stated somewhere in the transcript, else null -- never a generic placeholder like the word \"Client\">", "bill_to_location": "<client city/location if mentioned, else null>"}.`,
+    transcript,
+    0
   );
   if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
     const pm = await findPm();
