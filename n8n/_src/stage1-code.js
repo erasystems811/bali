@@ -232,6 +232,8 @@ async function notifyPmOfCompletedIntake(booking) {
       ...transcriptLines,
       ...(transcriptLines.length > 0 ? [''] : []),
       `Opened "${booking.event_name}" -- I'll relay everything straight through until you type "close".`,
+      '',
+      `Tip: start your replies with the event name, e.g. "${booking.event_name}: your message" -- helps me tell customers apart when more than one is texting at once. "${booking.event_name}: close" ends that conversation and hands the customer back to me; "${booking.event_name}: open" reconnects it.`,
     ].join('\n'));
     return;
   }

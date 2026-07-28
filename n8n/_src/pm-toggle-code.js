@@ -168,7 +168,8 @@ async function openBookingForPm(booking, fromNumber, { auto } = {}) {
   const openedLine = auto
     ? `Next up: "${booking.event_name}". I'll relay everything straight through until you type "close".`
     : `Opened "${booking.event_name}". I'll relay everything straight through until you type "close".`;
-  await sendWhatsApp(fromNumber, openedLine);
+  const tipLine = `Tip: start your replies with the event name, e.g. "${booking.event_name}: your message" -- helps me tell customers apart when more than one is texting at once. "${booking.event_name}: close" ends that conversation and hands the customer back to me; "${booking.event_name}: open" reconnects it.`;
+  await sendWhatsApp(fromNumber, `${openedLine}\n\n${tipLine}`);
 }
 
 async function findOpenPendingQuestions() {
