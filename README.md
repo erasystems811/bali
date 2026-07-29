@@ -4,7 +4,7 @@ WhatsApp bot for Bali (event hospitality venue) handling client inquiries throug
 
 Full spec: see the owner's `bali-sales-onboarding-spec.md`. Current build status and setup steps: [`docs/setup.md`](docs/setup.md).
 
-**Stack:** Supabase (database, live) · self-hosted n8n (orchestration/bot logic, not yet hosted) · Retool free tier (admin visibility, not yet built) · Meta WhatsApp Cloud API, direct · OpenAI API (conversation engine)
+**Stack:** fully self-hosted on a DigitalOcean droplet (`bali-server`, 143.198.179.150, domain `bali.erasystems.com.ng`) — docker-compose stack of n8n (orchestration/bot logic), Postgres (own database, replacing Supabase), PostgREST (Supabase-API-compatible REST layer), Gotenberg (PDF rendering), Caddy (reverse proxy + automatic HTTPS) · a new self-hosted staff dashboard is replacing the old Retool admin UI (see `docs/setup.md` for status) · Meta WhatsApp Cloud API, direct · OpenAI API (conversation engine)
 
 ## Structure
 
