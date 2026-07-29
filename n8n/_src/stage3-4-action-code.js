@@ -405,9 +405,15 @@ async function buildNegotiationTranscript(bookingId) {
     .join('\n');
 }
 
-async function draftInvoice(bookingId) {
+async function draftInvoice(bookingId, pmDetails) {
   const booking = await getBooking(bookingId);
-  const transcript = await buildNegotiationTranscript(bookingId);
+  // pmDetails lets the PM hand the bot agreed items/price directly (e.g. the
+  // "invoice [event]: 2m for sound, screen and staff" command) with no real
+  // negotiation conversation on record -- appended as one more "PM:" line so
+  // the exact same extraction logic below (collective-vs-itemized, final-
+  // agreed-state) handles it, on top of whatever's actually in the history.
+  const history = await buildNegotiationTranscript(bookingId);
+  const transcript = pmDetails ? `${history}${history ? '\n' : ''}PM: ${pmDetails}` : history;
 
   const extraction = await askOpenAIJson(
     `Extract invoice details from this WhatsApp negotiation transcript for an event venue called Bali. "PM" is the venue's own negotiator -- treat PM lines as authoritative for what was agreed, alongside anything the Client said.
@@ -431,7 +437,7 @@ Amounts are in Nigerian Naira. Shorthand like "6m" means 6,000,000 and "500k" me
 
 payment_terms must be null unless the transcript explicitly states one -- if it does, phrase it the way it was actually agreed (things like "100% Full Payment Due" or "60/40 split" are just illustrations of the KIND of value this field holds, not something to output when nothing was actually said).
 
-Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}], "payment_terms": "<string exactly as agreed in the transcript, or null if not discussed>", "bill_to_name": "<the client's real name or organization ONLY if actually stated somewhere in the transcript, else null -- never a generic placeholder like the word \"Client\">", "bill_to_location": "<client city/location if mentioned, else null>"}.`,
+Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}], "payment_terms": "<string exactly as agreed in the transcript, or null if not discussed>", "bill_to_name": "<the client's real name or organization ONLY if actually stated somewhere in the transcript, else null (never a generic placeholder like the word \"Client\") -- the invoice defaults to billing the event name itself when this is null, so leave it null rather than guessing>", "bill_to_location": "<client city/location if mentioned, else null>"}.`,
     transcript,
     0
   );
@@ -447,7 +453,10 @@ Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}
   const invoice = (await sbInsert('invoices', {
     booking_id: bookingId,
     invoice_number: invoiceNumber,
-    bill_to_name: extraction.bill_to_name || null,
+    // Owner's call: bill to the event name by default -- unless the PM
+    // explicitly gave a different name/org, which extraction would have
+    // picked up above.
+    bill_to_name: extraction.bill_to_name || booking.event_name || null,
     bill_to_location: extraction.bill_to_location || null,
     line_items: extraction.line_items,
     payment_terms: extraction.payment_terms || null,
@@ -644,7 +653,7 @@ const input = $input.first().json.body || $input.first().json;
 const action = input.action;
 
 let result;
-if (action === 'draft_invoice') result = await draftInvoice(input.booking_id);
+if (action === 'draft_invoice') result = await draftInvoice(input.booking_id, input.pm_details);
 else if (action === 'resolve_invoice_draft_confirm') result = await resolveInvoiceDraftConfirm(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_invoice_approval') result = await resolveInvoiceApproval(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_payment_confirmed') result = await resolvePaymentConfirmed(input.pending_question_id, input.answer_text);

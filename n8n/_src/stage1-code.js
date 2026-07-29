@@ -234,7 +234,7 @@ async function notifyPmOfCompletedIntake(booking) {
       `Opened "${booking.event_name}".`,
       '',
       'Note:',
-      `- Every message you want the customer to see must start with the event name, e.g. "${booking.event_name}: your message" -- otherwise it stays between just us, it will NOT reach them.`,
+      `- Swipe-reply to their message to answer them directly -- no need to type the event name. Only start with "${booking.event_name}: " if you're messaging them first (nothing to swipe-reply to); otherwise it stays between just us and will NOT reach them.`,
       `- Once you've agreed a price, say something like "generate invoice for ${booking.event_name}" and I'll send it out.`,
       `- "${booking.event_name}: close" ends that conversation and hands the customer back to me.`,
       `- "${booking.event_name}: open" reconnects it.`,

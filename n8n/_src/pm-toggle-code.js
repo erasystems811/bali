@@ -188,7 +188,7 @@ async function openBookingForPm(booking, fromNumber, { auto } = {}) {
     : `Opened "${booking.event_name}".`;
   const tipLines = [
     'Note:',
-    `- Every message you want the customer to see must start with the event name, e.g. "${booking.event_name}: your message" -- otherwise it stays between just us, it will NOT reach them.`,
+    `- Swipe-reply to their message to answer them directly -- no need to type the event name. Only start with "${booking.event_name}: " if you're messaging them first (nothing to swipe-reply to); otherwise it stays between just us and will NOT reach them.`,
     `- Once you've agreed a price, say something like "generate invoice for ${booking.event_name}" and I'll send it out.`,
     `- "${booking.event_name}: close" ends that conversation and hands the customer back to me.`,
     `- "${booking.event_name}: open" reconnects it.`,
@@ -224,13 +224,18 @@ async function findAwaitingPlanningBookings() {
   return awaiting;
 }
 
-// Matches a PM swipe-reply against the specific "forwarded to PM" message
-// for a planning conversation (as opposed to the client-facing thread).
+// Matches a PM swipe-reply against the specific "forwarded to PM" message for
+// a client's message (logged with stage 'connected_relay_to_pm' -- see the
+// unified connected branch in stage1-code.js). This is the primary way a PM
+// replies to a customer now: swipe-reply to what the client said, no need to
+// type the event name -- the event name prefix is only the fallback for when
+// there's nothing to swipe-reply to (the PM messaging first, or the message
+// having scrolled out of easy reach).
 async function findPlanningBookingByForwardedMessageId(messageId) {
   if (!messageId) return null;
   const rows = await sbRequest(
     'GET',
-    `conversations?whatsapp_message_id=eq.${encodeURIComponent(messageId)}&stage=eq.planning_relay_to_pm&select=booking_id&limit=1`
+    `conversations?whatsapp_message_id=eq.${encodeURIComponent(messageId)}&stage=eq.connected_relay_to_pm&select=booking_id&limit=1`
   );
   if (!rows[0]) return null;
   const booking = await sbRequest('GET', `bookings?id=eq.${rows[0].booking_id}&select=id,event_name,client_contact_id`);
@@ -241,13 +246,23 @@ const input = $input.first().json.body;
 const { from_number, text, reply_to_message_id, contact_id } = input;
 const trimmed = (text || '').trim();
 
-// --- Command: "invoice [event name]" -- manual trigger to draft the invoice --------
-// Fuzzy on purpose -- the PM shouldn't have to remember an exact phrase.
-// Matches "invoice X", "generate invoice for X", "please create an invoice
-// for X", "send invoice to X", etc.
+// --- Command: "invoice [event name][: details]" -- manual trigger to draft
+// the invoice, directly to the bot -- no underlying client conversation
+// needed. Fuzzy on purpose -- the PM shouldn't have to remember an exact
+// phrase. Matches "invoice X", "generate invoice for X", "please create an
+// invoice for X", "send invoice to X", etc. Optionally, anything after a
+// colon is treated as the agreed items/price straight from the PM (e.g.
+// "generate invoice for Soundwave: 2m for sound, screen and staff") and gets
+// fed into the exact same extraction the bot already runs on a real
+// negotiation transcript -- same collective-vs-itemized handling, same
+// final-agreed-state logic, just with this one line standing in for (or
+// added on top of) whatever's actually in the conversation history.
 const invoiceMatch = trimmed.match(/^(?:please\s+)?(?:generate|create|make|send|draft)?\s*(?:an?\s+)?invoice(?:\s+(?:for|to))?\s+(.+)$/i);
 if (invoiceMatch) {
-  const eventName = invoiceMatch[1].trim();
+  const rest = invoiceMatch[1].trim();
+  const colonIdx = rest.indexOf(':');
+  const eventName = (colonIdx === -1 ? rest : rest.slice(0, colonIdx)).trim();
+  const pmDetails = colonIdx === -1 ? null : rest.slice(colonIdx + 1).trim();
   const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(eventName)}*&status=neq.cancelled&select=*`);
   if (matches.length === 0) {
     await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}". Check the spelling?`);
@@ -257,7 +272,7 @@ if (invoiceMatch) {
     method: 'POST',
     url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
     headers: { 'Content-Type': 'application/json' },
-    body: { action: 'draft_invoice', booking_id: matches[0].id },
+    body: { action: 'draft_invoice', booking_id: matches[0].id, pm_details: pmDetails },
     json: true,
     timeout: 15000,
   });
@@ -320,20 +335,58 @@ if (trimmed.toLowerCase() === 'close') {
   return [{ json: { action: 'closed', booking_id: open.id, next_booking_id: nextInQueue[0]?.id || null } }];
 }
 
-// --- Explicit "[event name]: message" -- always-on connected conversations -------
-// This is how the PM addresses a specific booking directly and
-// unambiguously, whether replying, messaging first, or running the
+// --- Swipe-reply resolution -- the PRIMARY way the PM replies to a client.
+// Checked first, ahead of everything else that follows: if the PM
+// swipe-replied to a specific WhatsApp message, that unambiguously
+// identifies what he's responding to, so there's no need to type the event
+// name -- and it avoids a colon anywhere in his reply text being misread as
+// an explicit "[event]:" prefix aimed at some other booking. Typing the
+// event name (below) is only the fallback for when there's nothing to
+// swipe-reply to: the PM messaging a client first, or the original message
+// having scrolled out of easy reach.
+const pending = await findOpenPendingQuestions();
+const planningCandidates = await findAwaitingPlanningBookings();
+
+let target = null; // a pending_questions row
+let planningTarget = null; // a booking row (signed/onboarded, or connected, awaiting reply)
+// The PM's actual reply text to act on -- normally the full message, but when
+// disambiguating by number (e.g. "2: yes") it's just the part after "2:".
+let answerText = text;
+
+if (reply_to_message_id) {
+  target = pending.find((p) => p.whatsapp_message_id === reply_to_message_id) || null;
+  if (!target) {
+    planningTarget = await findPlanningBookingByForwardedMessageId(reply_to_message_id);
+  }
+  if (planningTarget) {
+    const client = (await sbRequest('GET', `contacts?id=eq.${planningTarget.client_contact_id}&select=*`))[0];
+    if (client?.phone_number) {
+      await sendWhatsApp(client.phone_number, answerText);
+      await logConversation(planningTarget.id, null, 'outbound', answerText, 'planning_relay');
+    }
+    await logConversation(planningTarget.id, contact_id, 'inbound', answerText, 'pm_message');
+    return [{ json: { action: 'planning_relayed_to_client', booking_id: planningTarget.id } }];
+  }
+  // target set (a pending question) falls through -- resolved by the generic
+  // field-answer logic further down, same as any other match.
+}
+
+// --- Explicit "[event name]: message" -- typed fallback when there's
+// nothing to swipe-reply to. This is how the PM addresses a specific
+// booking directly and unambiguously when messaging first, or running the
 // per-event "close"/"open" commands below -- several bookings can be
 // connected at once (invoiced, awaiting contract, signed, onboarded...), so
 // there's no single implicit target the way there is during live
 // negotiation. Matching is fuzzy (case, spacing, and punctuation all
 // ignored) so the PM doesn't have to type the event name exactly -- see
-// normalizeEventRef. Checked before everything else since it's explicit.
+// normalizeEventRef. Skipped entirely if swipe-reply above already resolved
+// a target, so a colon in an answer to a pending question is never
+// misparsed as this prefix.
 function normalizeEventRef(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-const prefixMatch = trimmed.match(/^([^:]{2,60}):\s*([\s\S]+)$/);
+const prefixMatch = !target && trimmed.match(/^([^:]{2,60}):\s*([\s\S]+)$/);
 if (prefixMatch) {
   const typedRef = normalizeEventRef(prefixMatch[1]);
   const candidates = typedRef
@@ -406,25 +459,14 @@ if (prefixMatch) {
 // questions / planning conversations below; if it's not explicitly prefixed
 // and doesn't match one of those, it never leaves this chat with the PM.
 
-// --- Is this an answer to a pending question, or a reply on an
-// always-on planning conversation? Treat both as one pool of "things needing
-// the PM's attention" so a lone open item -- of either kind -- auto-matches,
-// and only a genuine mix asks which one. -------------------------------------
-const pending = await findOpenPendingQuestions();
-const planningCandidates = await findAwaitingPlanningBookings();
-
-let target = null; // a pending_questions row
-let planningTarget = null; // a booking row (signed/onboarded, awaiting reply)
-// The PM's actual reply text to act on -- normally the full message, but when
-// disambiguating by number (e.g. "2: yes") it's just the part after "2:".
-let answerText = text;
-
-if (reply_to_message_id) {
-  target = pending.find((p) => p.whatsapp_message_id === reply_to_message_id) || null;
-  if (!target) {
-    planningTarget = await findPlanningBookingByForwardedMessageId(reply_to_message_id);
-  }
-} else {
+// --- Is this an answer to a pending question, or a reply on an always-on
+// planning conversation, identified by COUNT rather than a swipe-reply?
+// (pending/planningCandidates/target/planningTarget/answerText were already
+// declared above -- reply_to_message_id, if present, was already fully
+// resolved there, so this only runs for plain-typed messages with nothing to
+// swipe-reply to.) Treat both pools as one so a lone open item of either
+// kind auto-matches, and only a genuine mix asks which one. -----------------
+if (!reply_to_message_id) {
   const totalCandidates = pending.length + planningCandidates.length;
   if (totalCandidates === 1) {
     if (pending.length === 1) target = pending[0];
