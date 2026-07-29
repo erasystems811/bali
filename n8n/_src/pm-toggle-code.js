@@ -566,7 +566,7 @@ if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
 }
 
 if (target.field_name === 'contract_confirmed') {
-  const saysYes = /^y(es)?\b/i.test(answerText.trim());
+  const saysYes = /^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test(answerText.trim());
   if (saysYes) {
     // Release the negotiation lock (mode) along with the status flip -- once
     // signed, this booking moves to the always-on planning relay instead of

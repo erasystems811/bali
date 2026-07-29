@@ -498,7 +498,7 @@ async function resolveInvoiceDraftConfirm(pendingId, answerText) {
   const booking = await getBooking(pq.booking_id);
   const invoice = (await sbRequest('GET', `invoices?booking_id=eq.${pq.booking_id}&order=created_at.desc&limit=1&select=*`))[0];
 
-  if (/^y(es)?\b/i.test((answerText || '').trim())) {
+  if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
     await sendInvoiceForFinalApproval(invoice, booking);
     return { ok: true, action: 'invoice_draft_confirmed_pdf_sent' };
   }
@@ -538,7 +538,7 @@ async function resolveInvoiceApproval(pendingId, answerText) {
   const booking = await getBooking(pq.booking_id);
   const invoice = (await sbRequest('GET', `invoices?booking_id=eq.${pq.booking_id}&order=created_at.desc&limit=1&select=*`))[0];
 
-  if (/^y(es)?\b/i.test((answerText || '').trim())) {
+  if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
     await sbPatch(`invoices?id=eq.${invoice.id}`, { status: 'sent_to_client' });
     const client = await getContact(booking.client_contact_id);
     const caption = `Here's your invoice for "${booking.event_name}".`;
@@ -576,7 +576,7 @@ async function resolvePaymentConfirmed(pendingId, answerText) {
   const booking = await getBooking(pq.booking_id);
   const invoice = (await sbRequest('GET', `invoices?booking_id=eq.${pq.booking_id}&order=created_at.desc&limit=1&select=*`))[0];
 
-  if (!/^y(es)?\b/i.test((answerText || '').trim())) {
+  if (!/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
     const client = await getContact(booking.client_contact_id);
     await sendWhatsApp(client.phone_number, "We couldn't confirm that payment yet -- could you resend proof of payment?");
     return { ok: true, action: 'payment_not_confirmed' };
@@ -631,7 +631,7 @@ async function resolveContractApproval(pendingId, answerText) {
   const booking = await getBooking(pq.booking_id);
   const contract = (await sbRequest('GET', `contracts?booking_id=eq.${pq.booking_id}&order=created_at.desc&limit=1&select=*`))[0];
 
-  if (/^y(es)?\b/i.test((answerText || '').trim())) {
+  if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
     await sbPatch(`bookings?id=eq.${booking.id}`, { status: 'sent_to_client' });
     await sbPatch(`contracts?id=eq.${contract.id}`, { approved_by_pm_at: new Date().toISOString(), sent_to_client_at: new Date().toISOString() });
     const client = await getContact(booking.client_contact_id);

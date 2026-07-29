@@ -303,7 +303,7 @@ if (action === 'resolve_kb_save_confirm') {
   const { pending_question_id, answer_text } = input;
   const pq = (await sbRequest('GET', `pending_questions?id=eq.${pending_question_id}&select=*`))[0];
   const pm = await findPm();
-  const saysYes = /^y(es)?\b/i.test((answer_text || '').trim());
+  const saysYes = /^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answer_text || '').trim());
 
   if (saysYes) {
     const { question, answer } = JSON.parse(pq.question_text);
