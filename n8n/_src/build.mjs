@@ -41,9 +41,9 @@ function scheduleNode(name, position, { field, interval }) {
 // Webhook variant that waits for a "Respond to Webhook" node instead of
 // responding immediately -- used for internal sub-workflows (e.g. PDF
 // rendering) where the caller needs the actual result back synchronously.
-function webhookNodeSync(name, webhookPath, webhookId, position) {
+function webhookNodeSync(name, webhookPath, webhookId, position, httpMethod = "POST") {
   return {
-    parameters: { httpMethod: "POST", path: webhookPath, responseMode: "responseNode", options: {} },
+    parameters: { httpMethod, path: webhookPath, responseMode: "responseNode", options: {} },
     name,
     type: "n8n-nodes-base.webhook",
     typeVersion: 2.1,
@@ -182,6 +182,14 @@ writeMultiTriggerWorkflow(
         [300, -360]
       ),
       respondToWebhookNode("Return Media Id", { respondWith: "json", responseBody: "={{ $json }}", options: {} }, [520, -360]),
+    ],
+    // Public-ish (Retool-facing) endpoint: regenerates a past invoice's PDF
+    // on demand from its stored data and returns it directly. Nothing is
+    // ever persisted -- see the comment atop invoice-pdf-view-code.js.
+    [
+      webhookNodeSync("Invoice PDF Trigger", "invoice-pdf", "bali-invoice-pdf", [-144, 440], "GET"),
+      codeNode("Prepare Invoice PDF", "invoice-pdf-view-code.js", [80, 440]),
+      respondToWebhookNode("Return Invoice PDF", { respondWith: "binary", options: {} }, [300, 440]),
     ],
   ]
 );
