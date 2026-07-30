@@ -17,7 +17,7 @@ async function wipe(table) {
   });
 }
 
-for (const table of ['conversations', 'pending_questions', 'invoices', 'contracts', 'sandbox_outbound', 'bookings', 'contacts', 'sandbox_snapshots']) {
+for (const table of ['conversations', 'pending_questions', 'invoices', 'contracts', 'knowledge_base', 'sandbox_outbound', 'bookings', 'contacts', 'sandbox_snapshots']) {
   await wipe(table);
 }
 

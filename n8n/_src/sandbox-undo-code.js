@@ -11,7 +11,7 @@ const headers = { apikey: env.SUPABASE_KEY, Authorization: `Bearer ${env.SUPABAS
 
 // Parent-first, safe for re-inserting. Deletes run in the reverse order
 // (children before parents), same convention as sandbox-reset-code.js.
-const TABLE_ORDER = ['contacts', 'bookings', 'conversations', 'pending_questions', 'invoices', 'contracts', 'sandbox_outbound'];
+const TABLE_ORDER = ['contacts', 'bookings', 'conversations', 'pending_questions', 'invoices', 'contracts', 'knowledge_base', 'sandbox_outbound'];
 
 const snapshots = await helpers.httpRequest({
   method: 'GET',

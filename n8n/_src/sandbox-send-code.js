@@ -20,7 +20,7 @@ const sbHeaders = { apikey: env.SUPABASE_KEY, Authorization: `Bearer ${env.SUPAB
 // pipeline below -- taking the snapshot right before dispatching it captures
 // state as of "before this one action", however much it goes on to touch.
 // See sandbox-undo-code.js for how a snapshot gets restored.
-const SNAPSHOT_TABLES = ['contacts', 'bookings', 'conversations', 'pending_questions', 'invoices', 'contracts', 'sandbox_outbound'];
+const SNAPSHOT_TABLES = ['contacts', 'bookings', 'conversations', 'pending_questions', 'invoices', 'contracts', 'knowledge_base', 'sandbox_outbound'];
 async function takeSnapshot(label) {
   const tables_json = {};
   for (const table of SNAPSHOT_TABLES) {

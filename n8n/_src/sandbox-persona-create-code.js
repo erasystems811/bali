@@ -9,7 +9,7 @@ const sbHeaders = { apikey: env.SUPABASE_KEY, Authorization: `Bearer ${env.SUPAB
 // Snapshot every sandbox table before this action so it can be undone on its
 // own via /sandbox-undo, one action at a time, instead of the all-or-nothing
 // /sandbox-reset. See sandbox-undo-code.js for how a snapshot gets restored.
-const SNAPSHOT_TABLES = ['contacts', 'bookings', 'conversations', 'pending_questions', 'invoices', 'contracts', 'sandbox_outbound'];
+const SNAPSHOT_TABLES = ['contacts', 'bookings', 'conversations', 'pending_questions', 'invoices', 'contracts', 'knowledge_base', 'sandbox_outbound'];
 async function takeSnapshot(label) {
   const tables_json = {};
   for (const table of SNAPSHOT_TABLES) {
