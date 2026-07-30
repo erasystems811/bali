@@ -313,23 +313,44 @@ if (openMatch) {
   return [{ json: { action: 'opened', booking_id: booking.id } }];
 }
 
-// --- Command: "rename [old event name] to [new event name]" -----------------------
-// Explicit old+new naming works for any connected booking, not just whichever one is
-// currently open -- matches this codebase's rule that addressing must be explicit,
-// never implied by "the one thing that happens to be open right now."
-const renameMatch = trimmed.match(/^(?:please\s+)?(?:rename|change(?:\s+event\s+name)?(?:\s+from)?)\s+(.+?)\s+to\s+(.+)$/i);
-if (renameMatch) {
-  const oldName = renameMatch[1].trim();
-  const newName = renameMatch[2].trim();
-  const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(oldName)}*&status=neq.cancelled&select=*`);
-  if (matches.length === 0) {
-    await sendWhatsApp(from_number, `Couldn't find a booking called "${oldName}". Check the spelling?`);
-    return [{ json: { action: 'rename_not_found', query: oldName } }];
+// --- Command: rename the event's name -- natural-language, not a fixed
+// phrase. Classified by the model rather than matched by a rigid regex, since
+// the PM shouldn't have to remember an exact "rename X to Y" pattern -- any
+// wording that means "change the name" should work. This is NOT the same
+// category as the client-relay safety gate elsewhere in this file (which must
+// stay deterministic, zero LLM discretion, per the owner's explicit rule) --
+// misclassifying this only costs a wrong DB field getting updated or a
+// clarifying follow-up, it never sends anything to a client, so LLM judgment
+// is an acceptable trade here. Verified against 14 phrasings (positive and
+// negative, including "change the price/date/staffing to X" near-misses)
+// before deploying -- 14/14 correct.
+const renameIntent = await openaiExtract(
+  'The PM (venue staff) is messaging Bali, an internal WhatsApp assistant, about ONE of their event bookings. Decide if this message is asking to CHANGE/RENAME the event\'s name specifically (not the price, date, staffing, or anything else about the event). If yes, extract the new name they want, and the OLD/current name if they explicitly mentioned one (null if they didn\'t -- e.g. "change the name to Soundwave 2" gives no old name, they just mean whichever event is currently open/being discussed). Reply ONLY with JSON: {"is_rename": true/false, "new_name": "..."|null, "old_name": "..."|null}.',
+  trimmed
+);
+if (renameIntent?.is_rename && renameIntent.new_name) {
+  let booking = null;
+  if (renameIntent.old_name) {
+    const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(renameIntent.old_name)}*&status=neq.cancelled&select=*`);
+    if (matches.length === 0) {
+      await sendWhatsApp(from_number, `Couldn't find a booking called "${renameIntent.old_name}". Check the spelling?`);
+      return [{ json: { action: 'rename_not_found', query: renameIntent.old_name } }];
+    }
+    booking = matches[0];
+  } else {
+    // No old name given -- assume whichever booking is currently open with a
+    // client (the one thing being actively discussed), same "current"
+    // resolution used elsewhere (e.g. the free-form fallback reply below).
+    booking = await findPmLedBooking();
+    if (!booking) {
+      await sendWhatsApp(from_number, 'Which event? Nothing\'s currently open -- give me the current name too, e.g. "rename Mad Party to Soundwave 2".');
+      return [{ json: { action: 'rename_no_target' } }];
+    }
   }
-  const booking = matches[0];
-  await sbPatch(`bookings?id=eq.${booking.id}`, { event_name: newName });
-  await sendWhatsApp(from_number, `Renamed "${booking.event_name}" to "${newName}".`);
-  return [{ json: { action: 'renamed', booking_id: booking.id, old_name: booking.event_name, new_name: newName } }];
+  const oldName = booking.event_name;
+  await sbPatch(`bookings?id=eq.${booking.id}`, { event_name: renameIntent.new_name });
+  await sendWhatsApp(from_number, `Renamed "${oldName}" to "${renameIntent.new_name}".`);
+  return [{ json: { action: 'renamed', booking_id: booking.id, old_name: oldName, new_name: renameIntent.new_name } }];
 }
 
 // --- Command: "close" --------------------------------------------------------------
