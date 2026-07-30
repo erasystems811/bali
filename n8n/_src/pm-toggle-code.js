@@ -313,6 +313,25 @@ if (openMatch) {
   return [{ json: { action: 'opened', booking_id: booking.id } }];
 }
 
+// --- Command: "rename [old event name] to [new event name]" -----------------------
+// Explicit old+new naming works for any connected booking, not just whichever one is
+// currently open -- matches this codebase's rule that addressing must be explicit,
+// never implied by "the one thing that happens to be open right now."
+const renameMatch = trimmed.match(/^(?:please\s+)?(?:rename|change(?:\s+event\s+name)?(?:\s+from)?)\s+(.+?)\s+to\s+(.+)$/i);
+if (renameMatch) {
+  const oldName = renameMatch[1].trim();
+  const newName = renameMatch[2].trim();
+  const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(oldName)}*&status=neq.cancelled&select=*`);
+  if (matches.length === 0) {
+    await sendWhatsApp(from_number, `Couldn't find a booking called "${oldName}". Check the spelling?`);
+    return [{ json: { action: 'rename_not_found', query: oldName } }];
+  }
+  const booking = matches[0];
+  await sbPatch(`bookings?id=eq.${booking.id}`, { event_name: newName });
+  await sendWhatsApp(from_number, `Renamed "${booking.event_name}" to "${newName}".`);
+  return [{ json: { action: 'renamed', booking_id: booking.id, old_name: booking.event_name, new_name: newName } }];
+}
+
 // --- Command: "close" --------------------------------------------------------------
 if (trimmed.toLowerCase() === 'close') {
   const open = await findPmLedBooking();
