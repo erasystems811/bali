@@ -250,5 +250,15 @@ writeMultiTriggerWorkflow(
       codeNode("Reset Sandbox", "sandbox-reset-code.js", [40, 840]),
       jsonRespondNode("Return Sandbox Reset Result", [260, 840]),
     ],
+    [
+      webhookNodeSync("Sandbox Undo Trigger", "sandbox-undo", "bali-sandbox-undo", [-200, 980]),
+      codeNode("Undo Sandbox Action", "sandbox-undo-code.js", [40, 980]),
+      jsonRespondNode("Return Sandbox Undo Result", [260, 980]),
+    ],
+    [
+      webhookNodeSync("Sandbox Undo Count Trigger", "sandbox-undo-count", "bali-sandbox-undo-count", [-200, 1120], "GET"),
+      codeNode("Get Sandbox Undo Count", "sandbox-undo-count-code.js", [40, 1120]),
+      jsonRespondNode("Return Sandbox Undo Count", [260, 1120]),
+    ],
   ]
 );

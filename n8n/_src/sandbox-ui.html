@@ -142,6 +142,8 @@
   <span class="sub">Fake people, fake phone numbers, nothing real ever leaves this page.</span>
   <div class="spacer"></div>
   <button id="toggleAdd" class="secondary">+ Add persona</button>
+  <button id="undoBtn" class="secondary">Undo</button>
+  <span class="sub" id="undoCount"></span>
   <button id="resetBtn" class="danger">Reset sandbox</button>
 </header>
 
@@ -235,6 +237,7 @@ async function sendAs(persona, input) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ phone_number: persona.phone_number, text }),
   });
+  await refreshUndoCount();
 }
 
 async function poll() {
@@ -264,6 +267,7 @@ document.getElementById('createPersona').addEventListener('click', async () => {
   });
   document.getElementById('newName').value = '';
   await loadPersonas();
+  await refreshUndoCount();
 });
 
 document.getElementById('resetBtn').addEventListener('click', async () => {
@@ -272,12 +276,40 @@ document.getElementById('resetBtn').addEventListener('click', async () => {
   document.getElementById('board').innerHTML = '';
   state.since = new Date(0).toISOString();
   await loadPersonas();
+  await refreshUndoCount();
+});
+
+async function refreshUndoCount() {
+  const data = await api('sandbox-undo-count');
+  const label = document.getElementById('undoCount');
+  const count = data.count || 0;
+  label.textContent = count > 0 ? `${count} step${count === 1 ? '' : 's'} to undo` : 'nothing to undo';
+  document.getElementById('undoBtn').disabled = count === 0;
+}
+
+document.getElementById('undoBtn').addEventListener('click', async () => {
+  const result = await api('sandbox-undo', { method: 'POST' });
+  const label = document.getElementById('undoCount');
+  if (!result.ok) {
+    label.textContent = result.message || 'Nothing to undo.';
+    return;
+  }
+  // Rebuild the whole board from the restored state rather than trying to
+  // surgically un-render individual chat bubbles -- simplest way to
+  // guarantee what's on screen matches what just got restored in the DB.
+  document.getElementById('board').innerHTML = '';
+  state.since = new Date(0).toISOString();
+  await loadPersonas();
+  label.textContent = `Undone: ${result.undone}`;
+  setTimeout(refreshUndoCount, 2000);
 });
 
 (async function init() {
   await loadRoles();
   await loadPersonas();
+  await refreshUndoCount();
   setInterval(poll, 2000);
+  setInterval(refreshUndoCount, 5000);
 })();
 </script>
 </body>
