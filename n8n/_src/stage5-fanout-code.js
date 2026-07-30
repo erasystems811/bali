@@ -32,6 +32,19 @@ async function sbPatch(path, body) {
   return sbRequest('PATCH', path, body, { Prefer: 'return=representation' });
 }
 
+// Sandbox mode: on when there's no real Meta token configured (the sandbox
+// n8n instance is deliberately deployed without one, so it's structurally
+// incapable of reaching real WhatsApp, not just told not to). Every outbound
+// send is captured in `sandbox_outbound` instead, for the test webpage to
+// display, and a fake message id stands in for the real one.
+const SANDBOX = !env.META_TOKEN;
+async function sandboxLog(toNumber, text, kind) {
+  try {
+    await sbRequest('POST', 'sandbox_outbound', { to_number: toNumber, kind: kind || 'text', message_text: text });
+  } catch (e) {}
+  return `sandbox-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function sanitizeTemplateParam(text) {
   return String(text || '')
     .replace(/[\r\n]+/g, ' -- ')
@@ -45,6 +58,7 @@ function sanitizeTemplateParam(text) {
 // (error 131047). Fall back to the approved "bali_notification" utility
 // template (single body variable) instead of the send just failing.
 async function sendWhatsAppTemplate(toNumber, text) {
+  if (SANDBOX) return sandboxLog(toNumber, text, 'template');
   const res = await helpers.httpRequest({
     method: 'POST',
     url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
@@ -87,6 +101,7 @@ async function isWithinMessagingWindow(toNumber) {
 }
 
 async function sendWhatsApp(toNumber, text) {
+  if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
     return sendWhatsAppTemplate(toNumber, text);
   }

@@ -32,6 +32,21 @@ async function sbRequest(method, path, body, extraHeaders) {
 async function sbInsert(path, body) { return sbRequest('POST', path, body, { Prefer: 'return=representation' }); }
 async function sbPatch(path, body) { return sbRequest('PATCH', path, body, { Prefer: 'return=representation' }); }
 
+// Sandbox mode: on when there's no real Meta token configured (the sandbox
+// n8n instance is deliberately deployed without one, so it's structurally
+// incapable of reaching real WhatsApp, not just told not to). Every outbound
+// send is captured in `sandbox_outbound` instead, for the test webpage to
+// display, and a fake message id/media id stands in for the real one. PDF
+// rendering (Gotenberg) still runs for real in sandbox -- it's self-hosted,
+// nothing leaves the server -- only the Meta upload/send steps are stubbed.
+const SANDBOX = !env.META_TOKEN;
+async function sandboxLog(toNumber, text, kind) {
+  try {
+    await sbRequest('POST', 'sandbox_outbound', { to_number: toNumber, kind: kind || 'text', message_text: text });
+  } catch (e) {}
+  return `sandbox-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function sanitizeTemplateParam(text) {
   return String(text || '')
     .replace(/[\r\n]+/g, ' -- ')
@@ -45,6 +60,7 @@ function sanitizeTemplateParam(text) {
 // "bali_notification" utility template (single body variable) instead of
 // the send just failing.
 async function sendWhatsAppTemplate(toNumber, text) {
+  if (SANDBOX) return sandboxLog(toNumber, text, 'template');
   const res = await helpers.httpRequest({
     method: 'POST',
     url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
@@ -87,6 +103,7 @@ async function isWithinMessagingWindow(toNumber) {
 }
 
 async function sendWhatsApp(toNumber, text) {
+  if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
     return sendWhatsAppTemplate(toNumber, text);
   }
@@ -112,6 +129,7 @@ async function sendWhatsApp(toNumber, text) {
 }
 
 async function sendWhatsAppDocument(toNumber, mediaId, filename, caption) {
+  if (SANDBOX) return sandboxLog(toNumber, `[document] ${filename}${caption ? ': ' + caption : ''}`, 'document');
   const res = await helpers.httpRequest({
     method: 'POST',
     url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
@@ -157,6 +175,7 @@ async function renderPdf(html) {
 // helpers.httpRequest formData call, which is confirmed broken in this
 // n8n version for multipart uploads.
 async function uploadWhatsAppMedia(pdfBuffer, filename) {
+  if (SANDBOX) return `sandbox-media-${filename}`;
   const buf = Buffer.isBuffer(pdfBuffer) ? pdfBuffer : Buffer.from(pdfBuffer);
   const res = await helpers.httpRequest({
     method: 'POST',
