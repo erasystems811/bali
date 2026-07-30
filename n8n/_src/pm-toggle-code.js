@@ -625,17 +625,45 @@ if (!target) {
   // question or help with the task, and be honest about what it can't do
   // yet, rather than routing through fixed template text.
   const pmLed = await findPmLedBooking();
+
+  // Real bug, reported live: this fallback used to be a single stateless
+  // completion with zero memory of its OWN previous turn -- so when the bot
+  // itself asked a clarifying question ("...let me know if you need to
+  // reopen it or make any changes") and the PM answered "yes i do", the next
+  // call had no idea what "yes" was answering and produced a generic
+  // non-response. Fixed by keeping a short rolling transcript of this
+  // fallback chat, scoped to whichever booking is currently open (there's
+  // nowhere schema-valid to log it when nothing is open, since
+  // conversations.booking_id is NOT NULL -- that narrower case is unchanged).
+  let recentTranscript = '';
+  if (pmLed) {
+    const recent = await sbRequest(
+      'GET',
+      `conversations?booking_id=eq.${pmLed.id}&stage=eq.pm_fallback_chat&order=created_at.desc&limit=6&select=direction,message_text`
+    );
+    if (recent.length > 0) {
+      recentTranscript = `\n\nYour recent back-and-forth with the PM about this:\n${recent
+        .reverse()
+        .map((m) => `${m.direction === 'inbound' ? 'PM' : 'Bali'}: ${m.message_text}`)
+        .join('\n')}`;
+    }
+  }
+
   const reply = await askOpenAIText(
-    `You are Bali, an event venue's own WhatsApp operational assistant. You're talking directly with venue staff (the PM) here -- no client is on this thread, and nothing you say here is ever sent to a client. Answer their question or help with what they're asking, using anything below that's relevant.
+    `You are Bali, an event venue's own WhatsApp operational assistant. You're talking directly with venue staff (the PM) here -- no client is on this thread, and nothing you say here is ever sent to a client. Answer their question or help with what they're asking, using anything below that's relevant. If the recent back-and-forth below shows you just asked the PM something, treat their new message as answering THAT, not as a brand-new unrelated request.
 
 What you can actually do today: manage one client negotiation at a time ("open [event name]" / "close"), generate invoices ("generate invoice for [event name]"), rename an event ("change the name to X", "rename X to Y"), and relay a message to a specific client only when a message starts with "[event name]: ". Reaching a client always requires that exact prefix -- if the PM seems to want something sent to a client, say so and tell them to prefix it with the event name.
 
 For anything else -- messaging other staff, pulling reports, other operational tasks -- you don't have that built yet. If asked for something like that, say plainly that you can't do it yet rather than pretending to. Keep your reply short, natural, and professional -- no filler, no fake enthusiasm.
 
-${pmLed ? `Currently open with a client: "${pmLed.event_name}".` : 'Nothing currently open with a client.'}`,
+${pmLed ? `Currently open with a client: "${pmLed.event_name}".` : 'Nothing currently open with a client.'}${recentTranscript}`,
     text || ''
   ) || "Sorry, I couldn't process that -- try rephrasing?";
   await sendWhatsApp(from_number, reply);
+  if (pmLed) {
+    await logConversation(pmLed.id, contact_id, 'inbound', text || '', 'pm_fallback_chat');
+    await logConversation(pmLed.id, null, 'outbound', reply, 'pm_fallback_chat');
+  }
   return [{ json: { action: 'unclassified' } }];
 }
 
