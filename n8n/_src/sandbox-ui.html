@@ -254,7 +254,15 @@ async function sendAs(persona, input) {
   await refreshUndoCount();
 }
 
+let pollInFlight = false;
 async function poll() {
+  // The 2s interval timer and the explicit post-send poll() call (added so
+  // a just-sent action's replies are on screen before Undo can be clicked)
+  // can overlap. Without this guard, two concurrent calls both read the
+  // same stale state.since, both fetch the same "new since X" batch, and
+  // both render it -- the exact double/triple-bubble bug reported live.
+  if (pollInFlight) return;
+  pollInFlight = true;
   try {
     const data = await api(`sandbox-poll?since=${encodeURIComponent(state.since)}`);
     for (const m of (data.messages || [])) {
@@ -263,6 +271,7 @@ async function poll() {
     }
     if (data.polled_at) state.since = data.polled_at;
   } catch (e) { /* transient network hiccup -- next poll will retry */ }
+  finally { pollInFlight = false; }
 }
 
 document.getElementById('toggleAdd').addEventListener('click', () => {
