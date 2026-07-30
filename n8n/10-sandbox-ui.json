@@ -1,0 +1,451 @@
+{
+  "name": "Bali - 10 Sandbox UI",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "sandbox-ui",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Sandbox UI Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -200,
+        0
+      ],
+      "webhookId": "bali-sandbox-ui"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Bali — Sandbox</title>\n<style>\n  :root { color-scheme: light dark; }\n  * { box-sizing: border-box; }\n  body {\n    font-family: -apple-system, Segoe UI, Arial, sans-serif;\n    margin: 0;\n    background: #12151a;\n    color: #e6e8eb;\n  }\n  header {\n    padding: 14px 18px;\n    background: #1b1f26;\n    border-bottom: 1px solid #2a2f38;\n    display: flex;\n    align-items: center;\n    gap: 14px;\n    flex-wrap: wrap;\n  }\n  header h1 { font-size: 16px; margin: 0; font-weight: 600; }\n  header .sub { color: #8b93a1; font-size: 12px; }\n  .spacer { flex: 1; }\n  button {\n    background: #2a5bd7;\n    color: white;\n    border: none;\n    border-radius: 6px;\n    padding: 8px 14px;\n    font-size: 13px;\n    cursor: pointer;\n  }\n  button.secondary { background: #3a3f4a; }\n  button.danger { background: #7a2323; }\n  button:hover { filter: brightness(1.1); }\n  #addForm {\n    display: none;\n    padding: 12px 18px;\n    background: #1b1f26;\n    border-bottom: 1px solid #2a2f38;\n    gap: 10px;\n    align-items: center;\n    flex-wrap: wrap;\n  }\n  #addForm.open { display: flex; }\n  #addForm input, #addForm select {\n    background: #12151a;\n    border: 1px solid #2a2f38;\n    color: #e6e8eb;\n    padding: 7px 10px;\n    border-radius: 6px;\n    font-size: 13px;\n  }\n  #board {\n    display: flex;\n    gap: 12px;\n    padding: 14px;\n    overflow-x: auto;\n    height: calc(100vh - 60px);\n  }\n  #board.with-form { height: calc(100vh - 108px); }\n  .empty {\n    color: #6b7280;\n    padding: 40px;\n    text-align: center;\n    width: 100%;\n  }\n  .col {\n    min-width: 300px;\n    max-width: 320px;\n    flex: 0 0 auto;\n    display: flex;\n    flex-direction: column;\n    background: #191d24;\n    border: 1px solid #262b33;\n    border-radius: 10px;\n    overflow: hidden;\n  }\n  .col .head {\n    padding: 10px 12px;\n    background: #20252d;\n    border-bottom: 1px solid #262b33;\n  }\n  .col .head .name { font-weight: 600; font-size: 14px; }\n  .col .head .meta { font-size: 11px; color: #8b93a1; margin-top: 2px; }\n  .col .badge {\n    display: inline-block;\n    font-size: 10px;\n    background: #2a5bd7;\n    color: white;\n    padding: 1px 7px;\n    border-radius: 10px;\n    margin-left: 6px;\n    vertical-align: middle;\n  }\n  .col .msgs {\n    flex: 1;\n    overflow-y: auto;\n    padding: 10px;\n    display: flex;\n    flex-direction: column;\n    gap: 6px;\n    min-height: 260px;\n  }\n  .bubble {\n    max-width: 88%;\n    padding: 7px 10px;\n    border-radius: 10px;\n    font-size: 13px;\n    line-height: 1.35;\n    white-space: pre-wrap;\n    word-break: break-word;\n  }\n  .bubble.me { align-self: flex-end; background: #2a5bd7; color: white; }\n  .bubble.bot { align-self: flex-start; background: #2a2f38; color: #e6e8eb; }\n  .bubble .kind { display: block; font-size: 10px; opacity: 0.7; margin-top: 3px; }\n  .col .inputRow {\n    display: flex;\n    gap: 6px;\n    padding: 8px;\n    border-top: 1px solid #262b33;\n  }\n  .col .inputRow input {\n    flex: 1;\n    background: #12151a;\n    border: 1px solid #2a2f38;\n    color: #e6e8eb;\n    padding: 7px 9px;\n    border-radius: 6px;\n    font-size: 13px;\n  }\n  .col .inputRow button { padding: 7px 12px; }\n</style>\n</head>\n<body>\n<header>\n  <h1>Bali — Sandbox</h1>\n  <span class=\"sub\">Fake people, fake phone numbers, nothing real ever leaves this page.</span>\n  <div class=\"spacer\"></div>\n  <button id=\"toggleAdd\" class=\"secondary\">+ Add persona</button>\n  <button id=\"resetBtn\" class=\"danger\">Reset sandbox</button>\n</header>\n\n<div id=\"addForm\">\n  <input id=\"newName\" placeholder=\"Name (e.g. Test Customer)\" />\n  <select id=\"newRole\"><option>loading roles…</option></select>\n  <button id=\"createPersona\">Create</button>\n</div>\n\n<div id=\"board\"><div class=\"empty\">Loading…</div></div>\n\n<script>\nconst state = { personas: [], since: new Date(0).toISOString() };\n\nasync function api(path, opts) {\n  const res = await fetch(path, opts);\n  return res.json();\n}\n\nasync function loadRoles() {\n  const data = await api('sandbox-roles');\n  const sel = document.getElementById('newRole');\n  sel.innerHTML = (data.roles || []).map(r => `<option value=\"${r}\">${r}</option>`).join('');\n}\n\nasync function loadPersonas() {\n  const data = await api('sandbox-personas');\n  state.personas = data.personas || [];\n  renderBoard();\n}\n\nfunction renderBoard() {\n  const board = document.getElementById('board');\n  if (!state.personas.length) {\n    board.innerHTML = '<div class=\"empty\">No personas yet — add one above to start testing (a customer, a PM, a lawyer, anyone).</div>';\n    return;\n  }\n  const existingIds = new Set([...board.querySelectorAll('.col')].map(c => c.dataset.id));\n  for (const p of state.personas) {\n    if (existingIds.has(p.id)) continue;\n    const col = document.createElement('div');\n    col.className = 'col';\n    col.dataset.id = p.id;\n    col.dataset.phone = p.phone_number;\n    col.innerHTML = `\n      <div class=\"head\">\n        <span class=\"name\">${escapeHtml(p.name || '(unnamed)')}</span><span class=\"badge\">${escapeHtml(p.role)}</span>\n        <div class=\"meta\">${escapeHtml(p.phone_number)}</div>\n      </div>\n      <div class=\"msgs\"></div>\n      <div class=\"inputRow\">\n        <input placeholder=\"Type as ${escapeHtml(p.name || p.role)}…\" />\n        <button class=\"sendBtn\">Send</button>\n      </div>`;\n    board.appendChild(col);\n    const input = col.querySelector('input');\n    const send = () => sendAs(p, input);\n    col.querySelector('.sendBtn').addEventListener('click', send);\n    input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });\n  }\n}\n\nfunction escapeHtml(s) {\n  return String(s || '').replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));\n}\n\nfunction appendBubble(personaId, side, text, kind) {\n  const col = document.querySelector(`.col[data-id=\"${personaId}\"]`);\n  if (!col) return;\n  const msgs = col.querySelector('.msgs');\n  const b = document.createElement('div');\n  b.className = `bubble ${side}`;\n  b.textContent = text;\n  if (kind && kind !== 'text') {\n    const k = document.createElement('span');\n    k.className = 'kind';\n    k.textContent = `(${kind})`;\n    b.appendChild(k);\n  }\n  msgs.appendChild(b);\n  msgs.scrollTop = msgs.scrollHeight;\n}\n\nasync function sendAs(persona, input) {\n  const text = input.value.trim();\n  if (!text) return;\n  input.value = '';\n  appendBubble(persona.id, 'me', text);\n  await api('sandbox-send', {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({ phone_number: persona.phone_number, text }),\n  });\n}\n\nasync function poll() {\n  try {\n    const data = await api(`sandbox-poll?since=${encodeURIComponent(state.since)}`);\n    for (const m of (data.messages || [])) {\n      const persona = state.personas.find(p => p.phone_number === m.to_number);\n      if (persona) appendBubble(persona.id, 'bot', m.message_text, m.kind);\n    }\n    if (data.polled_at) state.since = data.polled_at;\n  } catch (e) { /* transient network hiccup -- next poll will retry */ }\n}\n\ndocument.getElementById('toggleAdd').addEventListener('click', () => {\n  document.getElementById('addForm').classList.toggle('open');\n  document.getElementById('board').classList.toggle('with-form');\n});\n\ndocument.getElementById('createPersona').addEventListener('click', async () => {\n  const name = document.getElementById('newName').value.trim();\n  const role = document.getElementById('newRole').value;\n  if (!name || !role) return;\n  await api('sandbox-persona', {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({ name, role }),\n  });\n  document.getElementById('newName').value = '';\n  await loadPersonas();\n});\n\ndocument.getElementById('resetBtn').addEventListener('click', async () => {\n  if (!confirm('Wipe every fake persona, booking, and message in the sandbox? This cannot be undone.')) return;\n  await api('sandbox-reset', { method: 'POST' });\n  document.getElementById('board').innerHTML = '';\n  state.since = new Date(0).toISOString();\n  await loadPersonas();\n});\n\n(async function init() {\n  await loadRoles();\n  await loadPersonas();\n  setInterval(poll, 2000);\n})();\n</script>\n</body>\n</html>\n",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Serve Sandbox UI",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [
+        40,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "sandbox-roles",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Sandbox Roles Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -200,
+        140
+      ],
+      "webhookId": "bali-sandbox-roles"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Sandbox test webpage -- GET /sandbox-roles\n// Returns the *actual* list of contact roles the database currently allows\n// (parsed live from the contacts.role CHECK constraint via the\n// contact_role_options() RPC -- see supabase/schema.sql), not a hardcoded\n// list here. If schema.sql ever grows the allowed-roles list, this follows\n// automatically the next time it's applied -- the sandbox's \"add a persona\"\n// picker is never out of date with what the real app actually accepts.\nconst helpers = this.helpers;\nconst env = { SUPABASE_URL: $env.SUPABASE_URL, SUPABASE_KEY: $env.SUPABASE_SERVICE_KEY };\n\nconst roles = await helpers.httpRequest({\n  method: 'POST',\n  url: `${env.SUPABASE_URL}/rest/v1/rpc/contact_role_options`,\n  headers: {\n    apikey: env.SUPABASE_KEY,\n    Authorization: `Bearer ${env.SUPABASE_KEY}`,\n    'Content-Type': 'application/json',\n  },\n  body: {},\n  json: true,\n  timeout: 15000,\n});\n\nreturn [{ json: { roles: roles || [] } }];\n"
+      },
+      "name": "Get Sandbox Roles",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "name": "Return Sandbox Roles",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [
+        260,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "sandbox-personas",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Sandbox Personas Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -200,
+        280
+      ],
+      "webhookId": "bali-sandbox-personas"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Sandbox test webpage -- GET /sandbox-personas\n// Lists every fake persona currently in the sandbox database, so the test\n// page always reflects exactly who exists right now -- add one, it shows up\n// here on the next poll, no page rebuild needed.\nconst helpers = this.helpers;\nconst env = { SUPABASE_URL: $env.SUPABASE_URL, SUPABASE_KEY: $env.SUPABASE_SERVICE_KEY };\n\nconst contacts = await helpers.httpRequest({\n  method: 'GET',\n  url: `${env.SUPABASE_URL}/rest/v1/contacts?select=id,name,phone_number,role&order=created_at.asc`,\n  headers: { apikey: env.SUPABASE_KEY, Authorization: `Bearer ${env.SUPABASE_KEY}` },\n  json: true,\n  timeout: 15000,\n});\n\nreturn [{ json: { personas: contacts || [] } }];\n"
+      },
+      "name": "Get Sandbox Personas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "name": "Return Sandbox Personas",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [
+        260,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sandbox-persona",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Sandbox Persona Create Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -200,
+        420
+      ],
+      "webhookId": "bali-sandbox-persona"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Sandbox test webpage -- POST /sandbox-persona\n// Creates a new fake persona (any role the database currently allows -- see\n// sandbox-roles-code.js) with a made-up phone number, so testing never needs\n// a real number for anyone. Body: { name, role }.\nconst helpers = this.helpers;\nconst env = { SUPABASE_URL: $env.SUPABASE_URL, SUPABASE_KEY: $env.SUPABASE_SERVICE_KEY };\nconst input = $input.first().json.body || {};\n\nconst name = (input.name || '').trim();\nconst role = (input.role || '').trim();\nif (!name || !role) {\n  return [{ json: { error: 'name and role are both required' } }];\n}\n\n// 234000 is the existing convention in this codebase for obviously-fake test\n// numbers (never a real, dialable number) -- see docs/setup.md's note on\n// synthetic 234000000xxxx contacts used throughout live testing.\nconst fakeNumber = `234000${String(Math.floor(Math.random() * 900000) + 100000)}`;\n\nconst created = await helpers.httpRequest({\n  method: 'POST',\n  url: `${env.SUPABASE_URL}/rest/v1/contacts`,\n  headers: {\n    apikey: env.SUPABASE_KEY,\n    Authorization: `Bearer ${env.SUPABASE_KEY}`,\n    'Content-Type': 'application/json',\n    Prefer: 'return=representation',\n  },\n  body: { name, role, phone_number: fakeNumber },\n  json: true,\n  timeout: 15000,\n});\n\nreturn [{ json: { persona: created?.[0] || created } }];\n"
+      },
+      "name": "Create Sandbox Persona",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "name": "Return Created Persona",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [
+        260,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sandbox-send",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Sandbox Send Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -200,
+        560
+      ],
+      "webhookId": "bali-sandbox-send"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Sandbox test webpage -- POST /sandbox-send\n// Takes a message typed \"as\" a given persona and feeds it into the exact\n// same inbound router (01-inbound-router.json) the real app uses -- built as\n// a Meta-Cloud-API-shaped payload, same as what Nexa forwards for real\n// traffic, so every bit of real routing/role logic gets exercised for real,\n// not reimplemented here. Body: { phone_number, text }.\nconst helpers = this.helpers;\nconst env = { N8N_BASE_URL: $env.N8N_BASE_URL, FORWARD_SECRET: $env.BALI_FORWARD_SECRET };\nconst input = $input.first().json.body || {};\n\nconst phoneNumber = (input.phone_number || '').trim();\nconst text = (input.text || '').trim();\nif (!phoneNumber || !text) {\n  return [{ json: { error: 'phone_number and text are both required' } }];\n}\n\nconst messageId = `sandbox-wamid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;\n\nawait helpers.httpRequest({\n  method: 'POST',\n  url: `${env.N8N_BASE_URL}/webhook/whatsapp-inbound`,\n  headers: { 'Content-Type': 'application/json', 'x-bali-forward-secret': env.FORWARD_SECRET },\n  body: {\n    entry: [{\n      changes: [{\n        value: {\n          messages: [{\n            from: phoneNumber,\n            id: messageId,\n            timestamp: String(Math.floor(Date.now() / 1000)),\n            type: 'text',\n            text: { body: text },\n          }],\n        },\n      }],\n    }],\n  },\n  json: true,\n  timeout: 15000,\n});\n\nreturn [{ json: { ok: true, whatsapp_message_id: messageId } }];\n"
+      },
+      "name": "Relay Sandbox Send",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "name": "Return Sandbox Send Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [
+        260,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "sandbox-poll",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Sandbox Poll Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -200,
+        700
+      ],
+      "webhookId": "bali-sandbox-poll"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Sandbox test webpage -- GET /sandbox-poll?since=<ISO timestamp>\n// Returns everything the bot would have sent out over real WhatsApp since\n// the given time (captured in sandbox_outbound by the SANDBOX guards added\n// to every sendWhatsApp*/uploadWhatsAppMedia function -- see the comment atop\n// each _src file's SANDBOX const). The page polls this and routes each\n// message into the matching persona's chat window by phone number.\nconst helpers = this.helpers;\nconst env = { SUPABASE_URL: $env.SUPABASE_URL, SUPABASE_KEY: $env.SUPABASE_SERVICE_KEY };\nconst since = $input.first().json.query?.since || '1970-01-01T00:00:00Z';\n\nconst rows = await helpers.httpRequest({\n  method: 'GET',\n  url: `${env.SUPABASE_URL}/rest/v1/sandbox_outbound?created_at=gt.${encodeURIComponent(since)}&order=created_at.asc&select=*`,\n  headers: { apikey: env.SUPABASE_KEY, Authorization: `Bearer ${env.SUPABASE_KEY}` },\n  json: true,\n  timeout: 15000,\n});\n\nreturn [{ json: { messages: rows || [], polled_at: new Date().toISOString() } }];\n"
+      },
+      "name": "Get Sandbox Outbound",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "name": "Return Sandbox Outbound",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [
+        260,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sandbox-reset",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Sandbox Reset Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -200,
+        840
+      ],
+      "webhookId": "bali-sandbox-reset"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Sandbox test webpage -- POST /sandbox-reset\n// Wipes every sandbox-only table back to empty, so a scenario can be re-run\n// from a clean slate as many times as needed. Deletes in FK-safe order\n// (children before parents). Never touches the real app's data -- this Code\n// node's SUPABASE_URL always points at the sandbox database, never the live\n// one (see n8n's docker-compose sandbox-n8n service definition).\nconst helpers = this.helpers;\nconst env = { SUPABASE_URL: $env.SUPABASE_URL, SUPABASE_KEY: $env.SUPABASE_SERVICE_KEY };\nconst headers = { apikey: env.SUPABASE_KEY, Authorization: `Bearer ${env.SUPABASE_KEY}`, 'Content-Type': 'application/json' };\n\nasync function wipe(table) {\n  return helpers.httpRequest({\n    method: 'DELETE',\n    url: `${env.SUPABASE_URL}/rest/v1/${table}?id=not.is.null`,\n    headers,\n    timeout: 15000,\n  });\n}\n\nfor (const table of ['conversations', 'pending_questions', 'invoices', 'contracts', 'sandbox_outbound', 'bookings', 'contacts']) {\n  await wipe(table);\n}\n\nreturn [{ json: { ok: true, reset_at: new Date().toISOString() } }];\n"
+      },
+      "name": "Reset Sandbox",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "name": "Return Sandbox Reset Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [
+        260,
+        840
+      ]
+    }
+  ],
+  "connections": {
+    "Sandbox UI Trigger": {
+      "main": [
+        [
+          {
+            "node": "Serve Sandbox UI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sandbox Roles Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Sandbox Roles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Sandbox Roles": {
+      "main": [
+        [
+          {
+            "node": "Return Sandbox Roles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sandbox Personas Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Sandbox Personas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Sandbox Personas": {
+      "main": [
+        [
+          {
+            "node": "Return Sandbox Personas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sandbox Persona Create Trigger": {
+      "main": [
+        [
+          {
+            "node": "Create Sandbox Persona",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Sandbox Persona": {
+      "main": [
+        [
+          {
+            "node": "Return Created Persona",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sandbox Send Trigger": {
+      "main": [
+        [
+          {
+            "node": "Relay Sandbox Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Relay Sandbox Send": {
+      "main": [
+        [
+          {
+            "node": "Return Sandbox Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sandbox Poll Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Sandbox Outbound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Sandbox Outbound": {
+      "main": [
+        [
+          {
+            "node": "Return Sandbox Outbound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sandbox Reset Trigger": {
+      "main": [
+        [
+          {
+            "node": "Reset Sandbox",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reset Sandbox": {
+      "main": [
+        [
+          {
+            "node": "Return Sandbox Reset Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

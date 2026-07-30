@@ -193,3 +193,62 @@ writeMultiTriggerWorkflow(
     ],
   ]
 );
+
+function jsonRespondNode(name, position) {
+  return respondToWebhookNode(name, { respondWith: "json", responseBody: "={{ $json }}", options: {} }, position);
+}
+
+// Sandbox-only test webpage -- deployed to the sandbox n8n instance only,
+// never to the production workflows list. Lets the owner play any number of
+// personas (customer, PM, lawyer, any future staff role) at once through a
+// plain webpage, without a real phone number for anyone. See docs on the
+// SANDBOX guards in each *_src/*.js file's sendWhatsApp* functions -- those
+// are what make this safe to run without ever reaching real WhatsApp.
+writeMultiTriggerWorkflow(
+  "10-sandbox-ui.json",
+  "Bali - 10 Sandbox UI",
+  [
+    [
+      webhookNodeSync("Sandbox UI Trigger", "sandbox-ui", "bali-sandbox-ui", [-200, 0], "GET"),
+      respondToWebhookNode(
+        "Serve Sandbox UI",
+        {
+          respondWith: "text",
+          responseBody: readFileSync(path.join(dir, "sandbox-ui.html"), "utf8"),
+          options: { responseHeaders: { entries: [{ name: "Content-Type", value: "text/html; charset=utf-8" }] } },
+        },
+        [40, 0]
+      ),
+    ],
+    [
+      webhookNodeSync("Sandbox Roles Trigger", "sandbox-roles", "bali-sandbox-roles", [-200, 140], "GET"),
+      codeNode("Get Sandbox Roles", "sandbox-roles-code.js", [40, 140]),
+      jsonRespondNode("Return Sandbox Roles", [260, 140]),
+    ],
+    [
+      webhookNodeSync("Sandbox Personas Trigger", "sandbox-personas", "bali-sandbox-personas", [-200, 280], "GET"),
+      codeNode("Get Sandbox Personas", "sandbox-personas-code.js", [40, 280]),
+      jsonRespondNode("Return Sandbox Personas", [260, 280]),
+    ],
+    [
+      webhookNodeSync("Sandbox Persona Create Trigger", "sandbox-persona", "bali-sandbox-persona", [-200, 420]),
+      codeNode("Create Sandbox Persona", "sandbox-persona-create-code.js", [40, 420]),
+      jsonRespondNode("Return Created Persona", [260, 420]),
+    ],
+    [
+      webhookNodeSync("Sandbox Send Trigger", "sandbox-send", "bali-sandbox-send", [-200, 560]),
+      codeNode("Relay Sandbox Send", "sandbox-send-code.js", [40, 560]),
+      jsonRespondNode("Return Sandbox Send Result", [260, 560]),
+    ],
+    [
+      webhookNodeSync("Sandbox Poll Trigger", "sandbox-poll", "bali-sandbox-poll", [-200, 700], "GET"),
+      codeNode("Get Sandbox Outbound", "sandbox-poll-code.js", [40, 700]),
+      jsonRespondNode("Return Sandbox Outbound", [260, 700]),
+    ],
+    [
+      webhookNodeSync("Sandbox Reset Trigger", "sandbox-reset", "bali-sandbox-reset", [-200, 840]),
+      codeNode("Reset Sandbox", "sandbox-reset-code.js", [40, 840]),
+      jsonRespondNode("Return Sandbox Reset Result", [260, 840]),
+    ],
+  ]
+);
