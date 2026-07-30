@@ -1,0 +1,3 @@
+n8n/_src/*.js text eol=lf
+n8n/_src/*.html text eol=lf
+n8n/*.json text eol=lf
