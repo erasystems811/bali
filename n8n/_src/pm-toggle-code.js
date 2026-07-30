@@ -626,26 +626,77 @@ if (!target) {
   // yet, rather than routing through fixed template text.
   const pmLed = await findPmLedBooking();
 
+  // Which booking this whole fallback exchange is actually about. Usually
+  // whichever one is currently open -- but the PM confirming "close" (see
+  // below) clears that, so a FOLLOW-UP confirmation ("yes i do" to a
+  // "reopen it?" question) needs to still resolve to the same booking even
+  // though it's no longer pmLed by then. Falls back to whichever booking
+  // this fallback chat was most recently logged against.
+  let subjectBooking = pmLed;
+  if (!subjectBooking) {
+    const lastChat = await sbRequest(
+      'GET',
+      `conversations?stage=eq.pm_fallback_chat&order=created_at.desc&limit=1&select=booking_id`
+    );
+    if (lastChat[0]) {
+      subjectBooking = (await sbRequest('GET', `bookings?id=eq.${lastChat[0].booking_id}&select=*`))[0] || null;
+    }
+  }
+
   // Real bug, reported live: this fallback used to be a single stateless
   // completion with zero memory of its OWN previous turn -- so when the bot
   // itself asked a clarifying question ("...let me know if you need to
   // reopen it or make any changes") and the PM answered "yes i do", the next
   // call had no idea what "yes" was answering and produced a generic
   // non-response. Fixed by keeping a short rolling transcript of this
-  // fallback chat, scoped to whichever booking is currently open (there's
-  // nowhere schema-valid to log it when nothing is open, since
-  // conversations.booking_id is NOT NULL -- that narrower case is unchanged).
+  // fallback chat, scoped to subjectBooking (there's nowhere schema-valid to
+  // log it when no booking is in play at all, since conversations.booking_id
+  // is NOT NULL -- that narrower case is unchanged).
   let recentTranscript = '';
-  if (pmLed) {
+  if (subjectBooking) {
     const recent = await sbRequest(
       'GET',
-      `conversations?booking_id=eq.${pmLed.id}&stage=eq.pm_fallback_chat&order=created_at.desc&limit=6&select=direction,message_text`
+      `conversations?booking_id=eq.${subjectBooking.id}&stage=eq.pm_fallback_chat&order=created_at.desc&limit=6&select=direction,message_text`
     );
     if (recent.length > 0) {
-      recentTranscript = `\n\nYour recent back-and-forth with the PM about this:\n${recent
+      recentTranscript = recent
         .reverse()
         .map((m) => `${m.direction === 'inbound' ? 'PM' : 'Bali'}: ${m.message_text}`)
-        .join('\n')}`;
+        .join('\n');
+    }
+  }
+
+  // Owner's ask: once the PM actually confirms an action here (not just
+  // discusses it), really do it -- don't just talk about it. Scoped to
+  // close/reopen for now, the exact case reported live ("yes i do" to the
+  // bot's own "need to reopen it?" question got a generic non-answer AND
+  // never actually reopened anything). This is a judgment call, same class
+  // as the natural-language rename feature -- NOT the deterministic
+  // client-relay safety gate elsewhere in this file, so LLM discretion is an
+  // acceptable trade: misjudging it only flips a connection flag on the
+  // PM's own booking, it can never reach a client.
+  if (subjectBooking) {
+    const actionIntent = await openaiExtract(
+      `The PM is chatting with Bali (an internal assistant) about their booking "${subjectBooking.event_name}". Decide if the PM's LATEST message is a clear, direct confirmation that they want to CLOSE this booking's connection (hand it back to automated handling) or REOPEN it. Only pick "close" or "open" if the PM is clearly asking for that specific action to happen right now -- a rejection ("no", "leave it as is") or an unrelated message is "none", even if the word "open" appears in it. Reply ONLY with JSON: {"action": "close"|"open"|"none"}.\n\nRecent conversation:\n${recentTranscript || '(none yet)'}`,
+      text || ''
+    );
+    if (actionIntent?.action === 'close' || actionIntent?.action === 'open') {
+      let confirmMsg;
+      if (actionIntent.action === 'close') {
+        confirmMsg = subjectBooking.connected_to_pm_at
+          ? `Closed "${subjectBooking.event_name}". Back to automated.`
+          : `"${subjectBooking.event_name}" isn't connected right now.`;
+        if (subjectBooking.connected_to_pm_at) {
+          await sbPatch(`bookings?id=eq.${subjectBooking.id}`, { connected_to_pm_at: null });
+        }
+      } else {
+        await sbPatch(`bookings?id=eq.${subjectBooking.id}`, { connected_to_pm_at: new Date().toISOString() });
+        confirmMsg = `Reopened "${subjectBooking.event_name}". I'll relay everything straight through until you say "${subjectBooking.event_name}: close".`;
+      }
+      await sendWhatsApp(from_number, confirmMsg);
+      await logConversation(subjectBooking.id, contact_id, 'inbound', text || '', 'pm_fallback_chat');
+      await logConversation(subjectBooking.id, null, 'outbound', confirmMsg, 'pm_fallback_chat');
+      return [{ json: { action: `fallback_${actionIntent.action}d`, booking_id: subjectBooking.id } }];
     }
   }
 
@@ -656,13 +707,13 @@ What you can actually do today: manage one client negotiation at a time ("open [
 
 For anything else -- messaging other staff, pulling reports, other operational tasks -- you don't have that built yet. If asked for something like that, say plainly that you can't do it yet rather than pretending to. Keep your reply short, natural, and professional -- no filler, no fake enthusiasm.
 
-${pmLed ? `Currently open with a client: "${pmLed.event_name}".` : 'Nothing currently open with a client.'}${recentTranscript}`,
+${pmLed ? `Currently open with a client: "${pmLed.event_name}".` : 'Nothing currently open with a client.'}${recentTranscript ? `\n\nYour recent back-and-forth with the PM about this:\n${recentTranscript}` : ''}`,
     text || ''
   ) || "Sorry, I couldn't process that -- try rephrasing?";
   await sendWhatsApp(from_number, reply);
-  if (pmLed) {
-    await logConversation(pmLed.id, contact_id, 'inbound', text || '', 'pm_fallback_chat');
-    await logConversation(pmLed.id, null, 'outbound', reply, 'pm_fallback_chat');
+  if (subjectBooking) {
+    await logConversation(subjectBooking.id, contact_id, 'inbound', text || '', 'pm_fallback_chat');
+    await logConversation(subjectBooking.id, null, 'outbound', reply, 'pm_fallback_chat');
   }
   return [{ json: { action: 'unclassified' } }];
 }
