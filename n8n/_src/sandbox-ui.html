@@ -156,7 +156,7 @@
 <div id="board"><div class="empty">Loading…</div></div>
 
 <script>
-const state = { personas: [], since: new Date(0).toISOString() };
+const state = { personas: [], since: new Date(0).toISOString(), actionLog: [] };
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -231,12 +231,26 @@ async function sendAs(persona, input) {
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
+
+  // Record exactly how many bubbles every column had right before this
+  // action, so undo can trim each column back to precisely that count --
+  // never touching a persona's history that this action didn't add to.
+  const preCounts = {};
+  for (const col of document.querySelectorAll('.col')) {
+    preCounts[col.dataset.id] = col.querySelector('.msgs').children.length;
+  }
+  state.actionLog.push({ kind: 'send', preCounts });
+
   appendBubble(persona.id, 'me', text);
   await api('sandbox-send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ phone_number: persona.phone_number, text }),
   });
+  // Poll immediately (don't wait for the 2s interval) so any bot replies
+  // this action produced are already on screen -- and therefore already
+  // counted -- before the user has a chance to click Undo.
+  await poll();
   await refreshUndoCount();
 }
 
@@ -260,11 +274,12 @@ document.getElementById('createPersona').addEventListener('click', async () => {
   const name = document.getElementById('newName').value.trim();
   const role = document.getElementById('newRole').value;
   if (!name || !role) return;
-  await api('sandbox-persona', {
+  const result = await api('sandbox-persona', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, role }),
   });
+  if (result.persona?.id) state.actionLog.push({ kind: 'persona', personaId: result.persona.id });
   document.getElementById('newName').value = '';
   await loadPersonas();
   await refreshUndoCount();
@@ -288,20 +303,42 @@ async function refreshUndoCount() {
 }
 
 document.getElementById('undoBtn').addEventListener('click', async () => {
-  const result = await api('sandbox-undo', { method: 'POST' });
+  const btn = document.getElementById('undoBtn');
+  if (btn.disabled) return; // ignore double-clicks while one undo is still in flight
+  btn.disabled = true;
   const label = document.getElementById('undoCount');
-  if (!result.ok) {
-    label.textContent = result.message || 'Nothing to undo.';
-    return;
+  try {
+    const result = await api('sandbox-undo', { method: 'POST' });
+    if (!result.ok) {
+      label.textContent = result.message || 'Nothing to undo.';
+      return;
+    }
+    // Undo exactly what this one action added -- and nothing else on
+    // screen. No full-board rebuild: that would wipe every persona's typed
+    // ("me") messages, since those only ever exist client-side and can't be
+    // reconstructed from the server. Trim precisely back to the bubble
+    // counts recorded right before the action ran, or drop the one column
+    // a persona-create action added.
+    const action = state.actionLog.pop();
+    if (action?.kind === 'persona') {
+      const col = document.querySelector(`.col[data-id="${action.personaId}"]`);
+      if (col) col.remove();
+      state.personas = state.personas.filter((p) => p.id !== action.personaId);
+    } else if (action?.kind === 'send') {
+      for (const [personaId, count] of Object.entries(action.preCounts)) {
+        const col = document.querySelector(`.col[data-id="${personaId}"]`);
+        if (!col) continue;
+        const msgs = col.querySelector('.msgs');
+        while (msgs.children.length > count) msgs.removeChild(msgs.lastChild);
+      }
+    }
+    // else: no client-side action log entry (e.g. page was reloaded after
+    // the action ran) -- the server state is still correctly rolled back,
+    // it just can't be reflected on screen without a page reload.
+    label.textContent = `Undone: ${result.undone}`;
+  } finally {
+    await refreshUndoCount();
   }
-  // Rebuild the whole board from the restored state rather than trying to
-  // surgically un-render individual chat bubbles -- simplest way to
-  // guarantee what's on screen matches what just got restored in the DB.
-  document.getElementById('board').innerHTML = '';
-  state.since = new Date(0).toISOString();
-  await loadPersonas();
-  label.textContent = `Undone: ${result.undone}`;
-  setTimeout(refreshUndoCount, 2000);
 });
 
 (async function init() {
