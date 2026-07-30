@@ -408,6 +408,23 @@ let planningTarget = null; // a booking row (signed/onboarded, or connected, awa
 // disambiguating by number (e.g. "2: yes") it's just the part after "2:".
 let answerText = text;
 
+// When the booking to relay to was already resolved some other way (swipe-
+// reply, or auto-matched as the sole thing awaiting a reply), the PM doesn't
+// NEED to type the event name -- but habit means they sometimes do anyway
+// (e.g. "mad hey" for booking "Mad's Birthday Party"). Unlike the explicit
+// "[event name] message" addressing path (which is the only place a leading
+// event name is actually required, and already strips it via
+// stripLeadingEventName below), these already-resolved paths used to relay
+// the raw text unstripped, leaking the event name straight to the client
+// verbatim -- confirmed live 2026-07-30 ("mad hey, setup starts at 2pm" sent
+// to the client exactly as typed). Strip it here too whenever it happens to
+// lead the text, using the SAME stripLeadingEventName helper (declared below
+// -- function declarations hoist, so this earlier call is fine).
+function stripAccidentalEventPrefix(rawText, eventName) {
+  const stripped = stripLeadingEventName(rawText, eventName);
+  return stripped !== null ? stripped : rawText;
+}
+
 if (reply_to_message_id) {
   target = pending.find((p) => p.whatsapp_message_id === reply_to_message_id) || null;
   if (!target) {
@@ -415,9 +432,10 @@ if (reply_to_message_id) {
   }
   if (planningTarget) {
     const client = (await sbRequest('GET', `contacts?id=eq.${planningTarget.client_contact_id}&select=*`))[0];
+    const relayText = stripAccidentalEventPrefix(answerText, planningTarget.event_name);
     if (client?.phone_number) {
-      await sendWhatsApp(client.phone_number, answerText);
-      await logConversation(planningTarget.id, null, 'outbound', answerText, 'planning_relay');
+      await sendWhatsApp(client.phone_number, relayText);
+      await logConversation(planningTarget.id, null, 'outbound', relayText, 'planning_relay');
     }
     await logConversation(planningTarget.id, contact_id, 'inbound', answerText, 'pm_message');
     return [{ json: { action: 'planning_relayed_to_client', booking_id: planningTarget.id } }];
@@ -590,9 +608,10 @@ if (!reply_to_message_id) {
 
 if (planningTarget) {
   const client = (await sbRequest('GET', `contacts?id=eq.${planningTarget.client_contact_id}&select=*`))[0];
+  const relayText = stripAccidentalEventPrefix(answerText, planningTarget.event_name);
   if (client?.phone_number) {
-    await sendWhatsApp(client.phone_number, answerText);
-    await logConversation(planningTarget.id, null, 'outbound', answerText, 'planning_relay');
+    await sendWhatsApp(client.phone_number, relayText);
+    await logConversation(planningTarget.id, null, 'outbound', relayText, 'planning_relay');
   }
   await logConversation(planningTarget.id, contact_id, 'inbound', answerText, 'pm_message');
   return [{ json: { action: 'planning_relayed_to_client', booking_id: planningTarget.id } }];

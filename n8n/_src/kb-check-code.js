@@ -290,18 +290,54 @@ if (action === 'check') {
   return [{ json: { action: `kb_still_waiting_${followUpType}`, pending_question_id: openRow.id } }];
 }
 
+// PM habit: even when a booking is already unambiguously identified (as it
+// always is here -- resolve_escalation only ever targets the one pending
+// question it was called for), the PM sometimes still leads their answer
+// with the event name out of habit from the explicit "[event name] message"
+// addressing convention used elsewhere. That convention strips the prefix
+// before it reaches a client; this path didn't, and leaked it verbatim
+// (confirmed live 2026-07-30 via the equivalent bug in pm-toggle-code.js's
+// planning-relay paths). Strip it here too whenever it happens to lead the
+// text.
+function normalizeEventRef(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+function stripLeadingEventName(text, eventName) {
+  const wanted = normalizeEventRef(eventName);
+  if (!wanted) return null;
+  let consumed = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (/[a-z0-9]/i.test(ch)) {
+      consumed += ch.toLowerCase();
+      if (consumed === wanted) {
+        const next = text[i + 1];
+        if (next && /[a-z0-9]/i.test(next)) return null;
+        return text.slice(i + 1).replace(/^[\s:,.\-–—]+/, '');
+      }
+      if (consumed.length > wanted.length) return null;
+    }
+  }
+  return null;
+}
+function stripAccidentalEventPrefix(rawText, eventName) {
+  const stripped = stripLeadingEventName(rawText, eventName);
+  return stripped !== null ? stripped : rawText;
+}
+
 if (action === 'resolve_escalation') {
   const { pending_question_id, answer_text } = input;
   const pq = (await sbRequest('GET', `pending_questions?id=eq.${pending_question_id}&select=*`))[0];
   const booking = (await sbRequest('GET', `bookings?id=eq.${pq.booking_id}&select=*`))[0];
   const client = (await sbRequest('GET', `contacts?id=eq.${booking.client_contact_id}&select=*`))[0];
+  const relayText = stripAccidentalEventPrefix(answer_text, booking.event_name);
 
-  await sendWhatsApp(client.phone_number, answer_text);
-  await logConversation(booking.id, null, 'outbound', answer_text, 'kb_escalation_answer');
+  await sendWhatsApp(client.phone_number, relayText);
+  await logConversation(booking.id, null, 'outbound', relayText, 'kb_escalation_answer');
 
   // Opt-in KB save (Section 8): only added if the PM says yes to this follow-up.
   const pm = await findPm();
-  const savePayload = JSON.stringify({ question: pq.question_text, answer: answer_text });
+  const savePayload = JSON.stringify({ question: pq.question_text, answer: relayText });
   const savePending = (await sbInsert('pending_questions', {
     booking_id: booking.id,
     field_name: 'kb_save_confirm',
