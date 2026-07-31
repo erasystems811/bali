@@ -705,26 +705,85 @@ async function sendToLawyer(bookingId) {
 }
 
 async function handleLawyerInbound(input) {
-  const { media_id, media_type } = input;
+  const { media_id, media_type, text, from_number } = input;
   const waiting = await sbRequest('GET', 'contracts?draft_received_at=is.null&sent_to_lawyer_at=not.is.null&select=*,bookings(*)&order=sent_to_lawyer_at.desc&limit=1');
   const contract = waiting[0];
 
-  if (!contract || media_type !== 'document') {
-    return { ok: true, action: 'lawyer_message_logged' };
+  if (contract && media_type === 'document') {
+    await sbPatch(`contracts?id=eq.${contract.id}`, { draft_media_id: media_id, draft_received_at: new Date().toISOString() });
+    await sbPatch(`bookings?id=eq.${contract.booking_id}`, { status: 'contract_drafted' });
+
+    const booking = contract.bookings;
+    const pm = await findPm();
+    const questionText = `Contract draft in for "${booking.event_name}", review and reply "yes" to approve and send to the client, or reply with changes for the lawyer.`;
+    const pending = (await sbInsert('pending_questions', { booking_id: contract.booking_id, field_name: 'contract_approval', question_text: questionText }))[0];
+    if (pm) {
+      const msgId = await sendWhatsAppDocument(pm.phone_number, media_id, `${booking.event_name} - Contract Draft.pdf`, questionText);
+      if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
+    }
+    return { ok: true, action: 'contract_draft_forwarded_to_pm' };
   }
 
-  await sbPatch(`contracts?id=eq.${contract.id}`, { draft_media_id: media_id, draft_received_at: new Date().toISOString() });
-  await sbPatch(`bookings?id=eq.${contract.booking_id}`, { status: 'contract_drafted' });
+  // A plain-text message from the lawyer (a question, most likely) -- this
+  // used to just get logged with zero reply, confirmed live. Try to answer
+  // it directly from whatever's already known about the contract they're
+  // actively working on; anything not confidently answerable from that gets
+  // forwarded to the PM instead of silently dropped, tracked the same way
+  // client relays are (swipe-reply goes straight back to the lawyer).
+  if (!text) return { ok: true, action: 'lawyer_message_logged' };
 
-  const booking = contract.bookings;
+  const active = (await sbRequest(
+    'GET',
+    'contracts?sent_to_lawyer_at=not.is.null&select=*,bookings(*)&order=sent_to_lawyer_at.desc&limit=1'
+  ))[0];
+  if (!active) return { ok: true, action: 'lawyer_message_logged' };
+
+  const booking = active.bookings;
+  const knownDetails = {
+    organizer_name: active.organizer_legal_name,
+    organizer_address: active.organizer_registered_address,
+    event_name: booking.event_name,
+    event_date: booking.event_date ? formatDatePdf(booking.event_date) : null,
+    event_type: booking.event_type,
+    total_fee: active.total_fee ? formatMoney(active.total_fee) : null,
+    payment_terms: active.payment_terms,
+  };
+  const answerCheck = await askOpenAIJson(
+    `You're Bali, an event venue's assistant. The venue's lawyer is asking about a contract with these known details: ${JSON.stringify(knownDetails)}. They just asked: "${text}".
+
+Say can_answer:true ONLY if the question is directly asking to be told the value of one of these known fields (organizer name, organizer address, event name/date/type, total fee, or payment terms) -- e.g. "what's the fee", "is payment full or split", "what's the organizer's address" are all can_answer:true, restating the relevant known value.
+
+Say can_answer:false for anything that asks the venue/bot to make a legal judgment, decide on a policy, add or approve a contract clause or term, or state a rule/policy not literally one of the known fields above (deposits, cancellation policy, liability, force majeure, and similar are all can_answer:false) -- these need an actual person's decision, not a lookup. When genuinely unsure, false.
+
+Reply ONLY with JSON: {"can_answer": true/false, "answer": "..." or null}.`,
+    text
+  );
+  if (answerCheck?.can_answer && answerCheck.answer) {
+    await sendWhatsApp(from_number, answerCheck.answer);
+    return { ok: true, action: 'lawyer_question_answered' };
+  }
+
   const pm = await findPm();
-  const questionText = `Contract draft in for "${booking.event_name}", review and reply "yes" to approve and send to the client, or reply with changes for the lawyer.`;
-  const pending = (await sbInsert('pending_questions', { booking_id: contract.booking_id, field_name: 'contract_approval', question_text: questionText }))[0];
   if (pm) {
-    const msgId = await sendWhatsAppDocument(pm.phone_number, media_id, `${booking.event_name} - Contract Draft.pdf`, questionText);
-    if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
+    const msgId = await sendWhatsApp(pm.phone_number, `lawyer: ${text}`);
+    await sbInsert('pending_questions', {
+      booking_id: booking.id,
+      field_name: 'lawyer_question_relay',
+      question_text: text,
+      whatsapp_message_id: msgId,
+    });
   }
-  return { ok: true, action: 'contract_draft_forwarded_to_pm' };
+  return { ok: true, action: 'lawyer_question_forwarded_to_pm' };
+}
+
+// Resolves a lawyer question forwarded to the PM (either via swipe-reply to
+// the "lawyer: ..." forward, or plain-typed when it's the only thing
+// pending) -- his answer goes straight back to the lawyer, not the client.
+async function resolveLawyerQuestionRelay(pendingId, answerText) {
+  await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
+  const lawyer = await findLawyer();
+  if (lawyer) await sendWhatsApp(lawyer.phone_number, answerText);
+  return { ok: true, action: 'lawyer_question_relayed' };
 }
 
 async function resolveContractApproval(pendingId, answerText) {
@@ -763,6 +822,7 @@ else if (action === 'resolve_invoice_approval') result = await resolveInvoiceApp
 else if (action === 'resolve_payment_confirmed') result = await resolvePaymentConfirmed(input.pending_question_id, input.answer_text);
 else if (action === 'send_to_lawyer') result = await sendToLawyer(input.booking_id);
 else if (action === 'resolve_contract_approval') result = await resolveContractApproval(input.pending_question_id, input.answer_text);
+else if (action === 'resolve_lawyer_question_relay') result = await resolveLawyerQuestionRelay(input.pending_question_id, input.answer_text);
 else result = await handleLawyerInbound(input);
 
 return [{ json: result }];

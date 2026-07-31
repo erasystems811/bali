@@ -183,6 +183,20 @@ async function sendWhatsAppMedia(toNumber, mediaType, mediaId, caption) {
   return res?.messages?.[0]?.id || null;
 }
 
+// Whether the awaiting_contract form still has something to ask this
+// client for. booking.status stays 'awaiting_contract' the whole time the
+// lawyer is drafting (it only moves on once they send a draft back), so
+// without this check every message after the form actually finished would
+// keep landing in that branch and just get logged with no reply and no
+// relay at all -- confirmed live. Once nothing's left to collect, this
+// returns false and the normal connected-to-PM relay below takes over.
+async function contractInfoStillMissing(booking) {
+  if (booking.status !== 'awaiting_contract') return false;
+  const contractRows = await sbRequest('GET', `contracts?booking_id=eq.${booking.id}&order=created_at.desc&limit=1&select=*`);
+  const contract = contractRows[0];
+  return !!(contract && (!contract.organizer_legal_name || !contract.organizer_registered_address || !booking.event_type));
+}
+
 // Real booking history for this contact (signed/onboarded only -- not just
 // self-reported) so "returning client" means something verified, not just
 // whatever the client happened to claim.
@@ -564,7 +578,7 @@ if (!booking) {
   }
   await sendWhatsApp(from_number, "Got it, thanks. Confirming with our team now.");
   return [{ json: { action: 'payment_proof_pending_pm_confirmation', booking_id: booking.id } }];
-} else if (booking.status === 'awaiting_contract') {
+} else if (booking.status === 'awaiting_contract' && await contractInfoStillMissing(booking)) {
   // Stage 4: organizer legal name + registered address must be explicitly confirmed
   // with the client, never assumed from their WhatsApp profile name.
   const contractRows = await sbRequest('GET', `contracts?booking_id=eq.${booking.id}&order=created_at.desc&limit=1&select=*`);
@@ -578,6 +592,18 @@ if (!booking) {
   // discarded everything, even a field it DID understand. Each field here is
   // its own single-purpose extraction against its own single question, so
   // there's nothing to disambiguate between two things in the same message.
+  const sendToLawyerNow = async () => {
+    await helpers.httpRequest({
+      method: 'POST',
+      url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+      headers: { 'Content-Type': 'application/json' },
+      body: { action: 'send_to_lawyer', booking_id: booking.id },
+      json: true,
+      timeout: 15000,
+    });
+    return "Thank you. Will send you an agreement contract soon.";
+  };
+
   if (contract && !contract.organizer_legal_name) {
     const extraction = await askOpenAIJson(
       'The venue asked a client for their organization\'s full legal name. Does this WhatsApp message actually state one (in any format, labels like "name:" are fine)? Reply ONLY with JSON: {"organizer_legal_name": "..." or null}.',
@@ -596,21 +622,27 @@ if (!booking) {
     );
     if (extraction?.organizer_registered_address) {
       await sbPatch(`contracts?id=eq.${contract.id}`, { organizer_registered_address: extraction.organizer_registered_address });
-      await helpers.httpRequest({
-        method: 'POST',
-        url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
-        headers: { 'Content-Type': 'application/json' },
-        body: { action: 'send_to_lawyer', booking_id: booking.id },
-        json: true,
-        timeout: 15000,
-      });
-      replyText = "Thank you. Passing this to our lawyer to draft the contract now.";
+      // Normal intake always collects event_type before a booking can even
+      // reach negotiation, but a booking can land here without it having
+      // ever gone through that (e.g. a PM-driven "invoice [event]" command
+      // on a booking that skipped intake) -- catch that here, last, rather
+      // than send the lawyer a contract request with the event type blank.
+      replyText = booking.event_type ? await sendToLawyerNow() : "Thanks. One more thing, what type of event is this?";
     } else {
       replyText = "Sorry, I need your organization's official registered address, could you send that?";
     }
+  } else if (contract && !booking.event_type) {
+    const extraction = await askOpenAIJson(
+      'The venue asked a client what type of event this is (e.g. wedding, birthday party, corporate event, conference). Does this WhatsApp message actually state one? Reply ONLY with JSON: {"event_type": "..." or null}.',
+      effectiveText || ''
+    );
+    if (extraction?.event_type) {
+      await sbPatch(`bookings?id=eq.${booking.id}`, { event_type: extraction.event_type });
+      replyText = await sendToLawyerNow();
+    } else {
+      replyText = "Sorry, I need to know what type of event this is, could you tell me?";
+    }
   }
-  // If there's no contract row yet, or it's already fully collected, nothing to ask --
-  // just log passively (mirrors the general Stage 2+ passive rule below).
   if (replyText) {
     await sendWhatsApp(from_number, replyText);
     logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: replyText, stage: booking.status });

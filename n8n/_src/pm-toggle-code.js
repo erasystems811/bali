@@ -791,6 +791,7 @@ const STAGE3_4_DELEGATED_FIELDS = {
   contract_approval: 'resolve_contract_approval',
   payment_confirmed: 'resolve_payment_confirmed',
   payment_terms_confirm: 'resolve_payment_terms_confirm',
+  lawyer_question_relay: 'resolve_lawyer_question_relay',
 };
 if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
   // Fire-and-forget: the stage3-4 webhook responds immediately on receipt
