@@ -278,6 +278,30 @@ const input = $input.first().json.body;
 const { from_number, text, reply_to_message_id, contact_id } = input;
 const trimmed = (text || '').trim();
 
+// --- Command: "lawyer: message" -- explicit, deliberate way to reach the
+// lawyer directly, same idea as the "[event name]: message" client relay
+// below but for a fixed keyword instead of a looked-up event name (never
+// collides with a real event since "lawyer" isn't one). Swipe-reply already
+// handled above takes priority if both somehow applied. Logged against
+// whichever contract is currently active with him, if any, purely for
+// conversation history -- the send itself only needs his phone number.
+const lawyerMatch = !reply_to_message_id ? trimmed.match(/^lawyer\s*:\s*([\s\S]+)$/i) : null;
+if (lawyerMatch) {
+  const lawyerMsg = lawyerMatch[1].trim();
+  const lawyer = (await sbRequest('GET', 'contacts?role=eq.lawyer&select=*&limit=1'))[0];
+  if (!lawyer) {
+    await sendWhatsApp(from_number, "No lawyer contact set up yet.");
+    return [{ json: { action: 'lawyer_relay_no_lawyer' } }];
+  }
+  await sendWhatsApp(lawyer.phone_number, lawyerMsg);
+  const activeContract = (await sbRequest('GET', 'contracts?sent_to_lawyer_at=not.is.null&select=booking_id&order=sent_to_lawyer_at.desc&limit=1'))[0];
+  if (activeContract) {
+    await logConversation(activeContract.booking_id, contact_id, 'inbound', trimmed, 'pm_message');
+    await logConversation(activeContract.booking_id, null, 'outbound', lawyerMsg, 'lawyer_question_relay');
+  }
+  return [{ json: { action: 'lawyer_message_relayed' } }];
+}
+
 // --- Command: "invoice [event name][: details]" -- manual trigger to draft
 // the invoice, directly to the bot -- no underlying client conversation
 // needed. Fuzzy on purpose -- the PM shouldn't have to remember an exact
