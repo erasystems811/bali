@@ -41,10 +41,11 @@ async function sbPatch(path, body) { return sbRequest('PATCH', path, body, { Pre
 // nothing leaves the server -- only the Meta upload/send steps are stubbed.
 const SANDBOX = !env.META_TOKEN;
 async function sandboxLog(toNumber, text, kind) {
+  const messageId = `sandbox-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
-    await sbRequest('POST', 'sandbox_outbound', { to_number: toNumber, kind: kind || 'text', message_text: text });
+    await sbRequest('POST', 'sandbox_outbound', { to_number: toNumber, kind: kind || 'text', message_text: text, message_id: messageId });
   } catch (e) {}
-  return `sandbox-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return messageId;
 }
 
 function sanitizeTemplateParam(text) {

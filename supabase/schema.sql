@@ -238,3 +238,46 @@ create table sops (
   content text not null,
   created_at timestamptz not null default now()
 );
+
+-- ---------------------------------------------------------------------------
+-- sandbox_outbound
+-- Lives only in the bali_sandbox database (self-hosted droplet), never in
+-- production bali. Every WhatsApp send the bot would have made, captured
+-- instead of sent whenever SANDBOX mode is on (no META_TOKEN configured) --
+-- see the SANDBOX guard atop each n8n/_src/*-code.js file's
+-- sendWhatsApp*/uploadWhatsAppMedia functions. The sandbox test webpage
+-- polls this to render each persona's chat window. message_id carries the
+-- same fake wamid that gets written to pending_questions.whatsapp_message_id,
+-- so the webpage can offer "reply to this message" and have it match the
+-- real inbound router's swipe-reply resolution (message.context?.id)
+-- exactly like a real WhatsApp reply would.
+-- ---------------------------------------------------------------------------
+create table if not exists sandbox_outbound (
+  id uuid primary key default gen_random_uuid(),
+  to_number text not null,
+  kind text not null default 'text', -- 'text' | 'template' | 'document'
+  message_text text,
+  message_id text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists sandbox_outbound_created_at_idx on sandbox_outbound (created_at);
+
+-- ---------------------------------------------------------------------------
+-- sandbox_snapshots
+-- Lives only in the bali_sandbox database. One row per mutating sandbox
+-- action (send, persona create), taken right before the action runs -- see
+-- takeSnapshot() in sandbox-send-code.js and sandbox-persona-create-code.js.
+-- sandbox-undo-code.js pops the most recent row and restores every sandbox
+-- table to exactly this snapshot. id is bigserial (not uuid, unlike every
+-- other table here) specifically so "most recent" is a plain id order, no
+-- reliance on clock precision/skew across rapid-fire actions.
+-- ---------------------------------------------------------------------------
+create table if not exists sandbox_snapshots (
+  id bigserial primary key,
+  label text not null,
+  tables_json jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists sandbox_snapshots_created_at_idx on sandbox_snapshots (created_at);

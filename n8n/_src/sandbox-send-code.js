@@ -3,7 +3,12 @@
 // same inbound router (01-inbound-router.json) the real app uses -- built as
 // a Meta-Cloud-API-shaped payload, same as what Nexa forwards for real
 // traffic, so every bit of real routing/role logic gets exercised for real,
-// not reimplemented here. Body: { phone_number, text }.
+// not reimplemented here. Body: { phone_number, text, reply_to_message_id }.
+// reply_to_message_id is optional -- the id of a prior sandbox_outbound row
+// the sender picked "reply" on in the webpage, standing in for a real
+// WhatsApp swipe-reply. Passed through as messages[0].context.id, exactly
+// where 01-inbound-router.json's Parse Inbound Message node reads a real
+// swipe-reply's quoted message id from (message.context?.id).
 const helpers = this.helpers;
 const env = {
   N8N_BASE_URL: $env.N8N_BASE_URL,
@@ -46,6 +51,7 @@ const input = $input.first().json.body || {};
 
 const phoneNumber = (input.phone_number || '').trim();
 const text = (input.text || '').trim();
+const replyToMessageId = (input.reply_to_message_id || '').trim();
 if (!phoneNumber || !text) {
   return [{ json: { error: 'phone_number and text are both required' } }];
 }
@@ -68,6 +74,7 @@ await helpers.httpRequest({
             timestamp: String(Math.floor(Date.now() / 1000)),
             type: 'text',
             text: { body: text },
+            ...(replyToMessageId ? { context: { id: replyToMessageId } } : {}),
           }],
         },
       }],
