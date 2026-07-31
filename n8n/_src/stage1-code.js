@@ -680,20 +680,33 @@ if (!booking) {
   } else {
     const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
     const pm = pmRows[0];
-    if (pm) {
-      let msgId;
-      if (input.media_type) {
-        // A document/image resent here (any status past the specific
-        // invoiced/sent_to_client branches that already handle media) used
-        // to build a text line from effectiveText, which is null for a pure
-        // attachment -- literally sent the PM "event name: null". Confirmed
-        // live. Forward the actual file instead.
-        msgId = await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}${effectiveText ? ': ' + effectiveText : ''}`);
-      } else {
-        const forwardText = `${booking.event_name}: ${effectiveText}`;
-        msgId = await sendWhatsApp(pm.phone_number, forwardText);
-      }
-      logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: input.media_type ? `[relayed ${input.media_type} to PM]` : `[relayed to PM] ${effectiveText}`, stage: 'connected_relay_to_pm', whatsapp_message_id: msgId || null });
+    if (pm && input.media_type) {
+      // A document/image reaching a connected booking through this general
+      // path (any status other than the specific invoiced/sent_to_client
+      // stages that already handle their own media) is most likely the
+      // signed contract -- the PM often sends it manually rather than
+      // through the official approve-and-send flow, which is the only thing
+      // that sets status to 'sent_to_client' and is the ONLY status the bot
+      // otherwise recognizes as "expect a signed PDF back". Confirmed live:
+      // PM manually sent the contract and told the client to resend it
+      // signed, the reply landed here (status never became sent_to_client)
+      // and just got passively forwarded with no confirm prompt at all.
+      // Treat it the same way that specific branch already does, rather
+      // than assuming a document only matters in one exact status.
+      const questionText = `${booking.event_name}: client sent back a signed PDF (above). Confirm it's valid? Reply yes or no.`;
+      const pendingRows = await sbRequest('POST', 'pending_questions', {
+        booking_id: booking.id,
+        field_name: 'contract_confirmed',
+        question_text: questionText,
+      }, { Prefer: 'return=representation' });
+      await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}, signed contract`);
+      const msgId = await sendWhatsApp(pm.phone_number, questionText);
+      if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
+      logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed ${input.media_type} to PM, asked to confirm]`, stage: 'connected_relay_to_pm', whatsapp_message_id: msgId || null });
+    } else if (pm) {
+      const forwardText = `${booking.event_name}: ${effectiveText}`;
+      const msgId = await sendWhatsApp(pm.phone_number, forwardText);
+      logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed to PM] ${effectiveText}`, stage: 'connected_relay_to_pm', whatsapp_message_id: msgId || null });
     }
   }
   await sbRequest('POST', 'conversations', logs);
