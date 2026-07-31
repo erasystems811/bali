@@ -825,6 +825,12 @@ async function resolveContractApproval(pendingId, answerText) {
     return { ok: true, action: 'contract_sent_to_client' };
   }
 
+  // Reset so the revised PDF the lawyer sends back actually gets picked up --
+  // handleLawyerInbound only treats an incoming document as a contract draft
+  // when draft_received_at is still null. Left set from the FIRST
+  // submission, this stayed true forever, so every revision after the first
+  // one got silently dropped -- confirmed live.
+  await sbPatch(`contracts?id=eq.${contract.id}`, { draft_received_at: null });
   const lawyer = await findLawyer();
   if (lawyer) await sendWhatsApp(lawyer.phone_number, `PM requested a change on the ${booking.event_name} contract: "${answerText}"`);
   return { ok: true, action: 'change_relayed_to_lawyer' };
