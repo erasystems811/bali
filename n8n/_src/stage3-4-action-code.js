@@ -372,7 +372,7 @@ function formatInvoiceDraftText(invoice, booking) {
 // loop and the post-PDF approval loop.
 async function extractInvoiceCorrection(invoice, answerText) {
   return askOpenAIJson(
-    `Here is a draft invoice's current line items and payment terms as JSON: ${JSON.stringify({ line_items: invoice.line_items, payment_terms: invoice.payment_terms, bill_to_name: invoice.bill_to_name, bill_to_location: invoice.bill_to_location })}\n\nThe PM has requested this correction: "${answerText}"\n\nAmounts are in Nigerian Naira -- shorthand like "6m" means 6,000,000 and "500k" means 500,000, convert to a plain number. If the correction states one collective price for multiple items, use exactly ONE line item listing all those items with that one amount -- never repeat the same amount across several line items. Reply ONLY with the corrected JSON in the exact same shape: {"line_items": [{"description": "...", "amount": <number>}], "payment_terms": "...", "bill_to_name": "...", "bill_to_location": "..."}.`,
+    `Here is a draft invoice's current line items and payment terms as JSON: ${JSON.stringify({ line_items: invoice.line_items, payment_terms: invoice.payment_terms, bill_to_name: invoice.bill_to_name, bill_to_location: invoice.bill_to_location })}\n\nThe PM has requested this correction: "${answerText}"\n\nAmounts are in Nigerian Naira -- shorthand like "6m" means 6,000,000 and "500k" means 500,000, convert to a plain number. If the correction names a SPECIFIC existing line item with a new amount (e.g. "sound is 2.7m now"), update just that item's amount and leave every other line item exactly as it was -- don't touch or merge unrelated lines. If the correction states a genuinely new collective price for multiple items that don't already have their own separate line items, use exactly ONE line item listing all those items with that one amount -- never repeat the same amount across several line items. If the correction is a bare lump number with no item named, and it matches the sum of the current line items (or the current line items minus one being dropped), keep the remaining items on their own separate lines at their existing amounts rather than merging them into one line -- a lump number alone is not by itself a request to combine already-separate line items. Reply ONLY with the corrected JSON in the exact same shape: {"line_items": [{"description": "...", "amount": <number>}], "payment_terms": "...", "bill_to_name": "...", "bill_to_location": "..."}.`,
     answerText,
     0
   );
@@ -444,14 +444,24 @@ Typical items for this venue: stage, sound, screen, power (sometimes called "lig
 
 Two pricing patterns to watch for:
 1. ITEMIZED -- each item has its own stated amount: extract one line item per item with its own amount.
-2. COLLECTIVE -- a single overall price is agreed for a set of items with no per-item breakdown (e.g. a list of items in one message and one lump amount in another): output exactly ONE line item whose description lists all the agreed items (comma-separated) and whose amount is that collective price. Never invent a per-item split that was never stated.
+2. COLLECTIVE -- a single overall price is agreed for a set of items that were NEVER given individual amounts anywhere in the conversation: output exactly ONE line item whose description lists all the agreed items (comma-separated) and whose amount is that collective price. Never invent a per-item split that was never stated.
 
 If the transcript mixes both patterns (some items individually priced, the rest priced as one group), represent that mix faithfully: one line item per individually-priced item, plus one combined line item for whatever was priced together.
 
-Worked example of the COLLECTIVE case -- get this exactly right:
+Two different things can look similar but must be told apart:
+- A later message naming a SPECIFIC item with a new amount (e.g. "sound is 4m" then later "sound for 2.7m") is a price correction for that one item -- the latest stated amount for that item wins, replacing its earlier price, but it stays its own line item.
+- A later bare lump number with no item names attached, coming after items were already individually priced, is usually just confirming (or re-totaling after one item got dropped) that same itemized breakdown -- NOT a brand new collective quote. Check whether it matches the sum of the still-included items' last individual prices; if so, keep each item as its own line at its last individually-stated amount, don't collapse them into one combined line.
+
+Worked example -- a lump confirmation after dropping an item, NOT a new collective price:
+PM: sound is 2m, light 2m, screen 2m
+Client: actually I don't need sound
+PM: okay then 4m
+-> 4m is confirming the two remaining already-itemized items (light 2m + screen 2m = 4m). Correct output: TWO line items, {"description": "light", "amount": 2000000} and {"description": "screen", "amount": 2000000}. WRONG: one line item "light, screen": 4000000 -- that discards real itemization that was already established.
+
+Worked example of a genuine COLLECTIVE case (items never individually priced):
 PM: 6m
 PM: Sound, screen, power, staff, ticketing
--> This is ONE collective price for FIVE items. Correct output has exactly ONE line item: {"description": "Sound, screen, power, staff, ticketing", "amount": 6000000}. WRONG: five line items each at 6000000 (that inflates the real total 5x -- never repeat one stated price across multiple line items).
+-> This is ONE collective price for FIVE items that were never given individual amounts. Correct output has exactly ONE line item: {"description": "Sound, screen, power, staff, ticketing", "amount": 6000000}. WRONG: five line items each at 6000000 (that inflates the real total 5x -- never repeat one stated price across multiple line items).
 
 Amounts are in Nigerian Naira. Shorthand like "6m" means 6,000,000 and "500k" means 500,000 -- convert to a plain number, no currency symbols or commas. Only include PAID items (things the client is actually being charged for).
 
@@ -521,6 +531,22 @@ async function resolveInvoiceDraftConfirm(pendingId, answerText) {
   if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
     await sendInvoiceForFinalApproval(invoice, booking);
     return { ok: true, action: 'invoice_draft_confirmed_pdf_sent' };
+  }
+
+  // A genuine question about the draft (not a correction or a confirmation)
+  // gets answered directly instead of being forced through the correction
+  // extraction below, which has nothing to actually change and would just
+  // silently resend the exact same draft with no acknowledgment of what was
+  // asked. Leaves the original pending_questions row untouched either way --
+  // it's still swipe-repliable for a real "yes" or correction afterward.
+  const questionCheck = await askOpenAIJson(
+    `The PM is reviewing this draft invoice for "${booking.event_name}": ${JSON.stringify({ line_items: invoice.line_items, payment_terms: invoice.payment_terms, subtotal: invoice.subtotal, vat_amount: invoice.vat_amount, wht_amount: invoice.wht_amount, total_net_payable: invoice.total_net_payable })}. VAT is a fixed 7.5% and WHT is a fixed 2% deduction, always. He just replied: "${answerText}". Is this a genuine question about the invoice (asking what/why/how about something on it) rather than a "yes"/confirmation or a request to change an amount/item/term? If it's a question, answer it briefly and accurately using only the numbers/terms above and the fixed VAT/WHT rates -- never invent a reason or number not shown here. Reply ONLY with JSON: {"is_question": true/false, "answer": "..." or null}.`,
+    answerText || ''
+  );
+  if (questionCheck?.is_question && questionCheck.answer) {
+    const pm = await findPm();
+    if (pm) await sendWhatsApp(pm.phone_number, questionCheck.answer);
+    return { ok: true, action: 'invoice_question_answered' };
   }
 
   const extraction = await extractInvoiceCorrection(invoice, answerText);
