@@ -155,9 +155,9 @@ async function findPm() {
   return rows[0] || null;
 }
 
-async function logConversation(bookingId, senderContactId, direction, text, stage) {
+async function logConversation(bookingId, senderContactId, direction, text, stage, whatsappMessageId) {
   await sbInsert('conversations', [
-    { booking_id: bookingId, sender_contact_id: senderContactId, direction, message_text: text, stage },
+    { booking_id: bookingId, sender_contact_id: senderContactId, direction, message_text: text, stage, whatsapp_message_id: whatsappMessageId || null },
   ]);
 }
 
@@ -174,11 +174,14 @@ if (action === 'check') {
 
   const result = await askOpenAI(systemPrompt, text || '');
 
-  let bookingId = booking_id || null;
-  if (!bookingId) {
-    const rows = await sbRequest('GET', `bookings?client_contact_id=eq.${contact_id}&status=neq.cancelled&order=created_at.desc&limit=1`);
-    bookingId = rows[0]?.id || null;
+  let booking = null;
+  if (booking_id) {
+    booking = (await sbRequest('GET', `bookings?id=eq.${booking_id}&select=*`))[0] || null;
+  } else {
+    const rows = await sbRequest('GET', `bookings?client_contact_id=eq.${contact_id}&status=neq.cancelled&order=created_at.desc&limit=1&select=*`);
+    booking = rows[0] || null;
   }
+  const bookingId = booking?.id || null;
 
   if (result.found && result.answer) {
     await sendWhatsApp(from_number, result.answer);
@@ -186,168 +189,33 @@ if (action === 'check') {
     return [{ json: { action: 'kb_answered' } }];
   }
 
-  // Not found -- if this is the first time this has come up, stall with a warm line and
-  // actually escalate to the PM.
-  const priorRows = bookingId
-    ? await sbRequest('GET', `pending_questions?booking_id=eq.${bookingId}&field_name=eq.kb_escalation&select=id,question_text,resolved_at&order=asked_at.asc`)
-    : [];
-  const openRow = priorRows.find((r) => !r.resolved_at) || null;
+  // Not found in the knowledge base -- connect this booking to the PM (same
+  // as him manually opening one) and relay the client's actual message
+  // straight through, tracked the same durable way as any other connected
+  // relay (see stage1-code.js) so a swipe-reply to it keeps working and every
+  // future message from this client just flows through automatically from
+  // here on. No more one-shot "reply to this exact message" escalation with
+  // its own separate stall-tier/resolve/KB-save-prompt machinery -- once the
+  // bot can't handle something itself, it hands off for real instead of
+  // staging a ping-pong. See [[project_bali]]: "messages go directly now and
+  // stay open" is the standing rule, not just for already-connected bookings.
   const pm = await findPm();
-
-  if (!openRow) {
-    const STILL_WAITING_REPLIES = [
-      "Good question, let me check on that and get back to you!",
-      "Sorry, I'm still checking on that for you.",
-      "Still haven't been able to confirm that, sorry for the long wait.",
-    ];
-    const tier = Math.min(priorRows.length, STILL_WAITING_REPLIES.length - 1);
-    const waitingText = STILL_WAITING_REPLIES[tier];
-    await sendWhatsApp(from_number, waitingText);
-    if (bookingId) await logConversation(bookingId, contact_id, 'outbound', waitingText, 'kb_not_found');
-
-    if (!pm || !bookingId) {
-      return [{ json: { action: 'kb_not_found_no_escalation_target' } }];
-    }
-
-    const booking = (await sbRequest('GET', `bookings?id=eq.${bookingId}&select=event_name`))[0];
-    const pending = (await sbInsert('pending_questions', {
-      booking_id: bookingId,
-      field_name: 'kb_escalation',
-      question_text: text,
-    }))[0];
-
-    const escalationText = `New question on ${booking?.event_name || 'an inquiry'}: "${text}"\nReply directly to this message with the answer.`;
-    const msgId = await sendWhatsApp(pm.phone_number, escalationText);
-    if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
-
-    return [{ json: { action: 'kb_escalated', pending_question_id: pending.id } }];
+  if (!booking || !pm) {
+    const fallbackText = "Let me check on that and get back to you.";
+    await sendWhatsApp(from_number, fallbackText);
+    if (bookingId) await logConversation(bookingId, contact_id, 'outbound', fallbackText, 'kb_not_found');
+    return [{ json: { action: 'kb_not_found_no_target' } }];
   }
 
-  // Already pending with the PM. Rather than always repeating the same
-  // generic "still checking" line, actually read what the client just said --
-  // they might be adding a detail worth relaying to the PM, asking for a
-  // clarification we can address from the conversation itself, or genuinely
-  // just checking in with nothing new.
-  if (!bookingId) {
-    return [{ json: { action: 'kb_still_waiting_no_booking' } }];
+  if (!booking.connected_to_pm_at) {
+    await sbPatch(`bookings?id=eq.${booking.id}`, { connected_to_pm_at: new Date().toISOString() });
   }
 
-  const history = await sbRequest(
-    'GET',
-    `conversations?booking_id=eq.${bookingId}&order=created_at.desc&select=direction,message_text&limit=10`
-  );
-  const recentTranscript = history.reverse().map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`).join('\n');
+  const forwardText = `${booking.event_name || 'New inquiry'}: ${text}`;
+  const msgId = await sendWhatsApp(pm.phone_number, forwardText);
+  await logConversation(bookingId, null, 'outbound', `[relayed to PM] ${text}`, 'connected_relay_to_pm', msgId);
 
-  const followUp = await askOpenAI(
-    `A client asked "${openRow.question_text}" and it's still waiting on an answer from our events team -- not something you can answer yourself. They just followed up with: "${text}"\n\nRecent conversation:\n${recentTranscript}\n\nClassify their follow-up and reply ONLY with JSON: {"type": "additional_info" | "clarification" | "check_in", "forward_note": "..." or null, "reply": "..."}\n\n- "additional_info": they're adding a new detail relevant to their booking or open question (a preference, a correction, extra context) that the team should know about. "forward_note" is a short, concrete note of what they added, to relay to the team. "reply" briefly and warmly confirms you've passed it along.\n- "clarification": they're asking you to restate or clarify something about their own situation, answerable from the conversation above without needing anything new from the team. "forward_note" is null. "reply" directly answers it, warm and brief.\n- "check_in": just checking in, repeating impatience, or nothing new to act on -- you genuinely don't have an answer yet. "forward_note" is null. "reply" is a warm acknowledgment that you're still on it -- vary the wording, never repeat a line already used in the conversation above.\n\nNever sound like an AI or a hype machine: no "Awesome!", no exclamation-point enthusiasm.`,
-    text || ''
-  );
-
-  const followUpType = followUp?.type || 'check_in';
-  const replyText = followUp?.reply || "Still checking on that for you, sorry for the wait.";
-
-  if (followUpType === 'additional_info' && followUp.forward_note && pm) {
-    // Actually resend the open question to the PM (not just a passive FYI) --
-    // restate it in full with the new detail attached, and re-point the
-    // pending question's whatsapp_message_id at this message so a swipe-reply
-    // to it still matches correctly (the original escalation message may be
-    // scrolled past by now).
-    const booking = (await sbRequest('GET', `bookings?id=eq.${bookingId}&select=event_name`))[0];
-    const forwardText = `Following up on ${booking?.event_name || 'an inquiry'}: "${openRow.question_text}"\n\nClient just added: ${followUp.forward_note}\n\nReply directly to this message with the answer.`;
-    const msgId = await sendWhatsApp(pm.phone_number, forwardText);
-    if (msgId) await sbPatch(`pending_questions?id=eq.${openRow.id}`, { whatsapp_message_id: msgId });
-    await logConversation(bookingId, null, 'outbound', `[relayed to PM] ${followUp.forward_note}`, 'kb_additional_info_forwarded');
-  }
-
-  await sendWhatsApp(from_number, replyText);
-  await logConversation(bookingId, null, 'outbound', replyText, `kb_${followUpType}`);
-
-  // Tally row, resolved immediately -- not something the PM replies to, just
-  // keeps the wording-tier count moving for any future genuinely-new question.
-  await sbInsert('pending_questions', {
-    booking_id: bookingId,
-    field_name: 'kb_escalation',
-    question_text: text,
-    resolved_at: new Date().toISOString(),
-  });
-  return [{ json: { action: `kb_still_waiting_${followUpType}`, pending_question_id: openRow.id } }];
-}
-
-// PM habit: even when a booking is already unambiguously identified (as it
-// always is here -- resolve_escalation only ever targets the one pending
-// question it was called for), the PM sometimes still leads their answer
-// with the event name out of habit from the explicit "[event name] message"
-// addressing convention used elsewhere. That convention strips the prefix
-// before it reaches a client; this path didn't, and leaked it verbatim
-// (confirmed live 2026-07-30 via the equivalent bug in pm-toggle-code.js's
-// planning-relay paths). Strip it here too whenever it happens to lead the
-// text.
-function normalizeEventRef(s) {
-  return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-function stripLeadingEventName(text, eventName) {
-  const wanted = normalizeEventRef(eventName);
-  if (!wanted) return null;
-  let consumed = '';
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (/[a-z0-9]/i.test(ch)) {
-      consumed += ch.toLowerCase();
-      if (consumed === wanted) {
-        const next = text[i + 1];
-        if (next && /[a-z0-9]/i.test(next)) return null;
-        return text.slice(i + 1).replace(/^[\s:,.\-–—]+/, '');
-      }
-      if (consumed.length > wanted.length) return null;
-    }
-  }
-  return null;
-}
-function stripAccidentalEventPrefix(rawText, eventName) {
-  const stripped = stripLeadingEventName(rawText, eventName);
-  return stripped !== null ? stripped : rawText;
-}
-
-if (action === 'resolve_escalation') {
-  const { pending_question_id, answer_text } = input;
-  const pq = (await sbRequest('GET', `pending_questions?id=eq.${pending_question_id}&select=*`))[0];
-  const booking = (await sbRequest('GET', `bookings?id=eq.${pq.booking_id}&select=*`))[0];
-  const client = (await sbRequest('GET', `contacts?id=eq.${booking.client_contact_id}&select=*`))[0];
-  const relayText = stripAccidentalEventPrefix(answer_text, booking.event_name);
-
-  await sendWhatsApp(client.phone_number, relayText);
-  await logConversation(booking.id, null, 'outbound', relayText, 'kb_escalation_answer');
-
-  // Opt-in KB save (Section 8): only added if the PM says yes to this follow-up.
-  const pm = await findPm();
-  const savePayload = JSON.stringify({ question: pq.question_text, answer: relayText });
-  const savePending = (await sbInsert('pending_questions', {
-    booking_id: booking.id,
-    field_name: 'kb_save_confirm',
-    question_text: savePayload,
-  }))[0];
-  const confirmText = `Save that as a knowledge-base answer for future questions like "${pq.question_text}"? Reply yes or no.`;
-  const msgId = await sendWhatsApp(pm.phone_number, confirmText);
-  if (msgId) await sbPatch(`pending_questions?id=eq.${savePending.id}`, { whatsapp_message_id: msgId });
-
-  return [{ json: { action: 'escalation_resolved' } }];
-}
-
-if (action === 'resolve_kb_save_confirm') {
-  const { pending_question_id, answer_text } = input;
-  const pq = (await sbRequest('GET', `pending_questions?id=eq.${pending_question_id}&select=*`))[0];
-  const pm = await findPm();
-  const saysYes = /^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answer_text || '').trim());
-
-  if (saysYes) {
-    const { question, answer } = JSON.parse(pq.question_text);
-    await sbInsert('knowledge_base', { question, answer });
-    await sendWhatsApp(pm.phone_number, 'Saved!');
-  } else {
-    await sendWhatsApp(pm.phone_number, "Got it, not saved.");
-  }
-
-  return [{ json: { action: 'kb_save_confirm_resolved', saved: saysYes } }];
+  return [{ json: { action: 'kb_not_found_connected_and_relayed', booking_id: bookingId } }];
 }
 
 return [{ json: { action: 'unknown_action', received: action } }];

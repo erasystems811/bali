@@ -842,22 +842,6 @@ ${pmLed ? `Currently open with a client: ${pmLed.event_name}.` : 'Nothing curren
 }
 
 // Resolve the matched pending question.
-if (target.field_name === 'kb_escalation' || target.field_name === 'kb_save_confirm') {
-  // Delegate to the KB workflow, which handles relaying the answer to the client
-  // and the opt-in KB-save prompt (Section 8).
-  const action = target.field_name === 'kb_escalation' ? 'resolve_escalation' : 'resolve_kb_save_confirm';
-  await helpers.httpRequest({
-    method: 'POST',
-    url: `${env.N8N_BASE_URL}/webhook/kb-check`,
-    headers: { 'Content-Type': 'application/json' },
-    body: { action, pending_question_id: target.id, answer_text: answerText },
-    json: true,
-    timeout: 15000,
-  });
-  await sbPatch(`pending_questions?id=eq.${target.id}`, { resolved_at: new Date().toISOString() });
-  return [{ json: { action: `${target.field_name}_resolved`, pending_question_id: target.id } }];
-}
-
 const STAGE3_4_DELEGATED_FIELDS = {
   invoice_draft_confirm: 'resolve_invoice_draft_confirm',
   invoice_approval: 'resolve_invoice_approval',
