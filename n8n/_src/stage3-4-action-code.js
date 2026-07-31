@@ -529,6 +529,7 @@ async function resolveInvoiceDraftConfirm(pendingId, answerText) {
   const invoice = (await sbRequest('GET', `invoices?booking_id=eq.${pq.booking_id}&order=created_at.desc&limit=1&select=*`))[0];
 
   if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
+    await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
     await sendInvoiceForFinalApproval(invoice, booking);
     return { ok: true, action: 'invoice_draft_confirmed_pdf_sent' };
   }
@@ -537,8 +538,10 @@ async function resolveInvoiceDraftConfirm(pendingId, answerText) {
   // gets answered directly instead of being forced through the correction
   // extraction below, which has nothing to actually change and would just
   // silently resend the exact same draft with no acknowledgment of what was
-  // asked. Leaves the original pending_questions row untouched either way --
-  // it's still swipe-repliable for a real "yes" or correction afterward.
+  // asked. Deliberately does NOT resolve pendingId -- it's still
+  // swipe-repliable for a real "yes" or correction afterward. (Whoever calls
+  // this function must not resolve it either, or a plain-typed follow-up has
+  // nothing left to auto-match against -- confirmed live.)
   const questionCheck = await askOpenAIJson(
     `The PM is reviewing this draft invoice for "${booking.event_name}": ${JSON.stringify({ line_items: invoice.line_items, payment_terms: invoice.payment_terms, subtotal: invoice.subtotal, vat_amount: invoice.vat_amount, wht_amount: invoice.wht_amount, total_net_payable: invoice.total_net_payable })}. VAT is a fixed 7.5% and WHT is a fixed 2% deduction, always. He just replied: "${answerText}". Is this a genuine question about the invoice (asking what/why/how about something on it) rather than a "yes"/confirmation or a request to change an amount/item/term? If it's a question, answer it briefly and accurately using only the numbers/terms above and the fixed VAT/WHT rates -- never invent a reason or number not shown here. Reply ONLY with JSON: {"is_question": true/false, "answer": "..." or null}.`,
     answerText || ''
@@ -549,6 +552,7 @@ async function resolveInvoiceDraftConfirm(pendingId, answerText) {
     return { ok: true, action: 'invoice_question_answered' };
   }
 
+  await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
   return applyInvoiceCorrectionAndResend(booking, invoice, answerText);
 }
 
@@ -605,6 +609,10 @@ async function resolveInvoiceApproval(pendingId, answerText) {
   const pq = (await sbRequest('GET', `pending_questions?id=eq.${pendingId}&select=*`))[0];
   const booking = await getBooking(pq.booking_id);
   const invoice = (await sbRequest('GET', `invoices?booking_id=eq.${pq.booking_id}&order=created_at.desc&limit=1&select=*`))[0];
+  // Every path below is a real resolution (approve or correct) -- unlike
+  // resolveInvoiceDraftConfirm, this one has no "just answer a question,
+  // leave it open" branch, so it's safe to resolve up front.
+  await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
 
   if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
     await sbPatch(`invoices?id=eq.${invoice.id}`, { status: 'sent_to_client' });
@@ -643,6 +651,7 @@ async function resolvePaymentConfirmed(pendingId, answerText) {
   const pq = (await sbRequest('GET', `pending_questions?id=eq.${pendingId}&select=*`))[0];
   const booking = await getBooking(pq.booking_id);
   const invoice = (await sbRequest('GET', `invoices?booking_id=eq.${pq.booking_id}&order=created_at.desc&limit=1&select=*`))[0];
+  await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
 
   if (!/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
     const client = await getContact(booking.client_contact_id);
@@ -698,6 +707,7 @@ async function resolveContractApproval(pendingId, answerText) {
   const pq = (await sbRequest('GET', `pending_questions?id=eq.${pendingId}&select=*`))[0];
   const booking = await getBooking(pq.booking_id);
   const contract = (await sbRequest('GET', `contracts?booking_id=eq.${pq.booking_id}&order=created_at.desc&limit=1&select=*`))[0];
+  await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
 
   if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
     await sbPatch(`bookings?id=eq.${booking.id}`, { status: 'sent_to_client' });

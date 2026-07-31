@@ -732,7 +732,7 @@ if (!target) {
     ))[0];
     if (latestInvoice) {
       const invoiceIntent = await openaiExtract(
-        `The PM is chatting with Bali about their booking "${subjectBooking.event_name}", which has a draft invoice with these line items: ${JSON.stringify(latestInvoice.line_items)}. Decide if the PM's LATEST message is a direct request to change an amount, item, or payment term on that invoice (e.g. "make light 2.3m", "remove screen", "actually 60/40 split") -- NOT a question about it, not small talk, not something already handled above. Reply ONLY with JSON: {"is_correction": true/false}.\n\nRecent conversation:\n${recentTranscript || '(none yet)'}`,
+        `The PM is chatting with Bali about their booking "${subjectBooking.event_name}", which has a draft invoice with these line items: ${JSON.stringify(latestInvoice.line_items)}. Decide if the PM's LATEST message is a direct request to change a SPECIFIC amount, item, or payment term on that invoice (e.g. "make light 2.3m", "remove screen", "actually 60/40 split") -- it must name or clearly imply what to change. A bare approval/confirmation word alone ("yes", "approved", "ok", "confirmed", "sounds good") is NOT a correction even if an invoice exists -- that's an approval with nothing left open to approve here, not a change request; is_correction must be false for those. Also false for a question, small talk, or anything already handled above. Reply ONLY with JSON: {"is_correction": true/false}.\n\nRecent conversation:\n${recentTranscript || '(none yet)'}`,
         text || ''
       );
       if (invoiceIntent?.is_correction) {
@@ -792,6 +792,16 @@ const STAGE3_4_DELEGATED_FIELDS = {
   payment_confirmed: 'resolve_payment_confirmed',
 };
 if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
+  // Fire-and-forget: the stage3-4 webhook responds immediately on receipt
+  // (responseMode "onReceived"), before its actual handler even runs, so
+  // there's no way to learn synchronously what it decided to do. Whether
+  // this pending question is actually resolved is therefore the delegated
+  // handler's own call, not made here -- e.g. resolveInvoiceDraftConfirm
+  // deliberately leaves it open when the PM only asked a question, so the
+  // same message is still swipe-repliable afterward. Marking it resolved
+  // here unconditionally (the old behavior) silently closed it out even for
+  // a mere question, breaking every plain-typed follow-up after -- confirmed
+  // live.
   await helpers.httpRequest({
     method: 'POST',
     url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
@@ -800,8 +810,7 @@ if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
     json: true,
     timeout: 15000,
   });
-  await sbPatch(`pending_questions?id=eq.${target.id}`, { resolved_at: new Date().toISOString() });
-  return [{ json: { action: `${target.field_name}_resolved`, pending_question_id: target.id } }];
+  return [{ json: { action: `${target.field_name}_delegated`, pending_question_id: target.id } }];
 }
 
 if (target.field_name === 'contract_confirmed') {
