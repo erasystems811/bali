@@ -186,25 +186,7 @@ if (action === 'check') {
     return [{ json: { action: 'kb_answered' } }];
   }
 
-  // Not found. Before treating this as an unanswerable question -- which
-  // would either page the PM with a useless "reply directly to this
-  // message" escalation, or fall back to a generic "I'll get back to you"
-  // that ignores what the client is actually trying to do -- check whether
-  // they're just signaling intent to add/change something without having
-  // said what yet ("I want to add something", "can I give you an update?").
-  // If so, just ask what, instead of stalling or escalating nothing.
-  const intentCheck = await askOpenAI(
-    `A client just said: "${text}". Are they signaling they want to add, change, or share some detail about their booking or event WITHOUT having actually stated what it is yet -- e.g. "I want to add something", "can I give you more details?", "I have an update for you", "one more thing"? Reply ONLY with JSON: {"wants_to_add_without_content": true/false}.`,
-    text || ''
-  );
-  if (intentCheck?.wants_to_add_without_content) {
-    const askText = "Sure, what would you like to add?";
-    await sendWhatsApp(from_number, askText);
-    if (bookingId) await logConversation(bookingId, contact_id, 'outbound', askText, 'kb_ask_for_details');
-    return [{ json: { action: 'kb_ask_for_details' } }];
-  }
-
-  // If this is the first time this has come up, stall with a warm line and
+  // Not found -- if this is the first time this has come up, stall with a warm line and
   // actually escalate to the PM.
   const priorRows = bookingId
     ? await sbRequest('GET', `pending_questions?booking_id=eq.${bookingId}&field_name=eq.kb_escalation&select=id,question_text,resolved_at&order=asked_at.asc`)
