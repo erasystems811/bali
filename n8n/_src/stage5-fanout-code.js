@@ -5,6 +5,7 @@ const env = {
   OPENAI_KEY: $env.OPENAI_API_KEY,
   META_TOKEN: $env.META_ACCESS_TOKEN,
   META_PHONE_ID: $env.META_PHONE_NUMBER_ID,
+  N8N_BASE_URL: $env.N8N_BASE_URL,
 };
 
 const sbHeaders = {
@@ -175,11 +176,21 @@ async function fanOutBooking(booking) {
     await sendWhatsApp(c.phone_number, `New event onboarded: ${booking.event_name} on ${dateStr}. Stock requirements pending (inventory system not live yet).`);
   }
 
-  // Accounts: revenue/contract split only, from the signed contract. Contract data
-  // extraction is stubbed pending real contract samples (see 99-stage3-4).
+  // Accounts: the finalized invoice itself, not a placeholder -- it was
+  // already generated back in Stage 3, re-rendered and sent fresh from the
+  // same stored data the client's copy came from (stage3-4-action-code.js's
+  // sendInvoiceToAccounts, same cross-workflow call pattern stage1-code.js
+  // already uses for send_to_lawyer).
   const accounts = await contactsByRole('accounts');
-  for (const c of accounts) {
-    await sendWhatsApp(c.phone_number, `New event onboarded: ${booking.event_name} on ${dateStr}. Revenue/split details pending (contract extraction not built yet).`);
+  if (accounts.length > 0) {
+    await helpers.httpRequest({
+      method: 'POST',
+      url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+      headers: { 'Content-Type': 'application/json' },
+      body: { action: 'send_invoice_to_accounts', booking_id: booking.id },
+      json: true,
+      timeout: 15000,
+    });
   }
 
   // Event Assistant: general brief from the negotiation conversation, no revenue/payment info.

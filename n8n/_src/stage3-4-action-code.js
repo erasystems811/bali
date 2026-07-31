@@ -344,6 +344,22 @@ async function sendInvoicePdf(toNumber, invoice, booking, caption) {
   return sendWhatsAppDocument(toNumber, mediaId, `${invoice.invoice_number}.pdf`, caption);
 }
 
+// Called from stage5-fanout-code.js once a booking is onboarded -- accounts
+// needs the actual finalized invoice, not a placeholder saying the real
+// data isn't wired up yet. Re-renders from the same stored invoice data the
+// client's copy came from (nothing new to build, this is the exact same
+// sendInvoicePdf pipeline, just a different recipient and caption).
+async function sendInvoiceToAccounts(bookingId) {
+  const booking = await getBooking(bookingId);
+  const invoice = (await sbRequest('GET', `invoices?booking_id=eq.${bookingId}&order=created_at.desc&limit=1&select=*`))[0];
+  if (!invoice) return { ok: false, reason: 'no_invoice' };
+  const accounts = await sbRequest('GET', 'contacts?role=eq.accounts&select=*');
+  for (const c of accounts) {
+    await sendInvoicePdf(c.phone_number, invoice, booking, `Finalized invoice for ${booking.event_name}, for your records.`);
+  }
+  return { ok: true, action: 'invoice_sent_to_accounts', recipients: accounts.length };
+}
+
 async function nextInvoiceNumber() {
   const year = new Date().getFullYear();
   const existing = await sbRequest('GET', `invoices?invoice_number=like.BALI-${year}-*&select=invoice_number`);
@@ -880,6 +896,7 @@ else if (action === 'resolve_payment_terms_confirm') result = await resolvePayme
 else if (action === 'resolve_invoice_approval') result = await resolveInvoiceApproval(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_payment_confirmed') result = await resolvePaymentConfirmed(input.pending_question_id, input.answer_text);
 else if (action === 'send_to_lawyer') result = await sendToLawyer(input.booking_id);
+else if (action === 'send_invoice_to_accounts') result = await sendInvoiceToAccounts(input.booking_id);
 else if (action === 'resolve_contract_approval') result = await resolveContractApproval(input.pending_question_id, input.answer_text);
 else result = await handleLawyerInbound(input);
 

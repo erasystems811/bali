@@ -558,7 +558,13 @@ if (!booking) {
       field_name: 'contract_confirmed',
       question_text: questionText,
     }, { Prefer: 'return=representation' });
-    await sendWhatsAppMedia(pm.phone_number, 'document', input.media_id, `${booking.event_name}, signed contract`);
+    // Track the PDF's own message id (not just the confirm question below) as
+    // a swipe-reply target for relaying straight back to the client -- swipe
+    // to reply on the client's own message should always go to that person,
+    // never get reinterpreted by the bot. See findPlanningBookingByForwardedMessageId
+    // in pm-toggle-code.js.
+    const docMsgId = await sendWhatsAppMedia(pm.phone_number, 'document', input.media_id, `${booking.event_name}, signed contract`);
+    await sbRequest('POST', 'conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: '[relayed signed PDF to PM]', stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null }]);
     const msgId = await sendWhatsApp(pm.phone_number, questionText);
     if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
   }
@@ -572,7 +578,11 @@ if (!booking) {
   const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
   const pm = pmRows[0];
   if (pm) {
-    await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}, proof of payment`);
+    // Same swipe-reply-goes-to-that-person tracking as the signed-contract
+    // branch above: the receipt's own message id, not just the confirm
+    // question, needs to be swipeable straight back to the client.
+    const docMsgId = await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}, proof of payment`);
+    await sbRequest('POST', 'conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: '[relayed proof of payment to PM]', stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null }]);
     const questionText = `${booking.event_name}: client sent proof of payment (above). Confirm receipt? Reply yes or no.`;
     const pendingRows = await sbRequest('POST', 'pending_questions', {
       booking_id: booking.id,
@@ -699,10 +709,13 @@ if (!booking) {
         field_name: 'contract_confirmed',
         question_text: questionText,
       }, { Prefer: 'return=representation' });
-      await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}, signed contract`);
+      // The forwarded document itself (not the confirm question) is what the
+      // client actually sent -- swipe-reply to IT must relay straight back to
+      // them, never get treated as an answer to the bot's own question.
+      const docMsgId = await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}, signed contract`);
+      logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed ${input.media_type} to PM]`, stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null });
       const msgId = await sendWhatsApp(pm.phone_number, questionText);
       if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
-      logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed ${input.media_type} to PM, asked to confirm]`, stage: 'connected_relay_to_pm', whatsapp_message_id: msgId || null });
     } else if (pm) {
       const forwardText = `${booking.event_name}: ${effectiveText}`;
       const msgId = await sendWhatsApp(pm.phone_number, forwardText);
