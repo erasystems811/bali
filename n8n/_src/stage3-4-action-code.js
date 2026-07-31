@@ -477,6 +477,18 @@ Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}
     return { ok: false, reason: 'extraction_failed' };
   }
 
+  if (!extraction.payment_terms) {
+    // Don't send an invoice with payment terms missing -- ask the PM
+    // directly instead. His answer gets appended to the transcript and this
+    // whole function re-runs (see resolvePaymentTermsConfirm below), so
+    // however he describes it -- a percentage split, amount parts, "full
+    // payment", whatever phrasing -- goes through the exact same flexible
+    // extraction above that already handles items and prices, not a
+    // separate rigid parser bolted on just for this.
+    await askPmDirectly(bookingId, 'payment_terms_confirm', `For "${booking.event_name}", is payment full or in parts? If in parts, let me know the split.`);
+    return { ok: true, action: 'awaiting_payment_terms' };
+  }
+
   const { subtotal, vat, wht, total } = recomputeInvoiceTotals(extraction.line_items);
   const invoiceNumber = await nextInvoiceNumber();
 
@@ -515,7 +527,7 @@ Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}
   await sbPatch(`bookings?id=eq.${bookingId}`, { status: 'invoiced', connected_to_pm_at: booking.connected_to_pm_at || new Date().toISOString() });
 
   if (booking.staffing_type === null || booking.staffing_type === undefined) {
-    await askPmDirectly(bookingId, 'staffing_type', `For "${booking.event_name}" -- full-time or part-time staff needed?`);
+    await askPmDirectly(bookingId, 'staffing_type', `For "${booking.event_name}", full-time or part-time staff needed?`);
   }
 
   return { ok: true, invoice_id: invoice.id };
@@ -589,6 +601,18 @@ async function applyInvoiceCorrectionAndResend(booking, invoice, answerText) {
     if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
   }
   return { ok: true, action: 'invoice_draft_corrected' };
+}
+
+// Resolves the "is payment full or in parts?" question draftInvoice asks
+// when the negotiation transcript never settled it. The PM's answer is
+// simply appended to the transcript and the whole extraction re-runs --
+// same reasoning as pmDetails above -- so a percentage split, amount parts,
+// or "full payment" all get understood the same flexible way, and the
+// invoice actually gets drafted this time instead of asking again.
+async function resolvePaymentTermsConfirm(pendingId, answerText) {
+  const pq = (await sbRequest('GET', `pending_questions?id=eq.${pendingId}&select=*`))[0];
+  await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
+  return draftInvoice(pq.booking_id, answerText);
 }
 
 // Entry point for the PM fallback chat (pm-toggle-code.js) when a plain-typed
@@ -734,6 +758,7 @@ let result;
 if (action === 'draft_invoice') result = await draftInvoice(input.booking_id, input.pm_details);
 else if (action === 'resolve_invoice_draft_confirm') result = await resolveInvoiceDraftConfirm(input.pending_question_id, input.answer_text);
 else if (action === 'correct_invoice_from_fallback') result = await correctInvoiceFromFallbackChat(input.booking_id, input.answer_text);
+else if (action === 'resolve_payment_terms_confirm') result = await resolvePaymentTermsConfirm(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_invoice_approval') result = await resolveInvoiceApproval(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_payment_confirmed') result = await resolvePaymentConfirmed(input.pending_question_id, input.answer_text);
 else if (action === 'send_to_lawyer') result = await sendToLawyer(input.booking_id);
