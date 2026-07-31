@@ -196,12 +196,12 @@ async function openBookingForPm(booking, fromNumber, { auto } = {}) {
   const history = await sbRequest('GET', `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text`);
   if (history.length > 0) {
     const transcript = history.map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`).join('\n');
-    await sendWhatsApp(fromNumber, `Conversation so far for "${booking.event_name}":\n${transcript}`);
+    await sendWhatsApp(fromNumber, `Conversation so far for ${booking.event_name}:\n${transcript}`);
   }
 
   const openedLine = auto
-    ? `Next up: "${booking.event_name}".`
-    : `Opened "${booking.event_name}".`;
+    ? `Next up: ${booking.event_name}.`
+    : `Opened ${booking.event_name}.`;
   const tipLines = [
     'Note:',
     `- Swipe-reply to their message to answer them directly -- no need to type the event name. Only start with "${booking.event_name}: " if you're messaging them first (nothing to swipe-reply to); otherwise it stays between just us and will NOT reach them.`,
@@ -258,6 +258,22 @@ async function findPlanningBookingByForwardedMessageId(messageId) {
   return booking[0] || null;
 }
 
+// Same pattern as findPlanningBookingByForwardedMessageId, for a lawyer
+// question forwarded to the PM (see handleLawyerInbound in
+// stage3-4-action-code.js) -- matched against conversations, not
+// pending_questions, specifically so swipe-replying to that SAME forwarded
+// message works every time, not just the first -- confirmed live, a
+// one-shot pending_questions row meant the second reply fell through to the
+// generic fallback chat instead of ever reaching the lawyer.
+async function findLawyerRelayBookingIdByForwardedMessageId(messageId) {
+  if (!messageId) return null;
+  const rows = await sbRequest(
+    'GET',
+    `conversations?whatsapp_message_id=eq.${encodeURIComponent(messageId)}&stage=eq.lawyer_question_relay&select=booking_id&limit=1`
+  );
+  return rows[0]?.booking_id || null;
+}
+
 const input = $input.first().json.body;
 const { from_number, text, reply_to_message_id, contact_id } = input;
 const trimmed = (text || '').trim();
@@ -301,12 +317,12 @@ if (openMatch) {
   const eventName = openMatch[1].trim();
   const alreadyOpen = await findPmLedBooking();
   if (alreadyOpen) {
-    await sendWhatsApp(from_number, `You've still got "${alreadyOpen.event_name}" open. Type "close" first before opening another one.`);
+    await sendWhatsApp(from_number, `You've still got ${alreadyOpen.event_name} open. Type close first before opening another one.`);
     return [{ json: { action: 'open_blocked', open_booking: alreadyOpen.id } }];
   }
   const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(eventName)}*&status=neq.cancelled&select=*`);
   if (matches.length === 0) {
-    await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}". Check the spelling?`);
+    await sendWhatsApp(from_number, `Couldn't find a booking called ${eventName}. Check the spelling?`);
     return [{ json: { action: 'open_not_found', query: eventName } }];
   }
   const booking = matches[0];
@@ -362,7 +378,7 @@ if (trimmed.toLowerCase() === 'close') {
     return [{ json: { action: 'close_noop' } }];
   }
   await sbPatch(`bookings?id=eq.${open.id}`, { mode: 'bot-led' });
-  await sendWhatsApp(from_number, `Closed "${open.event_name}". Back to automated.`);
+  await sendWhatsApp(from_number, `Closed ${open.event_name}. Back to automated.`);
 
   // Closing a still-negotiating booking is taken as "price agreed" -- kicks off Stage 3.
   // If that's wrong (PM just stepping away mid-negotiation), re-open with "open [event name]"
@@ -440,6 +456,16 @@ if (reply_to_message_id) {
     }
     await logConversation(planningTarget.id, contact_id, 'inbound', answerText, 'pm_message');
     return [{ json: { action: 'planning_relayed_to_client', booking_id: planningTarget.id } }];
+  }
+  if (!target) {
+    const lawyerRelayBookingId = await findLawyerRelayBookingIdByForwardedMessageId(reply_to_message_id);
+    if (lawyerRelayBookingId) {
+      const lawyer = (await sbRequest('GET', 'contacts?role=eq.lawyer&select=*&limit=1'))[0];
+      if (lawyer) await sendWhatsApp(lawyer.phone_number, answerText);
+      await logConversation(lawyerRelayBookingId, null, 'outbound', answerText, 'lawyer_question_relay', undefined);
+      await logConversation(lawyerRelayBookingId, contact_id, 'inbound', answerText, 'pm_message');
+      return [{ json: { action: 'lawyer_question_relayed', booking_id: lawyerRelayBookingId } }];
+    }
   }
   // target set (a pending question) falls through -- resolved by the generic
   // field-answer logic further down, same as any other match.
@@ -527,16 +553,16 @@ if (leadingMatch) {
   // booking by name, regardless of its status or the negotiation lock.
   if (suffix === 'close') {
     if (!booking.connected_to_pm_at) {
-      await sendWhatsApp(from_number, `"${booking.event_name}" isn't connected right now.`);
+      await sendWhatsApp(from_number, `${booking.event_name} isn't connected right now.`);
     } else {
       await sbPatch(`bookings?id=eq.${booking.id}`, { connected_to_pm_at: null });
-      await sendWhatsApp(from_number, `Closed "${booking.event_name}". Back to automated.`);
+      await sendWhatsApp(from_number, `Closed ${booking.event_name}. Back to automated.`);
     }
     return [{ json: { action: 'connected_closed', booking_id: booking.id } }];
   }
   if (suffix === 'open') {
     await sbPatch(`bookings?id=eq.${booking.id}`, { connected_to_pm_at: new Date().toISOString() });
-    await sendWhatsApp(from_number, `Reopened "${booking.event_name}". I'll relay everything straight through until you say "${booking.event_name}: close".`);
+    await sendWhatsApp(from_number, `Reopened ${booking.event_name}. I'll relay everything straight through until you say "${booking.event_name}: close".`);
     return [{ json: { action: 'connected_reopened', booking_id: booking.id } }];
   }
 
@@ -549,7 +575,7 @@ if (leadingMatch) {
     // way, and tell him it's back open, same as the explicit "open" command.
     if (!booking.connected_to_pm_at || isPastConnectionCutoff(booking)) {
       await sbPatch(`bookings?id=eq.${booking.id}`, { connected_to_pm_at: new Date().toISOString() });
-      await sendWhatsApp(from_number, `Opened "${booking.event_name}". I'll relay everything straight through until you say "${booking.event_name}: close".`);
+      await sendWhatsApp(from_number, `Opened ${booking.event_name}. I'll relay everything straight through until you say "${booking.event_name}: close".`);
     }
 
     const client = (await sbRequest('GET', `contacts?id=eq.${booking.client_contact_id}&select=*`))[0];
@@ -593,7 +619,13 @@ if (leadingMatch) {
 // declared above -- reply_to_message_id, if present, was already fully
 // resolved there, so this only runs for plain-typed messages with nothing to
 // swipe-reply to.) Treat both pools as one so a lone open item of either
-// kind auto-matches, and only a genuine mix asks which one. -----------------
+// kind auto-matches, a numbered reply ("2: ...") picks a specific one out of
+// several. Owner's call: multiple pending items with no swipe-reply/number
+// used to force the PM to pick one before anything else could happen -- that
+// got in the way of just answering him. Now it falls through to the normal
+// fallback chat below instead, which tries to actually act on whatever he
+// said (and can list what's pending if he genuinely asks, see its prompt) --
+// bot serves the PM, not the other way around. --------------------------
 if (!reply_to_message_id) {
   const totalCandidates = pending.length + planningCandidates.length;
   if (totalCandidates === 1) {
@@ -609,19 +641,8 @@ if (!reply_to_message_id) {
       planningTarget = planningCandidates[idx - pending.length];
       answerText = numberedMatch[2];
     }
-
-    if (!target && !planningTarget) {
-      const items = [
-        ...pending.map((p) => `"${p.bookings?.event_name || 'unknown event'}": ${p.question_text}`),
-        ...planningCandidates.map((b) => `"${b.event_name}", ongoing conversation, awaiting your reply`),
-      ];
-      const list = items.map((line, i) => `${i + 1}. ${line}`).join('\n');
-      await sendWhatsApp(
-        from_number,
-        `I've got a few things pending:\n${list}\n\nReply directly to the specific message (swipe to reply), start with the event name (e.g. "${planningCandidates[0]?.event_name || items[0] || 'Event'}: ..."), or just give me the number.`
-      );
-      return [{ json: { action: 'disambiguation_needed', pending_count: pending.length, planning_count: planningCandidates.length } }];
-    }
+    // No swipe-reply and no number given -- don't force a choice, fall
+    // through to the fallback chat and let it actually address what he said.
   }
 }
 
@@ -703,14 +724,14 @@ if (!target) {
       let confirmMsg;
       if (actionIntent.action === 'close') {
         confirmMsg = subjectBooking.connected_to_pm_at
-          ? `Closed "${subjectBooking.event_name}". Back to automated.`
-          : `"${subjectBooking.event_name}" isn't connected right now.`;
+          ? `Closed ${subjectBooking.event_name}. Back to automated.`
+          : `${subjectBooking.event_name} isn't connected right now.`;
         if (subjectBooking.connected_to_pm_at) {
           await sbPatch(`bookings?id=eq.${subjectBooking.id}`, { connected_to_pm_at: null });
         }
       } else {
         await sbPatch(`bookings?id=eq.${subjectBooking.id}`, { connected_to_pm_at: new Date().toISOString() });
-        confirmMsg = `Reopened "${subjectBooking.event_name}". I'll relay everything straight through until you say "${subjectBooking.event_name}: close".`;
+        confirmMsg = `Reopened ${subjectBooking.event_name}. I'll relay everything straight through until you say "${subjectBooking.event_name}: close".`;
       }
       await sendWhatsApp(from_number, confirmMsg);
       await logConversation(subjectBooking.id, contact_id, 'inbound', text || '', 'pm_fallback_chat');
@@ -750,16 +771,23 @@ if (!target) {
     }
   }
 
+  const pendingSummary = [
+    ...pending.map((p) => `${p.bookings?.event_name || 'an event'}: ${p.question_text}`),
+    ...planningCandidates.map((b) => `${b.event_name}: ongoing conversation awaiting your reply`),
+  ].join('\n');
+
   const reply = await askOpenAIText(
-    `You are Bali, an event venue's own WhatsApp operational assistant. You're talking directly with venue staff (the PM) here -- no client is on this thread, and nothing you say here is ever sent to a client. Answer their question or help with what they're asking, using anything below that's relevant. If the recent back-and-forth below shows you just asked the PM something, treat their new message as answering THAT, not as a brand-new unrelated request.
+    `You are Bali, an event venue's own WhatsApp operational assistant. You're talking directly with venue staff (the PM) here, no client is on this thread, and nothing you say here is ever sent to a client. Your job is to actually get things done for him, run errands, take action, and answer questions, effectively, not make him work to get a straight answer. Answer his question or act on what he's asking using anything below that's relevant. If the recent back-and-forth below shows you just asked him something, treat his new message as answering that, not as a brand-new unrelated request.
 
-What you can actually do today: manage one client negotiation at a time ("open [event name]" / "close"), generate invoices ("generate invoice for [event name]"), correct a draft invoice's amounts/items/terms even without swipe-replying to it, rename an event ("change the name to X", "rename X to Y"), and relay a message to a specific client only when a message starts with "[event name]: ". Reaching a client always requires that exact prefix -- if the PM seems to want something sent to a client, say so and tell them to prefix it with the event name.
+What you can actually do today: manage one client negotiation at a time (open an event name, or close), generate invoices, correct a draft invoice's amounts, items, or terms even without swiping to reply to it, rename an event, and relay a message to a specific client only when a message starts with the event name followed by a colon. Reaching a client always requires that exact prefix, if he seems to want something sent to a client, say so and tell him to prefix it with the event name.
 
-For anything else -- messaging other staff, pulling reports, other operational tasks -- you don't have that built yet. If asked for something like that, say plainly that you can't do it yet rather than pretending to. Keep your reply short, natural, and professional -- no filler, no fake enthusiasm.
+For anything else, messaging other staff, pulling reports, other operational tasks, you don't have that built yet. If asked for something like that, say plainly that you can't do it yet rather than pretending to. Keep your reply short, natural, and professional, no filler, no fake enthusiasm.
 
-${pmLed ? `Currently open with a client: "${pmLed.event_name}".` : 'Nothing currently open with a client.'}${recentTranscript ? `\n\nYour recent back-and-forth with the PM about this:\n${recentTranscript}` : ''}`,
+Pending items waiting on him right now (only mention or list these if he explicitly asks what's pending, what's outstanding, or similar, never bring them up on your own, and never let them stop you from just handling whatever he actually said this message): ${pendingSummary || 'none'}
+
+${pmLed ? `Currently open with a client: ${pmLed.event_name}.` : 'Nothing currently open with a client.'}${recentTranscript ? `\n\nYour recent back-and-forth with the PM about this:\n${recentTranscript}` : ''}`,
     text || ''
-  ) || "Sorry, I couldn't process that -- try rephrasing?";
+  ) || "Sorry, I couldn't process that, try rephrasing?";
   await sendWhatsApp(from_number, reply);
   if (subjectBooking) {
     await logConversation(subjectBooking.id, contact_id, 'inbound', text || '', 'pm_fallback_chat');
@@ -791,7 +819,6 @@ const STAGE3_4_DELEGATED_FIELDS = {
   contract_approval: 'resolve_contract_approval',
   payment_confirmed: 'resolve_payment_confirmed',
   payment_terms_confirm: 'resolve_payment_terms_confirm',
-  lawyer_question_relay: 'resolve_lawyer_question_relay',
 };
 if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
   // Fire-and-forget: the stage3-4 webhook responds immediately on receipt

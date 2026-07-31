@@ -234,7 +234,7 @@ if (action === 'check') {
       question_text: text,
     }))[0];
 
-    const escalationText = `New question on "${booking?.event_name || 'an inquiry'}": "${text}"\nReply directly to this message with the answer.`;
+    const escalationText = `New question on ${booking?.event_name || 'an inquiry'}: "${text}"\nReply directly to this message with the answer.`;
     const msgId = await sendWhatsApp(pm.phone_number, escalationText);
     if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
 
@@ -271,7 +271,7 @@ if (action === 'check') {
     // to it still matches correctly (the original escalation message may be
     // scrolled past by now).
     const booking = (await sbRequest('GET', `bookings?id=eq.${bookingId}&select=event_name`))[0];
-    const forwardText = `Following up on "${booking?.event_name || 'an inquiry'}": "${openRow.question_text}"\n\nClient just added: ${followUp.forward_note}\n\nReply directly to this message with the answer.`;
+    const forwardText = `Following up on ${booking?.event_name || 'an inquiry'}: "${openRow.question_text}"\n\nClient just added: ${followUp.forward_note}\n\nReply directly to this message with the answer.`;
     const msgId = await sendWhatsApp(pm.phone_number, forwardText);
     if (msgId) await sbPatch(`pending_questions?id=eq.${openRow.id}`, { whatsapp_message_id: msgId });
     await logConversation(bookingId, null, 'outbound', `[relayed to PM] ${followUp.forward_note}`, 'kb_additional_info_forwarded');

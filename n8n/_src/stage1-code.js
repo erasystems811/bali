@@ -256,21 +256,23 @@ async function notifyPmOfCompletedIntake(booking) {
   if (booking.is_existing_client) {
     const past = await getPastBookings(booking.client_contact_id, booking.id);
     if (past.length > 0) {
-      historyLine = `Past bookings: ${past.map((b) => `"${b.event_name}" (${b.event_date || 'date unknown'})`).join(', ')}`;
+      historyLine = `Past bookings: ${past.map((b) => `${b.event_name} (${b.event_date || 'date unknown'})`).join(', ')}`;
     }
   }
 
   // Bulleted and addressed by name so it's scannable at a glance, not a
-  // paragraph the PM has to read through -- owner's call.
+  // paragraph the PM has to read through -- owner's call. Kept deliberately
+  // light on punctuation within each line (no quotes around the event name
+  // repeated everywhere, no dashes) -- owner's ask, it read as overwhelming.
   const pmFirstName = pm.name ? pm.name.split(' ')[0] : null;
   const summaryLines = [
-    pmFirstName ? `Hey ${pmFirstName}, you have a booking from "${booking.event_name}":` : `You have a booking from "${booking.event_name}":`,
-    `- Date: ${booking.event_date}`,
-    `- Type: ${booking.event_type}`,
+    pmFirstName ? `Hey ${pmFirstName}, you have a booking from ${booking.event_name}` : `You have a booking from ${booking.event_name}`,
+    `- Date ${booking.event_date}`,
+    `- Type ${booking.event_type}`,
     // "Experienced"/"First-time" describes general event-hosting experience
     // (anywhere, not specifically with us) -- the separate "Past bookings"
     // line below is what actually signals a real Bali repeat customer.
-    `- ${booking.is_existing_client ? 'Experienced' : 'First-time'} client${booking.client_reference ? ` -- ${booking.client_reference}` : ''}`,
+    `- ${booking.is_existing_client ? 'Experienced' : 'First-time'} client${booking.client_reference ? `, ${booking.client_reference}` : ''}`,
     ...(historyLine ? [`- ${historyLine}`] : []),
   ];
 
@@ -285,20 +287,20 @@ async function notifyPmOfCompletedIntake(booking) {
       `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text`
     );
     const transcriptLines = history.length > 0
-      ? [`Conversation so far for "${booking.event_name}":`, ...history.map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`)]
+      ? [`Conversation so far for ${booking.event_name}`, ...history.map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`)]
       : [];
     await sendWhatsApp(pm.phone_number, [
       ...summaryLines,
       '',
       ...transcriptLines,
       ...(transcriptLines.length > 0 ? [''] : []),
-      `Opened "${booking.event_name}".`,
+      `Opened ${booking.event_name}.`,
       '',
       'Note:',
-      `- Swipe-reply to their message to answer them directly -- no need to type the event name. Only start with "${booking.event_name}: " if you're messaging them first (nothing to swipe-reply to); otherwise it stays between just us and will NOT reach them.`,
-      `- Once you've agreed a price, say something like "generate invoice for ${booking.event_name}" and I'll send it out.`,
-      `- "${booking.event_name}: close" ends that conversation and hands the customer back to me.`,
-      `- "${booking.event_name}: open" reconnects it.`,
+      `- Swipe-reply to their message to answer them directly, no need to type the event name. Only start with "${booking.event_name}: " if you're messaging them first since there's nothing to swipe-reply to, otherwise it stays between just us and won't reach them.`,
+      `- Once you've agreed a price, say something like generate invoice for ${booking.event_name} and I'll send it out.`,
+      `- ${booking.event_name}: close ends that conversation and hands the customer back to me.`,
+      `- ${booking.event_name}: open reconnects it.`,
     ].join('\n'));
     return;
   }
@@ -311,8 +313,8 @@ async function notifyPmOfCompletedIntake(booking) {
     ...summaryLines,
     '',
     aheadCount === 0
-      ? "You're still with another client -- I'll bring this one up automatically as soon as you type \"close\"."
-      : `Queued behind ${aheadCount} other${aheadCount === 1 ? '' : 's'} -- I'll bring it up automatically once it's next.`,
+      ? "You're still with another client. I'll bring this one up automatically as soon as you type close."
+      : `Queued behind ${aheadCount} other${aheadCount === 1 ? '' : 's'}. I'll bring it up automatically once it's next.`,
   ].join('\n'));
 }
 
@@ -547,7 +549,7 @@ if (!booking) {
   const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
   const pm = pmRows[0];
   if (pm) {
-    const questionText = `"${booking.event_name}": client sent back a signed PDF. Confirm it's valid? Reply yes or no.`;
+    const questionText = `${booking.event_name}: client sent back a signed PDF. Confirm it's valid? Reply yes or no.`;
     const pendingRows = await sbRequest('POST', 'pending_questions', {
       booking_id: booking.id,
       field_name: 'contract_confirmed',
@@ -566,8 +568,8 @@ if (!booking) {
   const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
   const pm = pmRows[0];
   if (pm) {
-    await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `"${booking.event_name}", proof of payment`);
-    const questionText = `"${booking.event_name}": client sent proof of payment (above). Confirm receipt? Reply yes or no.`;
+    await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}, proof of payment`);
+    const questionText = `${booking.event_name}: client sent proof of payment (above). Confirm receipt? Reply yes or no.`;
     const pendingRows = await sbRequest('POST', 'pending_questions', {
       booking_id: booking.id,
       field_name: 'payment_confirmed',

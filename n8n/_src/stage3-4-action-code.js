@@ -356,12 +356,12 @@ async function nextInvoiceNumber() {
 // numbers are right first, don't waste a PDF render on a misread.
 function formatInvoiceDraftText(invoice, booking) {
   const lines = [
-    `Draft invoice details for "${booking.event_name}" -- please confirm this is accurate before I generate the PDF:`,
+    `Draft invoice details for ${booking.event_name}, please confirm this is accurate before I generate the PDF`,
     ...invoice.line_items.map((li) => `- ${li.description}: ${formatMoney(li.amount)}`),
-    `- Payment terms: ${invoice.payment_terms || '(not specified)'}`,
-    `- Bill to: ${invoice.bill_to_name ? invoice.bill_to_name + (invoice.bill_to_location ? `, ${invoice.bill_to_location}` : '') : '(not specified)'}`,
+    `- Payment terms: ${invoice.payment_terms || 'not specified'}`,
+    `- Bill to: ${invoice.bill_to_name ? invoice.bill_to_name + (invoice.bill_to_location ? `, ${invoice.bill_to_location}` : '') : 'not specified'}`,
     '',
-    'Reply "yes" if this is accurate, or tell me what to add or change.',
+    'Reply yes if this is accurate, or tell me what to add or change.',
   ];
   return lines.join('\n');
 }
@@ -390,7 +390,7 @@ function recomputeInvoiceTotals(lineItems) {
 // sends it to the PM for final visual approval before it goes to the client.
 async function sendInvoiceForFinalApproval(invoice, booking) {
   const pm = await findPm();
-  const caption = `Invoice ${invoice.invoice_number} for "${booking.event_name}", reply to THIS message with any corrections, or reply "yes" to approve and send to the client.`;
+  const caption = `Invoice ${invoice.invoice_number} for ${booking.event_name}, reply to THIS message with any corrections, or reply yes to approve and send to the client.`;
   const pending = (await sbInsert('pending_questions', { booking_id: booking.id, field_name: 'invoice_approval', question_text: caption }))[0];
   if (pm) {
     const msgId = await sendInvoicePdf(pm.phone_number, invoice, booking, caption);
@@ -473,7 +473,7 @@ Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}
   );
   if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
     const pm = await findPm();
-    if (pm) await sendWhatsApp(pm.phone_number, `Couldn't figure out the invoice line items for "${booking.event_name}" from the conversation, can you send me the agreed items and amounts directly?`);
+    if (pm) await sendWhatsApp(pm.phone_number, `Couldn't figure out the invoice line items for ${booking.event_name} from the conversation, can you send me the agreed items and amounts directly?`);
     return { ok: false, reason: 'extraction_failed' };
   }
 
@@ -485,7 +485,7 @@ Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}
     // payment", whatever phrasing -- goes through the exact same flexible
     // extraction above that already handles items and prices, not a
     // separate rigid parser bolted on just for this.
-    await askPmDirectly(bookingId, 'payment_terms_confirm', `For "${booking.event_name}", is payment full or in parts? If in parts, let me know the split.`);
+    await askPmDirectly(bookingId, 'payment_terms_confirm', `For ${booking.event_name}, is payment full or in parts? If in parts, let me know the split.`);
     return { ok: true, action: 'awaiting_payment_terms' };
   }
 
@@ -527,7 +527,7 @@ Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}
   await sbPatch(`bookings?id=eq.${bookingId}`, { status: 'invoiced', connected_to_pm_at: booking.connected_to_pm_at || new Date().toISOString() });
 
   if (booking.staffing_type === null || booking.staffing_type === undefined) {
-    await askPmDirectly(bookingId, 'staffing_type', `For "${booking.event_name}", full-time or part-time staff needed?`);
+    await askPmDirectly(bookingId, 'staffing_type', `For ${booking.event_name}, full-time or part-time staff needed?`);
   }
 
   return { ok: true, invoice_id: invoice.id };
@@ -641,7 +641,7 @@ async function resolveInvoiceApproval(pendingId, answerText) {
   if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
     await sbPatch(`invoices?id=eq.${invoice.id}`, { status: 'sent_to_client' });
     const client = await getContact(booking.client_contact_id);
-    const caption = `Here's your invoice for "${booking.event_name}".`;
+    const caption = `Here's your invoice for ${booking.event_name}.`;
     await sendInvoicePdf(client.phone_number, invoice, booking, caption);
     await sendWhatsApp(client.phone_number, "Whenever you're ready, please send proof of payment and we'll get it confirmed.");
     await logConversation(booking.id, null, 'outbound', `[invoice PDF sent] ${invoice.invoice_number}`, 'invoice_sent');
@@ -715,7 +715,7 @@ async function handleLawyerInbound(input) {
 
     const booking = contract.bookings;
     const pm = await findPm();
-    const questionText = `Contract draft in for "${booking.event_name}", review and reply "yes" to approve and send to the client, or reply with changes for the lawyer.`;
+    const questionText = `Contract draft in for ${booking.event_name}, review and reply yes to approve and send to the client, or reply with changes for the lawyer.`;
     const pending = (await sbInsert('pending_questions', { booking_id: contract.booking_id, field_name: 'contract_approval', question_text: questionText }))[0];
     if (pm) {
       const msgId = await sendWhatsAppDocument(pm.phone_number, media_id, `${booking.event_name} - Contract Draft.pdf`, questionText);
@@ -766,24 +766,17 @@ Reply ONLY with JSON: {"can_answer": true/false, "answer": "..." or null}.`,
   const pm = await findPm();
   if (pm) {
     const msgId = await sendWhatsApp(pm.phone_number, `lawyer: ${text}`);
-    await sbInsert('pending_questions', {
-      booking_id: booking.id,
-      field_name: 'lawyer_question_relay',
-      question_text: text,
-      whatsapp_message_id: msgId,
-    });
+    // Logged to conversations (not pending_questions) specifically so
+    // swipe-replying to THIS message works every time, not just once --
+    // pm-toggle-code.js's findLawyerRelayBookingIdByForwardedMessageId
+    // matches against this same stage/whatsapp_message_id pair, mirroring
+    // how the client-relay swipe-reply already works indefinitely rather
+    // than a one-shot pending_questions row (confirmed live: the second
+    // reply to the same forwarded question fell through to the generic
+    // fallback chat instead of ever reaching the lawyer).
+    await sbInsert('conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `lawyer: ${text}`, stage: 'lawyer_question_relay', whatsapp_message_id: msgId }]);
   }
   return { ok: true, action: 'lawyer_question_forwarded_to_pm' };
-}
-
-// Resolves a lawyer question forwarded to the PM (either via swipe-reply to
-// the "lawyer: ..." forward, or plain-typed when it's the only thing
-// pending) -- his answer goes straight back to the lawyer, not the client.
-async function resolveLawyerQuestionRelay(pendingId, answerText) {
-  await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
-  const lawyer = await findLawyer();
-  if (lawyer) await sendWhatsApp(lawyer.phone_number, answerText);
-  return { ok: true, action: 'lawyer_question_relayed' };
 }
 
 async function resolveContractApproval(pendingId, answerText) {
@@ -800,13 +793,13 @@ async function resolveContractApproval(pendingId, answerText) {
       client.phone_number,
       contract.draft_media_id,
       `${booking.event_name} - Contract.pdf`,
-      `Here's your contract for "${booking.event_name}" -- please review, sign, and send it back as a PDF.`
+      `Here's your contract for ${booking.event_name}, please review, sign, and send it back as a PDF.`
     );
     return { ok: true, action: 'contract_sent_to_client' };
   }
 
   const lawyer = await findLawyer();
-  if (lawyer) await sendWhatsApp(lawyer.phone_number, `PM requested a change on the "${booking.event_name}" contract: "${answerText}"`);
+  if (lawyer) await sendWhatsApp(lawyer.phone_number, `PM requested a change on the ${booking.event_name} contract: "${answerText}"`);
   return { ok: true, action: 'change_relayed_to_lawyer' };
 }
 
@@ -822,7 +815,6 @@ else if (action === 'resolve_invoice_approval') result = await resolveInvoiceApp
 else if (action === 'resolve_payment_confirmed') result = await resolvePaymentConfirmed(input.pending_question_id, input.answer_text);
 else if (action === 'send_to_lawyer') result = await sendToLawyer(input.booking_id);
 else if (action === 'resolve_contract_approval') result = await resolveContractApproval(input.pending_question_id, input.answer_text);
-else if (action === 'resolve_lawyer_question_relay') result = await resolveLawyerQuestionRelay(input.pending_question_id, input.answer_text);
 else result = await handleLawyerInbound(input);
 
 return [{ json: result }];

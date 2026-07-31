@@ -136,7 +136,7 @@ let nudged = 0;
 for (const booking of waiting) {
   const last = booking.last_lawyer_nudge_at ? new Date(booking.last_lawyer_nudge_at).getTime() : 0;
   if (Date.now() - last >= DAY_MS) {
-    await sendWhatsApp(lawyer.phone_number, `Reminder: still waiting on the contract draft for "${booking.event_name}" (event date ${booking.event_date || 'TBD'}).`);
+    await sendWhatsApp(lawyer.phone_number, `Reminder: still waiting on the contract draft for ${booking.event_name} (event date ${booking.event_date || 'TBD'}).`);
     await sbPatch(`bookings?id=eq.${booking.id}`, { last_lawyer_nudge_at: new Date().toISOString() });
     nudged += 1;
   }
