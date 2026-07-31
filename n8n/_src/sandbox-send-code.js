@@ -3,12 +3,20 @@
 // same inbound router (01-inbound-router.json) the real app uses -- built as
 // a Meta-Cloud-API-shaped payload, same as what Nexa forwards for real
 // traffic, so every bit of real routing/role logic gets exercised for real,
-// not reimplemented here. Body: { phone_number, text, reply_to_message_id }.
+// not reimplemented here. Body: { phone_number, text, reply_to_message_id,
+// media_type, filename }.
 // reply_to_message_id is optional -- the id of a prior sandbox_outbound row
 // the sender picked "reply" on in the webpage, standing in for a real
 // WhatsApp swipe-reply. Passed through as messages[0].context.id, exactly
 // where 01-inbound-router.json's Parse Inbound Message node reads a real
 // swipe-reply's quoted message id from (message.context?.id).
+// media_type is optional -- 'image' or 'document', for simulating a receipt/
+// proof-of-payment upload (e.g. Stage 3's payment-confirmation flow, which
+// only checks that an image/document arrived, never its actual content --
+// see the media_id?.id check in 01-inbound-router.json's Parse Inbound
+// Message node). No real file storage involved: the id is synthetic and
+// nothing downstream ever fetches it, matching how the real bot never looks
+// at the receipt image either, just asks the PM to confirm receipt.
 const helpers = this.helpers;
 const env = {
   N8N_BASE_URL: $env.N8N_BASE_URL,
@@ -52,13 +60,19 @@ const input = $input.first().json.body || {};
 const phoneNumber = (input.phone_number || '').trim();
 const text = (input.text || '').trim();
 const replyToMessageId = (input.reply_to_message_id || '').trim();
-if (!phoneNumber || !text) {
-  return [{ json: { error: 'phone_number and text are both required' } }];
+const mediaType = (input.media_type || '').trim();
+if (mediaType && mediaType !== 'image' && mediaType !== 'document') {
+  return [{ json: { error: 'media_type must be "image" or "document" if given' } }];
+}
+if (!phoneNumber || (!text && !mediaType)) {
+  return [{ json: { error: 'phone_number and (text or media_type) are required' } }];
 }
 
-await takeSnapshot(`Send "${text}"`);
+const filename = (input.filename || '').trim() || (mediaType === 'image' ? 'receipt.jpg' : 'document.pdf');
+await takeSnapshot(mediaType ? `Send [${mediaType}] ${filename}` : `Send "${text}"`);
 
 const messageId = `sandbox-wamid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const mediaId = `sandbox-media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 await helpers.httpRequest({
   method: 'POST',
@@ -72,8 +86,10 @@ await helpers.httpRequest({
             from: phoneNumber,
             id: messageId,
             timestamp: String(Math.floor(Date.now() / 1000)),
-            type: 'text',
-            text: { body: text },
+            type: mediaType || 'text',
+            ...(mediaType
+              ? { [mediaType]: { id: mediaId, filename: mediaType === 'document' ? filename : undefined } }
+              : { text: { body: text } }),
             ...(replyToMessageId ? { context: { id: replyToMessageId } } : {}),
           }],
         },
@@ -84,4 +100,4 @@ await helpers.httpRequest({
   timeout: 15000,
 });
 
-return [{ json: { ok: true, whatsapp_message_id: messageId } }];
+return [{ json: { ok: true, whatsapp_message_id: messageId, media_id: mediaType ? mediaId : undefined } }];

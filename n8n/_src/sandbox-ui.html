@@ -177,6 +177,16 @@
     font-size: 13px;
   }
   .col .inputRow button { padding: 7px 12px; }
+  .col .inputRow .attachBtn {
+    background: #3a3f4a;
+    padding: 7px 10px;
+  }
+  .bubble .media {
+    display: block;
+    font-size: 11px;
+    opacity: 0.85;
+    margin-top: 2px;
+  }
 </style>
 </head>
 <body>
@@ -243,6 +253,8 @@ function renderBoard() {
       </div>
       <div class="inputRow">
         <input placeholder="Type as ${escapeHtml(p.name || p.role)}…" />
+        <button class="attachBtn" title="Send a receipt/image or document">📎</button>
+        <input type="file" class="fileInput" accept="image/*,application/pdf" style="display:none" />
         <button class="sendBtn">Send</button>
       </div>`;
     board.appendChild(col);
@@ -251,6 +263,12 @@ function renderBoard() {
     col.querySelector('.sendBtn').addEventListener('click', send);
     input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
     col.querySelector('.cancelReply').addEventListener('click', () => clearReply(col));
+    const fileInput = col.querySelector('.fileInput');
+    col.querySelector('.attachBtn').addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files[0]) sendMediaAs(p, fileInput.files[0]);
+      fileInput.value = '';
+    });
   }
 }
 
@@ -326,6 +344,32 @@ async function sendAs(persona, input) {
   // Poll immediately (don't wait for the 2s interval) so any bot replies
   // this action produced are already on screen -- and therefore already
   // counted -- before the user has a chance to click Undo.
+  await poll();
+  await refreshUndoCount();
+}
+
+// Simulates sending a receipt/image or document -- no real file upload, the
+// filename and type are all that ever reaches the bot (it never inspects
+// media content either way, see sandbox-send-code.js). Same pattern as
+// sendAs otherwise: swipe-reply-equivalent, undo snapshot, immediate poll.
+async function sendMediaAs(persona, file) {
+  const col = document.querySelector(`.col[data-id="${persona.id}"]`);
+  const replyToMessageId = col?.dataset.replyToId || '';
+  const mediaType = file.type.startsWith('image/') ? 'image' : 'document';
+
+  const preCounts = {};
+  for (const c of document.querySelectorAll('.col')) {
+    preCounts[c.dataset.id] = c.querySelector('.msgs').children.length;
+  }
+  state.actionLog.push({ kind: 'send', preCounts });
+
+  appendBubble(persona.id, 'me', `📎 ${file.name}`, mediaType);
+  if (col) clearReply(col);
+  await api('sandbox-send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone_number: persona.phone_number, media_type: mediaType, filename: file.name, reply_to_message_id: replyToMessageId }),
+  });
   await poll();
   await refreshUndoCount();
 }
