@@ -344,7 +344,7 @@ if (renameIntent?.is_rename && renameIntent.new_name) {
     // resolution used elsewhere (e.g. the free-form fallback reply below).
     booking = await findPmLedBooking();
     if (!booking) {
-      await sendWhatsApp(from_number, 'Which event? Nothing\'s currently open -- give me the current name too, e.g. "rename Mad Party to Soundwave 2".');
+      await sendWhatsApp(from_number, 'Which event? Nothing\'s currently open, so give me the current name too, e.g. "rename Mad Party to Soundwave 2".');
       return [{ json: { action: 'rename_no_target' } }];
     }
   }
@@ -612,8 +612,8 @@ if (!reply_to_message_id) {
 
     if (!target && !planningTarget) {
       const items = [
-        ...pending.map((p) => `"${p.bookings?.event_name || 'unknown event'}" -- ${p.question_text}`),
-        ...planningCandidates.map((b) => `"${b.event_name}" -- ongoing conversation, awaiting your reply`),
+        ...pending.map((p) => `"${p.bookings?.event_name || 'unknown event'}": ${p.question_text}`),
+        ...planningCandidates.map((b) => `"${b.event_name}", ongoing conversation, awaiting your reply`),
       ];
       const list = items.map((line, i) => `${i + 1}. ${line}`).join('\n');
       await sendWhatsApp(

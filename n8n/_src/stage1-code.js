@@ -552,7 +552,7 @@ if (!booking) {
   const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
   const pm = pmRows[0];
   if (pm) {
-    await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `"${booking.event_name}" -- proof of payment`);
+    await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `"${booking.event_name}", proof of payment`);
     const questionText = `"${booking.event_name}": client sent proof of payment (above). Confirm receipt? Reply yes or no.`;
     const pendingRows = await sbRequest('POST', 'pending_questions', {
       booking_id: booking.id,

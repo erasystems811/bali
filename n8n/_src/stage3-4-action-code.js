@@ -473,7 +473,7 @@ Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}
   );
   if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
     const pm = await findPm();
-    if (pm) await sendWhatsApp(pm.phone_number, `Couldn't figure out the invoice line items for "${booking.event_name}" from the conversation -- can you send me the agreed items and amounts directly?`);
+    if (pm) await sendWhatsApp(pm.phone_number, `Couldn't figure out the invoice line items for "${booking.event_name}" from the conversation, can you send me the agreed items and amounts directly?`);
     return { ok: false, reason: 'extraction_failed' };
   }
 
@@ -565,7 +565,7 @@ async function applyInvoiceCorrectionAndResend(booking, invoice, answerText) {
   const extraction = await extractInvoiceCorrection(invoice, answerText);
   if (!extraction) {
     const pm = await findPm();
-    if (pm) await sendWhatsApp(pm.phone_number, "Didn't catch that correction -- can you say it again?");
+    if (pm) await sendWhatsApp(pm.phone_number, "Didn't catch that correction, can you say it again?");
     return { ok: false };
   }
 
@@ -627,7 +627,7 @@ async function resolveInvoiceApproval(pendingId, answerText) {
   const extraction = await extractInvoiceCorrection(invoice, answerText);
   if (!extraction) {
     const pm = await findPm();
-    if (pm) await sendWhatsApp(pm.phone_number, "Didn't catch that correction -- can you say it again?");
+    if (pm) await sendWhatsApp(pm.phone_number, "Didn't catch that correction, can you say it again?");
     return { ok: false };
   }
 
@@ -655,7 +655,7 @@ async function resolvePaymentConfirmed(pendingId, answerText) {
 
   if (!/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
     const client = await getContact(booking.client_contact_id);
-    await sendWhatsApp(client.phone_number, "We couldn't confirm that payment yet -- could you resend proof of payment?");
+    await sendWhatsApp(client.phone_number, "We couldn't confirm that payment yet, could you resend proof of payment?");
     return { ok: true, action: 'payment_not_confirmed' };
   }
 
@@ -664,7 +664,7 @@ async function resolvePaymentConfirmed(pendingId, answerText) {
   await sbInsert('contracts', { booking_id: booking.id, total_fee: invoice.total_net_payable, payment_terms: invoice.payment_terms });
 
   const client = await getContact(booking.client_contact_id);
-  await sendWhatsApp(client.phone_number, "Payment confirmed, thank you! Last thing before we get the contract moving -- could you send your organization's full legal name and its official registered address?");
+  await sendWhatsApp(client.phone_number, "Payment confirmed, thank you! Last thing before we get the contract moving, could you send your organization's full legal name and its official registered address?");
   return { ok: true, action: 'moved_to_awaiting_contract' };
 }
 
@@ -694,7 +694,7 @@ async function handleLawyerInbound(input) {
 
   const booking = contract.bookings;
   const pm = await findPm();
-  const questionText = `Contract draft in for "${booking.event_name}" -- review and reply "yes" to approve and send to the client, or reply with changes for the lawyer.`;
+  const questionText = `Contract draft in for "${booking.event_name}", review and reply "yes" to approve and send to the client, or reply with changes for the lawyer.`;
   const pending = (await sbInsert('pending_questions', { booking_id: contract.booking_id, field_name: 'contract_approval', question_text: questionText }))[0];
   if (pm) {
     const msgId = await sendWhatsAppDocument(pm.phone_number, media_id, `${booking.event_name} - Contract Draft.pdf`, questionText);
