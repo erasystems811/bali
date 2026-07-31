@@ -625,6 +625,21 @@ async function correctInvoiceFromFallbackChat(bookingId, answerText) {
   const booking = await getBooking(bookingId);
   const invoice = (await sbRequest('GET', `invoices?booking_id=eq.${bookingId}&order=created_at.desc&limit=1&select=*`))[0];
   if (!invoice) return { ok: false, reason: 'no_invoice' };
+  // A correction reached this way (plain-typed, no swipe-reply) means
+  // whatever invoice question was already open -- the draft-text confirm or
+  // the actual PDF approval -- is being superseded by this one. Resolve it
+  // now rather than leaving it marked pending forever: a new draft/PDF is
+  // about to replace it, so nothing should still look like it's awaiting a
+  // yes/no on the old one. The swipe-reply path already does this
+  // (resolveInvoiceDraftConfirm/resolveInvoiceApproval resolve up front);
+  // this was the one path that didn't -- confirmed live.
+  const openInvoiceQuestions = await sbRequest(
+    'GET',
+    `pending_questions?booking_id=eq.${bookingId}&field_name=in.(invoice_draft_confirm,invoice_approval)&resolved_at=is.null&select=id`
+  );
+  for (const pq of openInvoiceQuestions) {
+    await sbPatch(`pending_questions?id=eq.${pq.id}`, { resolved_at: new Date().toISOString() });
+  }
   return applyInvoiceCorrectionAndResend(booking, invoice, answerText);
 }
 
