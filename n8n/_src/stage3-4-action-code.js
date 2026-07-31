@@ -390,7 +390,7 @@ function recomputeInvoiceTotals(lineItems) {
 // sends it to the PM for final visual approval before it goes to the client.
 async function sendInvoiceForFinalApproval(invoice, booking) {
   const pm = await findPm();
-  const caption = `Invoice ${invoice.invoice_number} for "${booking.event_name}" -- reply to THIS message with any corrections, or reply "yes" to approve and send to the client.`;
+  const caption = `Invoice ${invoice.invoice_number} for "${booking.event_name}", reply to THIS message with any corrections, or reply "yes" to approve and send to the client.`;
   const pending = (await sbInsert('pending_questions', { booking_id: booking.id, field_name: 'invoice_approval', question_text: caption }))[0];
   if (pm) {
     const msgId = await sendInvoicePdf(pm.phone_number, invoice, booking, caption);
@@ -674,7 +674,7 @@ async function sendToLawyer(bookingId) {
   const lawyer = await findLawyer();
   if (!lawyer) return { ok: false, reason: 'no_lawyer_contact' };
 
-  const text = `New contract needed:\nOrganizer -- ${contract.organizer_legal_name}, ${contract.organizer_registered_address}\nEvent -- ${booking.event_name}, ${booking.event_date}\nType -- ${booking.event_type}\nFee -- ${formatMoney(contract.total_fee)}\nPayment -- ${contract.payment_terms}`;
+  const text = `New contract needed:\nOrganizer: ${contract.organizer_legal_name}, ${contract.organizer_registered_address}\nEvent: ${booking.event_name}, ${booking.event_date}\nType: ${booking.event_type}\nFee: ${formatMoney(contract.total_fee)}\nPayment: ${contract.payment_terms}`;
   await sendWhatsApp(lawyer.phone_number, text);
   await sbPatch(`contracts?id=eq.${contract.id}`, { sent_to_lawyer_at: new Date().toISOString() });
   return { ok: true };
