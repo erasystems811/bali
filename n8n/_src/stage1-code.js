@@ -571,29 +571,31 @@ if (!booking) {
   const contract = contractRows[0];
   logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: effectiveText, stage: booking.status });
 
-  if (contract && (!contract.organizer_legal_name || !contract.organizer_registered_address)) {
-    // Accept whatever level of detail the client actually gives -- a
-    // street-level address with no city/state is a real address, informal
-    // wording and "name:"/"address:" labels are both fine either way. Fill
-    // in whichever field(s) this message provides, keep whatever's already
-    // known for the other, and only ask again for what's genuinely still
-    // missing -- never discard a field that WAS understood just because the
-    // other one wasn't in this same message.
+  // One field at a time, form-style -- same principle as the rest of intake
+  // (fieldOrder/currentStepFields never bundle two ambiguous things into one
+  // guess). Asking for name and address together and trying to split them
+  // out of one freeform reply was the actual fragile part: any partial miss
+  // discarded everything, even a field it DID understand. Each field here is
+  // its own single-purpose extraction against its own single question, so
+  // there's nothing to disambiguate between two things in the same message.
+  if (contract && !contract.organizer_legal_name) {
     const extraction = await askOpenAIJson(
-      `Extract the organization's full legal name and/or its official registered address from this WhatsApp message, whichever it actually provides. Already on file: ${JSON.stringify({ legal_name: contract.organizer_legal_name || null, address: contract.organizer_registered_address || null })}. Accept a partial or informal address (street level is fine, no need for city/state/country) and a name given in any format. Reply ONLY with JSON: {"organizer_legal_name": "..." or null, "organizer_registered_address": "..." or null}.`,
+      'The venue asked a client for their organization\'s full legal name. Does this WhatsApp message actually state one (in any format, labels like "name:" are fine)? Reply ONLY with JSON: {"organizer_legal_name": "..." or null}.',
       effectiveText || ''
     );
-    const legalName = extraction?.organizer_legal_name || contract.organizer_legal_name || null;
-    const address = extraction?.organizer_registered_address || contract.organizer_registered_address || null;
-
-    if (extraction?.organizer_legal_name || extraction?.organizer_registered_address) {
-      await sbPatch(`contracts?id=eq.${contract.id}`, {
-        ...(extraction.organizer_legal_name ? { organizer_legal_name: legalName } : {}),
-        ...(extraction.organizer_registered_address ? { organizer_registered_address: address } : {}),
-      });
+    if (extraction?.organizer_legal_name) {
+      await sbPatch(`contracts?id=eq.${contract.id}`, { organizer_legal_name: extraction.organizer_legal_name });
+      replyText = "Got it, thanks. Now, what's your organization's official registered address?";
+    } else {
+      replyText = "Sorry, I need your organization's full legal name first, could you send that?";
     }
-
-    if (legalName && address) {
+  } else if (contract && !contract.organizer_registered_address) {
+    const extraction = await askOpenAIJson(
+      'The venue asked a client for their organization\'s official registered address. Does this WhatsApp message actually state one? A street address alone is an acceptable minimum (city/state/country aren\'t required), but if they give more than that (city, state, etc.) include all of it, don\'t trim it down to just the street. Labels like "address:" are fine either way. Reply ONLY with JSON: {"organizer_registered_address": "..." or null}.',
+      effectiveText || ''
+    );
+    if (extraction?.organizer_registered_address) {
+      await sbPatch(`contracts?id=eq.${contract.id}`, { organizer_registered_address: extraction.organizer_registered_address });
       await helpers.httpRequest({
         method: 'POST',
         url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
@@ -603,12 +605,8 @@ if (!booking) {
         timeout: 15000,
       });
       replyText = "Thank you. Passing this to our lawyer to draft the contract now.";
-    } else if (!legalName && !address) {
-      replyText = "Sorry, I couldn't catch that. Could you send your organization's full legal name and its official registered address?";
-    } else if (!legalName) {
-      replyText = "Got the address, thanks. Still need your organization's full legal name.";
     } else {
-      replyText = "Got the name, thanks. Still need your organization's official registered address.";
+      replyText = "Sorry, I need your organization's official registered address, could you send that?";
     }
   }
   // If there's no contract row yet, or it's already fully collected, nothing to ask --

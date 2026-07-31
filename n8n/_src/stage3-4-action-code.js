@@ -664,7 +664,7 @@ async function resolvePaymentConfirmed(pendingId, answerText) {
   await sbInsert('contracts', { booking_id: booking.id, total_fee: invoice.total_net_payable, payment_terms: invoice.payment_terms });
 
   const client = await getContact(booking.client_contact_id);
-  await sendWhatsApp(client.phone_number, "Payment confirmed, thank you! Last thing before we get the contract moving, could you send your organization's full legal name and its official registered address?");
+  await sendWhatsApp(client.phone_number, "Payment confirmed, thank you! Last thing before we get the contract moving, what's your organization's full legal name?");
   return { ok: true, action: 'moved_to_awaiting_contract' };
 }
 
