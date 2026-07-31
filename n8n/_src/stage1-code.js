@@ -549,12 +549,16 @@ if (!booking) {
   const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
   const pm = pmRows[0];
   if (pm) {
-    const questionText = `${booking.event_name}: client sent back a signed PDF. Confirm it's valid? Reply yes or no.`;
+    // Forward the actual signed PDF, not just a text notification -- same
+    // fix already applied to proof-of-payment: the PM was being asked to
+    // confirm a document he'd never actually seen.
+    const questionText = `${booking.event_name}: client sent back a signed PDF (above). Confirm it's valid? Reply yes or no.`;
     const pendingRows = await sbRequest('POST', 'pending_questions', {
       booking_id: booking.id,
       field_name: 'contract_confirmed',
       question_text: questionText,
     }, { Prefer: 'return=representation' });
+    await sendWhatsAppMedia(pm.phone_number, 'document', input.media_id, `${booking.event_name}, signed contract`);
     const msgId = await sendWhatsApp(pm.phone_number, questionText);
     if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
   }
