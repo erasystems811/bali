@@ -704,8 +704,30 @@ async function sendToLawyer(bookingId) {
   return { ok: true };
 }
 
+// Title-cases a role for display (event_assistant -> Event Assistant).
+function roleLabel(role) {
+  return (role || 'Someone').split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+// General rule, not lawyer-specific: whoever's message is being relayed
+// gets labeled by role, or Role(FirstName) if more than one contact shares
+// that role -- so this same mechanism is ready to reuse as-is whenever a
+// new role's process gets mapped later, without re-deciding how labeling
+// should work each time.
+async function labelForContact(contactId) {
+  if (!contactId) return 'Someone';
+  const rows = await sbRequest('GET', `contacts?id=eq.${contactId}&select=*`);
+  const contact = rows[0];
+  if (!contact) return 'Someone';
+  const base = roleLabel(contact.role);
+  const sameRole = await sbRequest('GET', `contacts?role=eq.${contact.role}&select=id`);
+  if (sameRole.length <= 1) return base;
+  const firstName = (contact.name || 'Unknown').split(' ')[0];
+  return `${base}(${firstName})`;
+}
+
 async function handleLawyerInbound(input) {
-  const { media_id, media_type, text, from_number } = input;
+  const { media_id, media_type, text, from_number, contact_id } = input;
   const waiting = await sbRequest('GET', 'contracts?draft_received_at=is.null&sent_to_lawyer_at=not.is.null&select=*,bookings(*)&order=sent_to_lawyer_at.desc&limit=1');
   const contract = waiting[0];
 
@@ -765,18 +787,23 @@ Reply ONLY with JSON: {"can_answer": true/false, "answer": "..." or null}.`,
 
   const pm = await findPm();
   if (pm) {
-    const msgId = await sendWhatsApp(pm.phone_number, `lawyer: ${text}`);
+    const label = await labelForContact(contact_id);
+    const msgId = await sendWhatsApp(pm.phone_number, `${label}: ${text}`);
     // Logged to conversations (not pending_questions) specifically so
     // swipe-replying to THIS message works every time, not just once --
-    // pm-toggle-code.js's findLawyerRelayBookingIdByForwardedMessageId
-    // matches against this same stage/whatsapp_message_id pair, mirroring
-    // how the client-relay swipe-reply already works indefinitely rather
-    // than a one-shot pending_questions row (confirmed live: the second
-    // reply to the same forwarded question fell through to the generic
-    // fallback chat instead of ever reaching the lawyer).
-    await sbInsert('conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `lawyer: ${text}`, stage: 'lawyer_question_relay', whatsapp_message_id: msgId }]);
+    // pm-toggle-code.js's findStaffRelayByForwardedMessageId matches against
+    // this same stage/whatsapp_message_id pair, mirroring how the
+    // client-relay swipe-reply already works indefinitely rather than a
+    // one-shot pending_questions row (confirmed live: the second reply to
+    // the same forwarded question fell through to the generic fallback chat
+    // instead of ever reaching the lawyer). stage/sender_contact_id are
+    // generic (not lawyer-specific) so this is ready to reuse for any other
+    // role's inbound messages once that role's process is actually mapped
+    // and routed -- see the PM_CAN_REACH_ROLES gate in pm-toggle-code.js for
+    // where access actually gets granted, separate from this mechanism.
+    await sbInsert('conversations', [{ booking_id: booking.id, sender_contact_id: contact_id, direction: 'outbound', message_text: `${label}: ${text}`, stage: 'staff_question_relay', whatsapp_message_id: msgId }]);
   }
-  return { ok: true, action: 'lawyer_question_forwarded_to_pm' };
+  return { ok: true, action: 'staff_question_forwarded_to_pm' };
 }
 
 async function resolveContractApproval(pendingId, answerText) {

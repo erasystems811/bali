@@ -258,48 +258,69 @@ async function findPlanningBookingByForwardedMessageId(messageId) {
   return booking[0] || null;
 }
 
-// Same pattern as findPlanningBookingByForwardedMessageId, for a lawyer
-// question forwarded to the PM (see handleLawyerInbound in
-// stage3-4-action-code.js) -- matched against conversations, not
+// Same pattern as findPlanningBookingByForwardedMessageId, generalized for
+// any staff question forwarded to the PM (see handleLawyerInbound in
+// stage3-4-action-code.js, which logs every such forward with this same
+// stage regardless of role) -- matched against conversations, not
 // pending_questions, specifically so swipe-replying to that SAME forwarded
-// message works every time, not just the first -- confirmed live, a
-// one-shot pending_questions row meant the second reply fell through to the
-// generic fallback chat instead of ever reaching the lawyer.
-async function findLawyerRelayBookingIdByForwardedMessageId(messageId) {
+// message works every time, not just the first -- confirmed live for the
+// lawyer case, a one-shot pending_questions row meant the second reply fell
+// through to the generic fallback chat instead of ever reaching him.
+// sender_contact_id on the row is who the reply actually needs to reach --
+// not assumed to be any particular role.
+async function findStaffRelayByForwardedMessageId(messageId) {
   if (!messageId) return null;
   const rows = await sbRequest(
     'GET',
-    `conversations?whatsapp_message_id=eq.${encodeURIComponent(messageId)}&stage=eq.lawyer_question_relay&select=booking_id&limit=1`
+    `conversations?whatsapp_message_id=eq.${encodeURIComponent(messageId)}&stage=eq.staff_question_relay&select=booking_id,sender_contact_id&limit=1`
   );
-  return rows[0]?.booking_id || null;
+  return rows[0] || null;
+}
+
+// Title-cases a role for display (event_assistant -> Event Assistant) --
+// duplicated from stage3-4-action-code.js's version (separate n8n Code node,
+// no shared module system in this codebase, matching the existing per-file
+// duplication convention e.g. sandboxLog).
+function roleLabel(role) {
+  return (role || 'Someone').split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
 
 const input = $input.first().json.body;
 const { from_number, text, reply_to_message_id, contact_id } = input;
 const trimmed = (text || '').trim();
 
-// --- Command: "lawyer: message" -- explicit, deliberate way to reach the
-// lawyer directly, same idea as the "[event name]: message" client relay
-// below but for a fixed keyword instead of a looked-up event name (never
-// collides with a real event since "lawyer" isn't one). Swipe-reply already
-// handled above takes priority if both somehow applied. Logged against
-// whichever contract is currently active with him, if any, purely for
-// conversation history -- the send itself only needs his phone number.
-const lawyerMatch = !reply_to_message_id ? trimmed.match(/^lawyer\s*:\s*([\s\S]+)$/i) : null;
-if (lawyerMatch) {
-  const lawyerMsg = lawyerMatch[1].trim();
-  const lawyer = (await sbRequest('GET', 'contacts?role=eq.lawyer&select=*&limit=1'))[0];
-  if (!lawyer) {
-    await sendWhatsApp(from_number, "No lawyer contact set up yet.");
-    return [{ json: { action: 'lawyer_relay_no_lawyer' } }];
+// --- Command: "role: message" (optionally "role(FirstName): message" when
+// more than one contact shares that role) -- explicit, deliberate way for
+// the PM to reach a staff member directly, same idea as the
+// "[event name]: message" client relay below but keyed by role instead of
+// a looked-up event name. General mechanism, gated by an explicit allowlist
+// of who he can actually reach today -- add to it once a role's process is
+// mapped, nothing else here needs to change. Swipe-reply already handled
+// above takes priority if both somehow applied. Logged against whichever
+// contract is currently active, if any, purely for conversation history --
+// the send itself only needs the contact's phone number.
+const PM_CAN_REACH_ROLES = ['lawyer']; // extend here as each role's process gets mapped
+
+const roleMatch = !reply_to_message_id ? trimmed.match(/^([a-z_]+)(?:\(([^)]+)\))?\s*:\s*([\s\S]+)$/i) : null;
+if (roleMatch && PM_CAN_REACH_ROLES.includes(roleMatch[1].toLowerCase())) {
+  const role = roleMatch[1].toLowerCase();
+  const nameHint = roleMatch[2]?.trim().toLowerCase();
+  const relayMsg = roleMatch[3].trim();
+  const candidates = await sbRequest('GET', `contacts?role=eq.${role}&select=*`);
+  const staffContact = nameHint
+    ? candidates.find((c) => (c.name || '').toLowerCase().startsWith(nameHint)) || null
+    : candidates[0] || null;
+  if (!staffContact) {
+    await sendWhatsApp(from_number, `No ${roleLabel(role)} contact set up yet.`);
+    return [{ json: { action: 'staff_relay_no_contact', role } }];
   }
-  await sendWhatsApp(lawyer.phone_number, lawyerMsg);
+  await sendWhatsApp(staffContact.phone_number, relayMsg);
   const activeContract = (await sbRequest('GET', 'contracts?sent_to_lawyer_at=not.is.null&select=booking_id&order=sent_to_lawyer_at.desc&limit=1'))[0];
   if (activeContract) {
     await logConversation(activeContract.booking_id, contact_id, 'inbound', trimmed, 'pm_message');
-    await logConversation(activeContract.booking_id, null, 'outbound', lawyerMsg, 'lawyer_question_relay');
+    await logConversation(activeContract.booking_id, null, 'outbound', relayMsg, 'staff_question_relay');
   }
-  return [{ json: { action: 'lawyer_message_relayed' } }];
+  return [{ json: { action: 'staff_message_relayed', role } }];
 }
 
 // --- Command: "invoice [event name][: details]" -- manual trigger to draft
@@ -482,13 +503,13 @@ if (reply_to_message_id) {
     return [{ json: { action: 'planning_relayed_to_client', booking_id: planningTarget.id } }];
   }
   if (!target) {
-    const lawyerRelayBookingId = await findLawyerRelayBookingIdByForwardedMessageId(reply_to_message_id);
-    if (lawyerRelayBookingId) {
-      const lawyer = (await sbRequest('GET', 'contacts?role=eq.lawyer&select=*&limit=1'))[0];
-      if (lawyer) await sendWhatsApp(lawyer.phone_number, answerText);
-      await logConversation(lawyerRelayBookingId, null, 'outbound', answerText, 'lawyer_question_relay', undefined);
-      await logConversation(lawyerRelayBookingId, contact_id, 'inbound', answerText, 'pm_message');
-      return [{ json: { action: 'lawyer_question_relayed', booking_id: lawyerRelayBookingId } }];
+    const staffRelay = await findStaffRelayByForwardedMessageId(reply_to_message_id);
+    if (staffRelay?.sender_contact_id) {
+      const staffContact = (await sbRequest('GET', `contacts?id=eq.${staffRelay.sender_contact_id}&select=*`))[0];
+      if (staffContact) await sendWhatsApp(staffContact.phone_number, answerText);
+      await logConversation(staffRelay.booking_id, null, 'outbound', answerText, 'staff_question_relay', undefined);
+      await logConversation(staffRelay.booking_id, contact_id, 'inbound', answerText, 'pm_message');
+      return [{ json: { action: 'staff_question_relayed', booking_id: staffRelay.booking_id } }];
     }
   }
   // target set (a pending question) falls through -- resolved by the generic
