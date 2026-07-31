@@ -743,7 +743,15 @@ async function labelForContact(contactId) {
 
 async function handleLawyerInbound(input) {
   const { media_id, media_type, text, from_number, contact_id } = input;
-  const waiting = await sbRequest('GET', 'contracts?draft_received_at=is.null&sent_to_lawyer_at=not.is.null&select=*,bookings(*)&order=sent_to_lawyer_at.desc&limit=1');
+  // Gating on draft_received_at IS NULL only ever accepted the lawyer's
+  // FIRST document -- any later one (a resend, a second revision, anything
+  // beyond the single "PM rejected once" reset already handled elsewhere)
+  // matched nothing and was silently dropped. Confirmed live: sent a second
+  // PDF with no rejection in between, nothing reached the PM. Gate on
+  // whether the PM has actually approved a version yet instead -- any
+  // document that arrives before that point is the current draft, no
+  // matter how many came before it.
+  const waiting = await sbRequest('GET', 'contracts?approved_by_pm_at=is.null&sent_to_lawyer_at=not.is.null&select=*,bookings(*)&order=sent_to_lawyer_at.desc&limit=1');
   const contract = waiting[0];
 
   if (contract && media_type === 'document') {
