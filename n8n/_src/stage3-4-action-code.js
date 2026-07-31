@@ -743,28 +743,36 @@ async function labelForContact(contactId) {
 
 async function handleLawyerInbound(input) {
   const { media_id, media_type, text, from_number, contact_id } = input;
-  // Gating on draft_received_at IS NULL only ever accepted the lawyer's
-  // FIRST document -- any later one (a resend, a second revision, anything
-  // beyond the single "PM rejected once" reset already handled elsewhere)
-  // matched nothing and was silently dropped. Confirmed live: sent a second
-  // PDF with no rejection in between, nothing reached the PM. Gate on
-  // whether the PM has actually approved a version yet instead -- any
-  // document that arrives before that point is the current draft, no
-  // matter how many came before it.
-  const waiting = await sbRequest('GET', 'contracts?approved_by_pm_at=is.null&sent_to_lawyer_at=not.is.null&select=*,bookings(*)&order=sent_to_lawyer_at.desc&limit=1');
-  const contract = waiting[0];
+  // The bot's job is to deliver -- it has no business deciding a message
+  // isn't "expected" and dropping it. Every previous version of this
+  // function gated delivery on finding an exact contract match (first
+  // document only, then only before approval) and silently lost anything
+  // that didn't match -- confirmed live, repeatedly. This lookup is now
+  // used ONLY for logging/context (which booking to attach it to, what
+  // caption to use), never as a condition for whether to actually forward
+  // the message. No match, already approved, doesn't matter -- it still
+  // goes to the PM.
+  const active = (await sbRequest(
+    'GET',
+    'contracts?sent_to_lawyer_at=not.is.null&select=*,bookings(*)&order=sent_to_lawyer_at.desc&limit=1'
+  ))[0];
 
-  if (contract && media_type === 'document') {
-    await sbPatch(`contracts?id=eq.${contract.id}`, { draft_media_id: media_id, draft_received_at: new Date().toISOString() });
-    await sbPatch(`bookings?id=eq.${contract.booking_id}`, { status: 'contract_drafted' });
-
-    const booking = contract.bookings;
+  if (media_type === 'document') {
+    const booking = active?.bookings;
+    if (active) {
+      await sbPatch(`contracts?id=eq.${active.id}`, { draft_media_id: media_id, draft_received_at: new Date().toISOString() });
+      await sbPatch(`bookings?id=eq.${active.booking_id}`, { status: 'contract_drafted' });
+    }
     const pm = await findPm();
-    const questionText = `Contract draft in for ${booking.event_name}, review and reply yes to approve and send to the client, or reply with changes for the lawyer.`;
-    const pending = (await sbInsert('pending_questions', { booking_id: contract.booking_id, field_name: 'contract_approval', question_text: questionText }))[0];
+    const questionText = booking
+      ? `Contract draft in for ${booking.event_name}, review and reply yes to approve and send to the client, or reply with changes for the lawyer.`
+      : `Document from the lawyer, review and let me know what to do with it.`;
     if (pm) {
-      const msgId = await sendWhatsAppDocument(pm.phone_number, media_id, `${booking.event_name} - Contract Draft.pdf`, questionText);
-      if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
+      const msgId = await sendWhatsAppDocument(pm.phone_number, media_id, booking ? `${booking.event_name} - Contract Draft.pdf` : 'Document from lawyer.pdf', questionText);
+      if (active) {
+        const pending = (await sbInsert('pending_questions', { booking_id: active.booking_id, field_name: 'contract_approval', question_text: questionText }))[0];
+        if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
+      }
     }
     return { ok: true, action: 'contract_draft_forwarded_to_pm' };
   }
@@ -774,14 +782,16 @@ async function handleLawyerInbound(input) {
   // it directly from whatever's already known about the contract they're
   // actively working on; anything not confidently answerable from that gets
   // forwarded to the PM instead of silently dropped, tracked the same way
-  // client relays are (swipe-reply goes straight back to the lawyer).
+  // client relays are (swipe-reply goes straight back to the lawyer). No
+  // "return early and drop it" here either -- if there's no contract
+  // context at all, it still gets relayed to the PM as a plain message.
   if (!text) return { ok: true, action: 'lawyer_message_logged' };
 
-  const active = (await sbRequest(
-    'GET',
-    'contracts?sent_to_lawyer_at=not.is.null&select=*,bookings(*)&order=sent_to_lawyer_at.desc&limit=1'
-  ))[0];
-  if (!active) return { ok: true, action: 'lawyer_message_logged' };
+  if (!active) {
+    const pm = await findPm();
+    if (pm) await sendWhatsApp(pm.phone_number, `Lawyer: ${text}`);
+    return { ok: true, action: 'lawyer_message_relayed_no_context' };
+  }
 
   const booking = active.bookings;
   const knownDetails = {
