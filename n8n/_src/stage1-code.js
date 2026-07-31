@@ -681,9 +681,19 @@ if (!booking) {
     const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
     const pm = pmRows[0];
     if (pm) {
-      const forwardText = `${booking.event_name}: ${effectiveText}`;
-      const msgId = await sendWhatsApp(pm.phone_number, forwardText);
-      logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed to PM] ${effectiveText}`, stage: 'connected_relay_to_pm', whatsapp_message_id: msgId || null });
+      let msgId;
+      if (input.media_type) {
+        // A document/image resent here (any status past the specific
+        // invoiced/sent_to_client branches that already handle media) used
+        // to build a text line from effectiveText, which is null for a pure
+        // attachment -- literally sent the PM "event name: null". Confirmed
+        // live. Forward the actual file instead.
+        msgId = await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}${effectiveText ? ': ' + effectiveText : ''}`);
+      } else {
+        const forwardText = `${booking.event_name}: ${effectiveText}`;
+        msgId = await sendWhatsApp(pm.phone_number, forwardText);
+      }
+      logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: input.media_type ? `[relayed ${input.media_type} to PM]` : `[relayed to PM] ${effectiveText}`, stage: 'connected_relay_to_pm', whatsapp_message_id: msgId || null });
     }
   }
   await sbRequest('POST', 'conversations', logs);
