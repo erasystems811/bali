@@ -717,12 +717,43 @@ if (!target) {
       await logConversation(subjectBooking.id, null, 'outbound', confirmMsg, 'pm_fallback_chat');
       return [{ json: { action: `fallback_${actionIntent.action}d`, booking_id: subjectBooking.id } }];
     }
+
+    // A plain-typed invoice correction (e.g. "make light 2.3m") only reaches
+    // this generic fallback because nothing was open to auto-match it to --
+    // typically the PM already confirmed or asked a question earlier, so the
+    // pending_questions row that would normally catch this is already
+    // resolved. Without this, the fallback below has no idea an invoice
+    // exists and just tells the PM it can't help -- confirmed live. Route it
+    // to the same correction logic stage3-4-action-code.js already uses,
+    // via its webhook, instead of duplicating that extraction here.
+    const latestInvoice = (await sbRequest(
+      'GET',
+      `invoices?booking_id=eq.${subjectBooking.id}&order=created_at.desc&limit=1&select=id,line_items,payment_terms`
+    ))[0];
+    if (latestInvoice) {
+      const invoiceIntent = await openaiExtract(
+        `The PM is chatting with Bali about their booking "${subjectBooking.event_name}", which has a draft invoice with these line items: ${JSON.stringify(latestInvoice.line_items)}. Decide if the PM's LATEST message is a direct request to change an amount, item, or payment term on that invoice (e.g. "make light 2.3m", "remove screen", "actually 60/40 split") -- NOT a question about it, not small talk, not something already handled above. Reply ONLY with JSON: {"is_correction": true/false}.\n\nRecent conversation:\n${recentTranscript || '(none yet)'}`,
+        text || ''
+      );
+      if (invoiceIntent?.is_correction) {
+        await helpers.httpRequest({
+          method: 'POST',
+          url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+          headers: { 'Content-Type': 'application/json' },
+          body: { action: 'correct_invoice_from_fallback', booking_id: subjectBooking.id, answer_text: text },
+          json: true,
+          timeout: 15000,
+        });
+        await logConversation(subjectBooking.id, contact_id, 'inbound', text || '', 'pm_fallback_chat');
+        return [{ json: { action: 'fallback_invoice_corrected', booking_id: subjectBooking.id } }];
+      }
+    }
   }
 
   const reply = await askOpenAIText(
     `You are Bali, an event venue's own WhatsApp operational assistant. You're talking directly with venue staff (the PM) here -- no client is on this thread, and nothing you say here is ever sent to a client. Answer their question or help with what they're asking, using anything below that's relevant. If the recent back-and-forth below shows you just asked the PM something, treat their new message as answering THAT, not as a brand-new unrelated request.
 
-What you can actually do today: manage one client negotiation at a time ("open [event name]" / "close"), generate invoices ("generate invoice for [event name]"), rename an event ("change the name to X", "rename X to Y"), and relay a message to a specific client only when a message starts with "[event name]: ". Reaching a client always requires that exact prefix -- if the PM seems to want something sent to a client, say so and tell them to prefix it with the event name.
+What you can actually do today: manage one client negotiation at a time ("open [event name]" / "close"), generate invoices ("generate invoice for [event name]"), correct a draft invoice's amounts/items/terms even without swipe-replying to it, rename an event ("change the name to X", "rename X to Y"), and relay a message to a specific client only when a message starts with "[event name]: ". Reaching a client always requires that exact prefix -- if the PM seems to want something sent to a client, say so and tell them to prefix it with the event name.
 
 For anything else -- messaging other staff, pulling reports, other operational tasks -- you don't have that built yet. If asked for something like that, say plainly that you can't do it yet rather than pretending to. Keep your reply short, natural, and professional -- no filler, no fake enthusiasm.
 

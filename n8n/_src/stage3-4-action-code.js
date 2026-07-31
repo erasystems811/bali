@@ -549,6 +549,15 @@ async function resolveInvoiceDraftConfirm(pendingId, answerText) {
     return { ok: true, action: 'invoice_question_answered' };
   }
 
+  return applyInvoiceCorrectionAndResend(booking, invoice, answerText);
+}
+
+// Shared by resolveInvoiceDraftConfirm (a swipe-reply/auto-matched correction
+// to an open pending_questions row) and correctInvoiceFromFallbackChat (a
+// plain-typed correction with nothing open to match, routed here instead of
+// the PM fallback chat declining it) -- same extraction, same resend, just
+// two different ways of arriving at "the PM wants this invoice changed."
+async function applyInvoiceCorrectionAndResend(booking, invoice, answerText) {
   const extraction = await extractInvoiceCorrection(invoice, answerText);
   if (!extraction) {
     const pm = await findPm();
@@ -576,6 +585,19 @@ async function resolveInvoiceDraftConfirm(pendingId, answerText) {
     if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
   }
   return { ok: true, action: 'invoice_draft_corrected' };
+}
+
+// Entry point for the PM fallback chat (pm-toggle-code.js) when a plain-typed
+// message names an invoice change but nothing is currently open to
+// swipe-reply/auto-match to -- e.g. the PM already confirmed or asked a
+// question earlier, so the pending_questions row that would normally catch
+// this is already resolved. Looks up the booking's latest invoice directly
+// instead of requiring a specific pending_question_id.
+async function correctInvoiceFromFallbackChat(bookingId, answerText) {
+  const booking = await getBooking(bookingId);
+  const invoice = (await sbRequest('GET', `invoices?booking_id=eq.${bookingId}&order=created_at.desc&limit=1&select=*`))[0];
+  if (!invoice) return { ok: false, reason: 'no_invoice' };
+  return applyInvoiceCorrectionAndResend(booking, invoice, answerText);
 }
 
 // Phase 2 resolution: PM approving/correcting the actual PDF.
@@ -701,6 +723,7 @@ const action = input.action;
 let result;
 if (action === 'draft_invoice') result = await draftInvoice(input.booking_id, input.pm_details);
 else if (action === 'resolve_invoice_draft_confirm') result = await resolveInvoiceDraftConfirm(input.pending_question_id, input.answer_text);
+else if (action === 'correct_invoice_from_fallback') result = await correctInvoiceFromFallbackChat(input.booking_id, input.answer_text);
 else if (action === 'resolve_invoice_approval') result = await resolveInvoiceApproval(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_payment_confirmed') result = await resolvePaymentConfirmed(input.pending_question_id, input.answer_text);
 else if (action === 'send_to_lawyer') result = await sendToLawyer(input.booking_id);
