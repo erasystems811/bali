@@ -572,17 +572,28 @@ if (!booking) {
   logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: effectiveText, stage: booking.status });
 
   if (contract && (!contract.organizer_legal_name || !contract.organizer_registered_address)) {
+    // Accept whatever level of detail the client actually gives -- a
+    // street-level address with no city/state is a real address, informal
+    // wording and "name:"/"address:" labels are both fine either way. Fill
+    // in whichever field(s) this message provides, keep whatever's already
+    // known for the other, and only ask again for what's genuinely still
+    // missing -- never discard a field that WAS understood just because the
+    // other one wasn't in this same message.
     const extraction = await askOpenAIJson(
-      'Extract the organization\'s full legal name and its official registered address from this WhatsApp message. Reply ONLY with JSON: {"understood": true/false, "organizer_legal_name": "...", "organizer_registered_address": "..."}. Both fields must be present for understood to be true.',
+      `Extract the organization's full legal name and/or its official registered address from this WhatsApp message, whichever it actually provides. Already on file: ${JSON.stringify({ legal_name: contract.organizer_legal_name || null, address: contract.organizer_registered_address || null })}. Accept a partial or informal address (street level is fine, no need for city/state/country) and a name given in any format. Reply ONLY with JSON: {"organizer_legal_name": "..." or null, "organizer_registered_address": "..." or null}.`,
       effectiveText || ''
     );
-    if (!extraction?.understood) {
-      replyText = "Sorry, I need both the full legal name and the official registered address together. Could you send them again?";
-    } else {
+    const legalName = extraction?.organizer_legal_name || contract.organizer_legal_name || null;
+    const address = extraction?.organizer_registered_address || contract.organizer_registered_address || null;
+
+    if (extraction?.organizer_legal_name || extraction?.organizer_registered_address) {
       await sbPatch(`contracts?id=eq.${contract.id}`, {
-        organizer_legal_name: extraction.organizer_legal_name,
-        organizer_registered_address: extraction.organizer_registered_address,
+        ...(extraction.organizer_legal_name ? { organizer_legal_name: legalName } : {}),
+        ...(extraction.organizer_registered_address ? { organizer_registered_address: address } : {}),
       });
+    }
+
+    if (legalName && address) {
       await helpers.httpRequest({
         method: 'POST',
         url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
@@ -592,6 +603,12 @@ if (!booking) {
         timeout: 15000,
       });
       replyText = "Thank you. Passing this to our lawyer to draft the contract now.";
+    } else if (!legalName && !address) {
+      replyText = "Sorry, I couldn't catch that. Could you send your organization's full legal name and its official registered address?";
+    } else if (!legalName) {
+      replyText = "Got the address, thanks. Still need your organization's full legal name.";
+    } else {
+      replyText = "Got the name, thanks. Still need your organization's official registered address.";
     }
   }
   // If there's no contract row yet, or it's already fully collected, nothing to ask --
