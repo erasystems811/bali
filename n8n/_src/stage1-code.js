@@ -591,7 +591,7 @@ if (!booking) {
     }
   } else if (contract && !contract.organizer_registered_address) {
     const extraction = await askOpenAIJson(
-      'The venue asked a client for their organization\'s official registered address. Does this WhatsApp message actually state one? A street address alone is an acceptable minimum (city/state/country aren\'t required), but if they give more than that (city, state, etc.) include all of it, don\'t trim it down to just the street. Labels like "address:" are fine either way. Reply ONLY with JSON: {"organizer_registered_address": "..." or null}.',
+      'The venue asked a client for their organization\'s official registered address. Does this WhatsApp message actually state one? Accept any real address detail, in any combination: street, city, state, and/or country -- none of these are individually required, and none should be dropped if given. Just the street alone is fine, just the state and country alone is fine, a full combination is fine -- always keep every part they actually provide, exactly as given, never trim it down. Labels like "address:" are fine either way. Reply ONLY with JSON: {"organizer_registered_address": "..." or null}.',
       effectiveText || ''
     );
     if (extraction?.organizer_registered_address) {
