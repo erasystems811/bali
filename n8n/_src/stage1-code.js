@@ -172,12 +172,19 @@ async function getPastBookings(contactId, excludeBookingId) {
 // 7 days after the event date, a booking's chat stops staying permanently
 // connected to the PM and falls back to the normal automated flow -- see
 // the comment on bookings.connected_to_pm_at in schema.sql. No event_date
-// yet means it can't have happened, so never past cutoff.
+// yet means it can't have happened, so never past cutoff. Exception: if the
+// PM manually reached back out after that cutoff already passed (see the
+// "X: message" convenience path in pm-toggle-code.js, which only refreshes
+// connected_to_pm_at when the booking wasn't already connected or was past
+// cutoff), that explicit action wins over the passive auto-expiry until the
+// PM closes it again.
 function isPastConnectionCutoff(booking) {
   if (!booking.event_date) return false;
   const cutoff = new Date(`${booking.event_date}T00:00:00Z`);
   cutoff.setUTCDate(cutoff.getUTCDate() + 7);
-  return Date.now() >= cutoff.getTime();
+  if (Date.now() < cutoff.getTime()) return false;
+  if (booking.connected_to_pm_at && new Date(booking.connected_to_pm_at).getTime() >= cutoff.getTime()) return false;
+  return true;
 }
 
 // Same KB-lookup logic as kb-check-code.js's own inline check -- duplicated
@@ -321,6 +328,10 @@ const todayWeekday = today.toLocaleDateString('en-US', { weekday: 'long' });
 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
+function formatDateForCustomer(isoDate) {
+  return new Date(`${isoDate}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+}
+
 function resolveRelativeDate(rawText) {
   const text = (rawText || '').toLowerCase();
 
@@ -377,7 +388,11 @@ function resolveRelativeDate(rawText) {
   return null; // not a relative phrase we handle -- let the model's own reading stand
 }
 
-const GREETING = "Hey! 😊 Would you be interested in booking Bali for your event? Just let me know the date you're looking at and I'll check what's available.";
+const GREETING = "Hey! 😊 Would you be interested in booking Bali for your event? Let me know the date you're looking at and your name, and I'll check what's available.";
+
+function returningGreeting(firstName) {
+  return `Hey ${firstName}! 😊 Interested in booking Bali again? Let me know the date you're looking at and I'll check what's available.`;
+}
 
 // Descriptive phrase per field, used both in the extraction prompt's
 // "already confirmed" summary and as the ask_about labels fed to the
@@ -472,14 +487,20 @@ if (media_type === 'audio' && media_id) {
 }
 
 if (!booking) {
-  // First-ever message from this client: create the booking, send the scripted greeting.
+  // First-ever message from this client (or their only prior bookings were
+  // cancelled): create the booking, send the greeting. If we already have
+  // their name saved from a past conversation, greet them by it and skip
+  // asking again instead of using the generic first-timer script -- this is
+  // the one place in the whole flow the customer's name gets used, on
+  // purpose (see contact.name capture below): once per new conversation,
+  // never repeated mid-conversation.
   const created = await sbRequest('POST', 'bookings', {
     client_contact_id: contact.id,
     status: 'inquiry',
     mode: 'bot-led',
   }, { Prefer: 'return=representation' });
   booking = created[0];
-  replyText = GREETING;
+  replyText = contact.name ? returningGreeting(contact.name.split(' ')[0]) : GREETING;
 } else if (booking.status === 'sent_to_client' && input.media_type === 'document') {
   // Stage 4 signature detection: client sent back a PDF while we're waiting on the
   // signed contract. No e-signature tool for v1 -- ask the PM to confirm receipt/validity.
@@ -692,9 +713,9 @@ ${transcript}
 
 Client's latest message: "${effectiveText || ''}"
 
-Extract EVERY still-needed field this message provides, not just the one you were "expecting" next -- e.g. "birthday party for my sister" gives you both event_type ("birthday party") AND enough for event_name ("Sister's Birthday Party"), extract both in the same pass rather than leaving event_type blank because event_name came first in priority order. Resolve relative dates ("next Friday", "this weekend", a bare day name) against today's date. If the message is instead (or also) a genuine question or comment not covered by the fields above (pricing, parking, capacity, "what dates are open", small talk, etc.), note it as off_topic -- something the venue needs to actually answer, not guess at.
+Extract EVERY still-needed field this message provides, not just the one you were "expecting" next -- e.g. "birthday party for my sister" gives you both event_type ("birthday party") AND enough for event_name ("Sister's Birthday Party"), extract both in the same pass rather than leaving event_type blank because event_name came first in priority order. Resolve relative dates ("next Friday", "this weekend", a bare day name) against today's date. If an event_date is extracted, also report event_date_year_stated: true only if the client's message explicitly included a year (e.g. "24th July 2027"), false if they only gave a day/month ("24th july", "next friday") -- this matters, don't guess. If the message is instead (or also) a genuine question or comment not covered by the fields above (pricing, parking, capacity, "what dates are open", small talk, etc.), note it as off_topic -- something the venue needs to actually answer, not guess at. Separately, if the client is stating or correcting their own name (e.g. "I'm Chidera", "my name is X", "it's actually X not Y"), extract it as customer_name -- never guess a name from anything else they say.
 
-Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?: "...", "event_name"?: "...", "is_existing_client"?: true/false, "client_reference"?: "..."}, "off_topic": "..." or null}`,
+Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?: "...", "event_name"?: "...", "is_existing_client"?: true/false, "client_reference"?: "..."}, "event_date_year_stated"?: true/false, "off_topic": "..." or null, "customer_name": "..." or null}`,
     effectiveText || ''
   );
 
@@ -706,12 +727,58 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
     }
   }
 
+  // Customer name: captured (or corrected) whenever they state it, regardless
+  // of what stage of intake they're at -- saved straight to the contact
+  // record, never displayed back mid-conversation (see returningGreeting,
+  // the only place it's actually used).
+  if (extraction?.customer_name && extraction.customer_name !== contact.name) {
+    await sbPatch(`contacts?id=eq.${contact.id}`, { name: extraction.customer_name });
+    contact.name = extraction.customer_name;
+  }
+
   // The model's own date arithmetic isn't trustworthy (verified: it got a
   // relative date wrong even with today's date given) -- deterministic parsing
   // wins whenever the message matches a pattern it understands.
   if (missingBefore.includes('event_date')) {
     const resolved = resolveRelativeDate(effectiveText);
     if (resolved) patch.event_date = resolved;
+  }
+
+  // If we're waiting on "did you mean [year]?" from a past date rejected on
+  // an earlier turn, resolve it before running today's past-date check -- a
+  // plain "yes" confirms the suggested date (already future, skips the check
+  // below entirely); anything else supersedes it and today's own patch
+  // (from extraction/resolveRelativeDate above) is used as normal.
+  const openDateConfirm = (await sbRequest(
+    'GET',
+    `pending_questions?booking_id=eq.${booking.id}&field_name=eq.event_date_year_confirm&resolved_at=is.null&select=*`
+  ))[0];
+  if (openDateConfirm) {
+    await sbPatch(`pending_questions?id=eq.${openDateConfirm.id}`, { resolved_at: new Date().toISOString() });
+    if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|correct)\b/i.test((effectiveText || '').trim())) {
+      patch.event_date = openDateConfirm.question_text;
+    }
+  }
+
+  // A date given without an explicit year can resolve to something already
+  // in the past (e.g. "24th july" read literally once that day's already
+  // gone by this year) -- never save that silently. Ask instead of guessing
+  // which year they meant; if they DID give a year and it's still in the
+  // past, don't presume a year-shift either, just ask for a different date.
+  let datePast = false;
+  let datePastSuggestion = null;
+  if (patch.event_date && patch.event_date < todayStr) {
+    datePast = true;
+    if (extraction?.event_date_year_stated === false) {
+      const [y, m, d] = patch.event_date.split('-').map(Number);
+      datePastSuggestion = `${y + 1}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      await sbRequest('POST', 'pending_questions', {
+        booking_id: booking.id,
+        field_name: 'event_date_year_confirm',
+        question_text: datePastSuggestion,
+      });
+    }
+    delete patch.event_date;
   }
 
   // The date is the one field with a real business rule -- never trust the
@@ -770,7 +837,13 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
   const stepLabels = stepFields.map((f) => FIELD_LABELS[f]);
   const isTypeNameStep = stepFields.length === 2 && stepFields.includes('event_type') && stepFields.includes('event_name');
 
-  if (isTypeNameStep) {
+  if (datePast) {
+    // Fixed reply, no LLM call -- exact wording matters here, and this
+    // shouldn't wait on a model call to tell the client their date's gone.
+    replyText = datePastSuggestion
+      ? `That date has passed. Did you mean ${formatDateForCustomer(datePastSuggestion)}?`
+      : "That date has already passed. Could you give me a different date?";
+  } else if (isTypeNameStep) {
     // Fixed question, no LLM call -- see the comment on TYPE_NAME_QUESTION.
     const leadIn = dateConfirmed ? pick(DATE_CONFIRMED_LEAD_INS) : (kbPending ? "Let me check on that for you." : null);
     replyText = leadIn ? `${leadIn} ${TYPE_NAME_QUESTION}` : TYPE_NAME_QUESTION;

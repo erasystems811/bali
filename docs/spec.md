@@ -16,8 +16,8 @@
 
 ## 2. Stage 1 — Contact & Availability
 
-1. Bot greets, asks for **date**.
-2. If date is unavailable → bot suggests the nearest free date, or asks if the client has an alternative date in mind.
+1. Bot greets, asks for **date** and the client's **name** in the same message. Name is saved to their contact record and only ever used again to greet them personally at the start of a future new conversation — never repeated mid-conversation. Client can correct it any time by just stating it again.
+2. If date is unavailable → bot suggests the nearest free date, or asks if the client has an alternative date in mind. If the date given has no year and has already passed this year, bot does not save it — it tells the client the date's passed and asks if they meant next year (or, if they did give a year and it's still in the past, just asks for a different date).
 3. Bot asks for **event name** (early — this becomes the human-readable reference used in every internal message going forward; can be updated later if it changes).
 4. Bot asks for **event type**.
 5. Bot asks if this is a **new or existing client**.

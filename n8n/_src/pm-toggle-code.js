@@ -488,10 +488,24 @@ function stripLeadingEventName(text, eventName) {
   return null;
 }
 
+// Same rule as stage1-code.js's isPastConnectionCutoff (duplicated per this
+// codebase's existing per-file helper convention -- see e.g. sandboxLog):
+// 7 days after the event, a booking stops staying connected to the PM,
+// UNLESS he's manually reached back out since (connected_to_pm_at refreshed
+// at/after the cutoff) -- that explicit action wins until he closes it again.
+function isPastConnectionCutoff(booking) {
+  if (!booking.event_date) return false;
+  const cutoff = new Date(`${booking.event_date}T00:00:00Z`);
+  cutoff.setUTCDate(cutoff.getUTCDate() + 7);
+  if (Date.now() < cutoff.getTime()) return false;
+  if (booking.connected_to_pm_at && new Date(booking.connected_to_pm_at).getTime() >= cutoff.getTime()) return false;
+  return true;
+}
+
 async function findLeadingEventMatch(text) {
   const candidates = await sbRequest(
     'GET',
-    'bookings?status=neq.cancelled&event_name=not.is.null&select=id,event_name,client_contact_id,connected_to_pm_at'
+    'bookings?status=neq.cancelled&event_name=not.is.null&select=id,event_name,client_contact_id,connected_to_pm_at,event_date'
   );
   // Longest event name first, so "Mad Party 2" is tried before "Mad Party".
   candidates.sort((a, b) => (b.event_name || '').length - (a.event_name || '').length);
@@ -529,9 +543,13 @@ if (leadingMatch) {
   if (leadingMatch.rest.trim()) {
     // A plain message to a not-yet-connected booking counts as the PM
     // engaging with it directly -- connect it as a side effect, same as
-    // "open", so future client messages keep relaying to him too.
-    if (!booking.connected_to_pm_at) {
+    // "open", so future client messages keep relaying to him too. Also
+    // covers a booking that's simply aged past the 7-day cutoff (still
+    // has an old connected_to_pm_at, so not "falsy") -- refresh it the same
+    // way, and tell him it's back open, same as the explicit "open" command.
+    if (!booking.connected_to_pm_at || isPastConnectionCutoff(booking)) {
       await sbPatch(`bookings?id=eq.${booking.id}`, { connected_to_pm_at: new Date().toISOString() });
+      await sendWhatsApp(from_number, `Opened "${booking.event_name}". I'll relay everything straight through until you say "${booking.event_name}: close".`);
     }
 
     const client = (await sbRequest('GET', `contacts?id=eq.${booking.client_contact_id}&select=*`))[0];
