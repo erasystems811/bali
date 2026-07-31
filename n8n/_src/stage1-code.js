@@ -159,6 +159,30 @@ async function sendWhatsApp(toNumber, text) {
   }
 }
 
+// Forwards a customer-sent image/document to someone else (e.g. proof of
+// payment to the PM) by reusing the same media id Meta already has -- no
+// re-upload needed, matching sendWhatsAppDocument's pattern in
+// stage3-4-action-code.js (used the same way for contract drafts). No window/
+// template fallback here, same as that one: media sends don't have a
+// template equivalent to fall back to.
+async function sendWhatsAppMedia(toNumber, mediaType, mediaId, caption) {
+  if (SANDBOX) return sandboxLog(toNumber, `[${mediaType}]${caption ? ' ' + caption : ''}`, mediaType);
+  const res = await helpers.httpRequest({
+    method: 'POST',
+    url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
+    headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
+    body: {
+      messaging_product: 'whatsapp',
+      to: toNumber,
+      type: mediaType,
+      [mediaType]: { id: mediaId, caption },
+    },
+    json: true,
+    timeout: 20000,
+  });
+  return res?.messages?.[0]?.id || null;
+}
+
 // Real booking history for this contact (signed/onboarded only -- not just
 // self-reported) so "returning client" means something verified, not just
 // whatever the client happened to claim.
@@ -520,13 +544,16 @@ if (!booking) {
   }
   return [{ json: { action: 'signature_pending_pm_confirmation', booking_id: booking.id } }];
 } else if (booking.status === 'invoiced' && (input.media_type === 'image' || input.media_type === 'document')) {
-  // Stage 3: client sent proof of payment -- forward to PM to confirm receipt.
+  // Stage 3: client sent proof of payment -- forward the actual receipt to
+  // the PM (reusing Meta's media id directly, no re-upload needed) so he can
+  // actually see it before confirming, not just be told one arrived.
   logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: '[proof of payment received]', media_url: input.media_id, stage: booking.status });
   await sbRequest('POST', 'conversations', logs);
   const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
   const pm = pmRows[0];
   if (pm) {
-    const questionText = `"${booking.event_name}": client sent proof of payment. Confirm receipt? Reply yes or no.`;
+    await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `"${booking.event_name}" -- proof of payment`);
+    const questionText = `"${booking.event_name}": client sent proof of payment (above). Confirm receipt? Reply yes or no.`;
     const pendingRows = await sbRequest('POST', 'pending_questions', {
       booking_id: booking.id,
       field_name: 'payment_confirmed',
