@@ -289,7 +289,7 @@ async function notifyPmOfCompletedIntake(booking) {
     const transcriptLines = history.length > 0
       ? [`Conversation so far for ${booking.event_name}`, ...history.map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`)]
       : [];
-    await sendWhatsApp(pm.phone_number, [
+    const notifyText = [
       ...summaryLines,
       '',
       ...transcriptLines,
@@ -301,7 +301,12 @@ async function notifyPmOfCompletedIntake(booking) {
       `- Once you've agreed a price, say something like generate invoice for ${booking.event_name} and I'll send it out.`,
       `- ${booking.event_name}: close ends that conversation and hands the customer back to me.`,
       `- ${booking.event_name}: open reconnects it.`,
-    ].join('\n'));
+    ].join('\n');
+    await sendWhatsApp(pm.phone_number, notifyText);
+    // Was never logged to conversations at all -- invisible in the dashboard
+    // even though it genuinely sent, since the dashboard only ever reads
+    // from this table. Confirmed live 2026-08-01.
+    await sbRequest('POST', 'conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: notifyText, stage: 'pm_intake_notification' }]);
     return;
   }
 
@@ -309,13 +314,15 @@ async function notifyPmOfCompletedIntake(booking) {
   // to juggle a manual "open" command he can't act on yet anyway.
   const queued = await sbRequest('GET', 'bookings?status=eq.negotiating&mode=eq.bot-led&select=id');
   const aheadCount = Math.max(queued.length - 1, 0); // this booking is included in queued
-  await sendWhatsApp(pm.phone_number, [
+  const queuedNotifyText = [
     ...summaryLines,
     '',
     aheadCount === 0
       ? "You're still with another client. I'll bring this one up automatically as soon as you type close."
       : `Queued behind ${aheadCount} other${aheadCount === 1 ? '' : 's'}. I'll bring it up automatically once it's next.`,
-  ].join('\n'));
+  ].join('\n');
+  await sendWhatsApp(pm.phone_number, queuedNotifyText);
+  await sbRequest('POST', 'conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: queuedNotifyText, stage: 'pm_intake_notification' }]);
 }
 
 // Voice notes arrive as WhatsApp "audio" media -- download via Meta's media API
