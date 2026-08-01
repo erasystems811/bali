@@ -536,7 +536,7 @@ Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}
   }
 
   // Safety net for the manual "invoice [event]" command, which can trigger
-  // this without the booking ever having gone through openBookingForPm --
+  // this on a booking that was never actually connected to the PM yet --
   // connected_to_pm_at (see schema.sql) needs to be set regardless, or the
   // client's subsequent messages would fall through to the pre-connection
   // automated flow instead of staying connected to the PM.

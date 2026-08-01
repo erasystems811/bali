@@ -177,39 +177,16 @@ async function findContactByPhone(phone) {
   return rows[0] || null;
 }
 
-async function findPmLedBooking() {
-  const rows = await sbRequest('GET', 'bookings?mode=eq.pm-led&limit=1&select=*');
-  return rows[0] || null;
-}
-
-// Shared by the manual "open [event name]" command and the auto-advance that
-// fires on "close" -- opening a booking always means the same thing: flip
-// the lock, show what's already been discussed, and tell the PM it's live.
-async function openBookingForPm(booking, fromNumber, { auto } = {}) {
-  // connected_to_pm_at is set once and never cleared -- see the comment on
-  // that column in schema.sql. It's what keeps the client's messages
-  // relaying straight to the PM even after "close" flips mode back to
-  // 'bot-led' for the FIFO negotiation lock (e.g. once this booking moves
-  // on to invoicing).
-  await sbPatch(`bookings?id=eq.${booking.id}`, { mode: 'pm-led', connected_to_pm_at: new Date().toISOString() });
-
-  const history = await sbRequest('GET', `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text`);
-  if (history.length > 0) {
-    const transcript = history.map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`).join('\n');
-    await sendWhatsApp(fromNumber, `Conversation so far for ${booking.event_name}:\n${transcript}`);
-  }
-
-  const openedLine = auto
-    ? `Next up: ${booking.event_name}.`
-    : `Opened ${booking.event_name}.`;
-  const tipLines = [
-    'Note:',
-    `- Swipe-reply to their message to answer them directly -- no need to type the event name. Only start with "${booking.event_name}: " if you're messaging them first (nothing to swipe-reply to); otherwise it stays between just us and will NOT reach them.`,
-    `- Once you've agreed a price, say something like "generate invoice for ${booking.event_name}" and I'll send it out.`,
-    `- "${booking.event_name}: close" ends that conversation and hands the customer back to me.`,
-    `- "${booking.event_name}: open" reconnects it.`,
-  ].join('\n');
-  await sendWhatsApp(fromNumber, `${openedLine}\n\n${tipLines}`);
+// Whichever booking this fallback exchange is actually about, when the PM
+// didn't swipe-reply or use an "[event]: " prefix -- there's no single
+// "currently open" booking any more (every connected booking stays
+// connected simultaneously, see notifyPmOfCompletedIntake), so "current"
+// just means whichever one this same fallback chat was most recently
+// logged against.
+async function findRecentSubjectBooking() {
+  const lastChat = await sbRequest('GET', `conversations?stage=eq.pm_fallback_chat&order=created_at.desc&limit=1&select=booking_id`);
+  if (!lastChat[0]) return null;
+  return (await sbRequest('GET', `bookings?id=eq.${lastChat[0].booking_id}&select=*`))[0] || null;
 }
 
 async function findOpenPendingQuestions() {
@@ -356,25 +333,6 @@ if (invoiceMatch) {
   return [{ json: { action: 'invoice_command_triggered', booking_id: matches[0].id } }];
 }
 
-// --- Command: "open [event name]" -------------------------------------------------
-const openMatch = trimmed.match(/^open\s+(.+)$/i);
-if (openMatch) {
-  const eventName = openMatch[1].trim();
-  const alreadyOpen = await findPmLedBooking();
-  if (alreadyOpen) {
-    await sendWhatsApp(from_number, `You've still got ${alreadyOpen.event_name} open. Type close first before opening another one.`);
-    return [{ json: { action: 'open_blocked', open_booking: alreadyOpen.id } }];
-  }
-  const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(eventName)}*&status=neq.cancelled&select=*`);
-  if (matches.length === 0) {
-    await sendWhatsApp(from_number, `Couldn't find a booking called ${eventName}. Check the spelling?`);
-    return [{ json: { action: 'open_not_found', query: eventName } }];
-  }
-  const booking = matches[0];
-  await openBookingForPm(booking, from_number);
-  return [{ json: { action: 'opened', booking_id: booking.id } }];
-}
-
 // --- Command: rename the event's name -- natural-language, not a fixed
 // phrase. Classified by the model rather than matched by a rigid regex, since
 // the PM shouldn't have to remember an exact "rename X to Y" pattern -- any
@@ -400,12 +358,12 @@ if (renameIntent?.is_rename && renameIntent.new_name) {
     }
     booking = matches[0];
   } else {
-    // No old name given -- assume whichever booking is currently open with a
-    // client (the one thing being actively discussed), same "current"
-    // resolution used elsewhere (e.g. the free-form fallback reply below).
-    booking = await findPmLedBooking();
+    // No old name given -- assume whichever booking this chat was most
+    // recently about, same "current" resolution used elsewhere (e.g. the
+    // free-form fallback reply below).
+    booking = await findRecentSubjectBooking();
     if (!booking) {
-      await sendWhatsApp(from_number, 'Which event? Nothing\'s currently open, so give me the current name too, e.g. "rename Mad Party to Soundwave 2".');
+      await sendWhatsApp(from_number, 'Which event? Give me the current name too, e.g. "rename Mad Party to Soundwave 2".');
       return [{ json: { action: 'rename_no_target' } }];
     }
   }
@@ -413,43 +371,6 @@ if (renameIntent?.is_rename && renameIntent.new_name) {
   await sbPatch(`bookings?id=eq.${booking.id}`, { event_name: renameIntent.new_name });
   await sendWhatsApp(from_number, `Renamed "${oldName}" to "${renameIntent.new_name}".`);
   return [{ json: { action: 'renamed', booking_id: booking.id, old_name: oldName, new_name: renameIntent.new_name } }];
-}
-
-// --- Command: "close" --------------------------------------------------------------
-if (trimmed.toLowerCase() === 'close') {
-  const open = await findPmLedBooking();
-  if (!open) {
-    await sendWhatsApp(from_number, "Nothing's open right now.");
-    return [{ json: { action: 'close_noop' } }];
-  }
-  await sbPatch(`bookings?id=eq.${open.id}`, { mode: 'bot-led' });
-  await sendWhatsApp(from_number, `Closed ${open.event_name}. Back to automated.`);
-
-  // Closing a still-negotiating booking is taken as "price agreed" -- kicks off Stage 3.
-  // If that's wrong (PM just stepping away mid-negotiation), re-open with "open [event name]"
-  // -- nothing below has moved the booking past 'negotiating' yet.
-  if (open.status === 'negotiating') {
-    await helpers.httpRequest({
-      method: 'POST',
-      url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
-      headers: { 'Content-Type': 'application/json' },
-      body: { action: 'draft_invoice', booking_id: open.id },
-      json: true,
-      timeout: 15000,
-    });
-  }
-
-  // FIFO auto-advance: whoever's been waiting longest opens automatically,
-  // no need for the PM to know their name or type "open" himself.
-  const nextInQueue = await sbRequest(
-    'GET',
-    'bookings?status=eq.negotiating&mode=eq.bot-led&order=negotiation_queued_at.asc&limit=1&select=*'
-  );
-  if (nextInQueue.length > 0) {
-    await openBookingForPm(nextInQueue[0], from_number, { auto: true });
-  }
-
-  return [{ json: { action: 'closed', booking_id: open.id, next_booking_id: nextInQueue[0]?.id || null } }];
 }
 
 // --- Swipe-reply resolution -- the PRIMARY way the PM replies to a client.
@@ -592,10 +513,9 @@ if (leadingMatch) {
   const { booking } = leadingMatch;
   const suffix = leadingMatch.rest.trim().toLowerCase();
 
-  // Per-event close/open -- separate from the bare "close" command below,
-  // which only ever affects whichever single booking is currently live-
-  // negotiating (mode='pm-led'). This one can disconnect or reconnect any
-  // booking by name, regardless of its status or the negotiation lock.
+  // Per-event close/open -- explicitly disconnects or reconnects one
+  // specific booking by name. Every other connected booking is unaffected
+  // (no single-slot lock any more).
   if (suffix === 'close') {
     if (!booking.connected_to_pm_at) {
       await sendWhatsApp(from_number, `${booking.event_name} isn't connected right now.`);
@@ -709,24 +629,10 @@ if (!target) {
   // be an operational system, so just let the model actually answer the
   // question or help with the task, and be honest about what it can't do
   // yet, rather than routing through fixed template text.
-  const pmLed = await findPmLedBooking();
-
-  // Which booking this whole fallback exchange is actually about. Usually
-  // whichever one is currently open -- but the PM confirming "close" (see
-  // below) clears that, so a FOLLOW-UP confirmation ("yes i do" to a
-  // "reopen it?" question) needs to still resolve to the same booking even
-  // though it's no longer pmLed by then. Falls back to whichever booking
-  // this fallback chat was most recently logged against.
-  let subjectBooking = pmLed;
-  if (!subjectBooking) {
-    const lastChat = await sbRequest(
-      'GET',
-      `conversations?stage=eq.pm_fallback_chat&order=created_at.desc&limit=1&select=booking_id`
-    );
-    if (lastChat[0]) {
-      subjectBooking = (await sbRequest('GET', `bookings?id=eq.${lastChat[0].booking_id}&select=*`))[0] || null;
-    }
-  }
+  // Which booking this whole fallback exchange is actually about --
+  // whichever one this same fallback chat was most recently logged against
+  // (no single "currently open" booking any more, see findRecentSubjectBooking).
+  const subjectBooking = await findRecentSubjectBooking();
 
   // Real bug, reported live: this fallback used to be a single stateless
   // completion with zero memory of its OWN previous turn -- so when the bot
@@ -824,13 +730,13 @@ if (!target) {
   const reply = await askOpenAIText(
     `You are Bali, an event venue's own WhatsApp operational assistant. You're talking directly with venue staff (the PM) here, no client is on this thread, and nothing you say here is ever sent to a client. Your job is to actually get things done for him, run errands, take action, and answer questions, effectively, not make him work to get a straight answer. Answer his question or act on what he's asking using anything below that's relevant. If the recent back-and-forth below shows you just asked him something, treat his new message as answering that, not as a brand-new unrelated request.
 
-What you can actually do today: manage one client negotiation at a time (open an event name, or close), generate invoices, correct a draft invoice's amounts, items, or terms even without swiping to reply to it, rename an event, and relay a message to a specific client only when a message starts with the event name followed by a colon. Reaching a client always requires that exact prefix, if he seems to want something sent to a client, say so and tell him to prefix it with the event name.
+What you can actually do today: every connected client stays connected at once (no need to open or close one before working another), generate invoices, correct a draft invoice's amounts, items, or terms even without swiping to reply to it, rename an event, and relay a message to a specific client either by swipe-replying to something they sent, or by starting a message with the event name followed by a colon. Reaching a client always requires one of those two, if he seems to want something sent to a client, say so and tell him how.
 
 For anything else, messaging other staff, pulling reports, other operational tasks, you don't have that built yet. If asked for something like that, say plainly that you can't do it yet rather than pretending to. Keep your reply short, natural, and professional, no filler, no fake enthusiasm.
 
 Pending items waiting on him right now (only mention or list these if he explicitly asks what's pending, what's outstanding, or similar, never bring them up on your own, and never let them stop you from just handling whatever he actually said this message): ${pendingSummary || 'none'}
 
-${pmLed ? `Currently open with a client: ${pmLed.event_name}.` : 'Nothing currently open with a client.'}${recentTranscript ? `\n\nYour recent back-and-forth with the PM about this:\n${recentTranscript}` : ''}`,
+${subjectBooking ? `What this conversation with him has most recently been about: ${subjectBooking.event_name}.` : ''}${recentTranscript ? `\n\nYour recent back-and-forth with the PM about this:\n${recentTranscript}` : ''}`,
     text || ''
   ) || "Sorry, I couldn't process that, try rephrasing?";
   await sendWhatsApp(from_number, reply);
@@ -874,12 +780,7 @@ if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
 if (target.field_name === 'contract_confirmed') {
   const saysYes = /^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test(answerText.trim());
   if (saysYes) {
-    // Release the negotiation lock (mode) along with the status flip -- once
-    // signed, this booking moves to the always-on planning relay instead of
-    // the single-slot "open"/"close" negotiation toggle, so the slot should
-    // free up immediately rather than staying occupied until someone
-    // remembers to "close" it.
-    await sbPatch(`bookings?id=eq.${target.booking_id}`, { status: 'signed', mode: 'bot-led' });
+    await sbPatch(`bookings?id=eq.${target.booking_id}`, { status: 'signed' });
     await sendWhatsApp(from_number, "Marked as signed. Fanning out to departments now.");
   } else {
     await sendWhatsApp(from_number, "Got it, not confirmed. Ask the client to resend a valid signed copy.");

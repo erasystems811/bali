@@ -240,13 +240,13 @@ async function checkKnowledgeBase(text) {
   return result || { found: false };
 }
 
-// Intake just finished. Negotiation is a one-at-a-time, single-slot
-// conversation (bookings.mode = 'pm-led', DB-enforced to at most one row) --
-// if the PM is free, take this straight to the front and open it
-// automatically, no reason to make him type "open X" for the only thing
-// waiting. If he's already mid-negotiation with someone else, this joins
-// the FIFO queue instead (ordered by negotiation_queued_at) and opens
-// itself automatically the moment he types "close" -- see pm-toggle-code.js.
+// Intake just finished. No single-slot/FIFO lock any more -- every booking
+// connects to the PM immediately, all at once, regardless of how many
+// others are already connected. He never needs to "open"/"close" one before
+// working another; each customer's messages carry their own event-name
+// prefix and each forwarded message is individually swipe-repliable, so
+// distinguishing between simultaneous conversations doesn't need a
+// single-active-booking concept at all. See pm-toggle-code.js.
 async function notifyPmOfCompletedIntake(booking) {
   const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
   const pm = pmRows[0];
@@ -276,53 +276,40 @@ async function notifyPmOfCompletedIntake(booking) {
     ...(historyLine ? [`- ${historyLine}`] : []),
   ];
 
-  const activeRows = await sbRequest('GET', 'bookings?mode=eq.pm-led&limit=1&select=id');
-  if (activeRows.length === 0) {
-    // Nobody's open right now -- take this straight to the front.
-    // connected_to_pm_at is set once and never cleared -- see the comment on
-    // that column in schema.sql.
-    await sbPatch(`bookings?id=eq.${booking.id}`, { mode: 'pm-led', connected_to_pm_at: new Date().toISOString() });
-    const history = await sbRequest(
-      'GET',
-      `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text`
-    );
-    const transcriptLines = history.length > 0
-      ? [`Conversation so far for ${booking.event_name}`, ...history.map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`)]
-      : [];
-    const notifyText = [
-      ...summaryLines,
-      '',
-      ...transcriptLines,
-      ...(transcriptLines.length > 0 ? [''] : []),
-      `Opened ${booking.event_name}.`,
-      '',
-      'Note:',
-      `- Swipe-reply to their message to answer them directly, no need to type the event name. Only start with "${booking.event_name}: " if you're messaging them first since there's nothing to swipe-reply to, otherwise it stays between just us and won't reach them.`,
-      `- Once you've agreed a price, say something like generate invoice for ${booking.event_name} and I'll send it out.`,
-      `- ${booking.event_name}: close ends that conversation and hands the customer back to me.`,
-      `- ${booking.event_name}: open reconnects it.`,
-    ].join('\n');
-    await sendWhatsApp(pm.phone_number, notifyText);
-    // Was never logged to conversations at all -- invisible in the dashboard
-    // even though it genuinely sent, since the dashboard only ever reads
-    // from this table. Confirmed live 2026-08-01.
-    await sbRequest('POST', 'conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: notifyText, stage: 'pm_intake_notification' }]);
-    return;
-  }
-
-  // Someone else is already open -- join the queue instead of asking the PM
-  // to juggle a manual "open" command he can't act on yet anyway.
-  const queued = await sbRequest('GET', 'bookings?status=eq.negotiating&mode=eq.bot-led&select=id');
-  const aheadCount = Math.max(queued.length - 1, 0); // this booking is included in queued
-  const queuedNotifyText = [
+  // connected_to_pm_at is set once and never cleared -- see the comment on
+  // that column in schema.sql.
+  await sbPatch(`bookings?id=eq.${booking.id}`, { connected_to_pm_at: new Date().toISOString() });
+  const history = await sbRequest(
+    'GET',
+    `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text`
+  );
+  // This transcript dump only ever happens here, once, the first time a
+  // booking reaches the PM -- every message after this point is relayed
+  // live as it happens (the connected-relay branch below), so there's
+  // never anything to "catch up on" again later.
+  const transcriptLines = history.length > 0
+    ? [`Conversation so far for ${booking.event_name}`, ...history.map((m) => `${m.direction === 'inbound' ? 'Client' : 'Bali'}: ${m.message_text}`)]
+    : [];
+  const notifyText = [
     ...summaryLines,
     '',
-    aheadCount === 0
-      ? "You're still with another client. I'll bring this one up automatically as soon as you type close."
-      : `Queued behind ${aheadCount} other${aheadCount === 1 ? '' : 's'}. I'll bring it up automatically once it's next.`,
+    ...transcriptLines,
+    ...(transcriptLines.length > 0 ? [''] : []),
+    `Connected ${booking.event_name}.`,
+    '',
+    'Note:',
+    `- Swipe-reply to this message (or to anything from them) to answer them directly, no need to type the event name. Only start with "${booking.event_name}: " if you're messaging them first since there's nothing to swipe-reply to, otherwise it stays between just us and won't reach them.`,
+    `- Once you've agreed a price, say something like generate invoice for ${booking.event_name} and I'll send it out.`,
+    `- ${booking.event_name}: close ends that conversation and hands the customer back to me.`,
+    `- ${booking.event_name}: open reconnects it.`,
   ].join('\n');
-  await sendWhatsApp(pm.phone_number, queuedNotifyText);
-  await sbRequest('POST', 'conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: queuedNotifyText, stage: 'pm_intake_notification' }]);
+  const msgId = await sendWhatsApp(pm.phone_number, notifyText);
+  // Logged with the same stage/whatsapp_message_id pattern as every other
+  // customer-message forward -- swipe-replying to THIS notification relays
+  // straight to the client, same rule as swipe-replying to anything else
+  // they sent. Was never logged to conversations at all before -- invisible
+  // in the dashboard even though it genuinely sent. Confirmed live 2026-08-01.
+  await sbRequest('POST', 'conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: notifyText, stage: 'connected_relay_to_pm', whatsapp_message_id: msgId || null }]);
 }
 
 // Voice notes arrive as WhatsApp "audio" media -- download via Meta's media API
@@ -673,12 +660,11 @@ if (!booking) {
   await sbRequest('POST', 'conversations', logs);
   return [{ json: { action: 'awaiting_contract_handled', booking_id: booking.id, replied: !!replyText } }];
 } else if (booking.status !== 'inquiry' && booking.connected_to_pm_at && !isPastConnectionCutoff(booking)) {
-  // Once the PM has opened this booking at least once, the chat stays
-  // connected to him -- through invoicing, contract, and the ongoing
-  // signed/onboarded relationship -- regardless of the FIFO "mode" toggle
-  // (which only governs the single-slot live-negotiation lock and flips
-  // back to 'bot-led' once "close" hands this booking off to invoicing).
-  // The one exception: if the bot has a confident knowledge-base answer, it
+  // Once this booking has connected to the PM at all, the chat stays
+  // connected -- through invoicing, contract, and the ongoing
+  // signed/onboarded relationship, alongside any number of other customers'
+  // conversations at the same time (no single-slot lock any more -- see
+  // notifyPmOfCompletedIntake). The one exception: if the bot has a confident knowledge-base answer, it
   // answers directly instead of bothering him. This connected period ends
   // 7 days after the event date (see isPastConnectionCutoff), after which
   // it falls through to the normal automated/KB-escalation flow below.
@@ -732,8 +718,7 @@ if (!booking) {
   await sbRequest('POST', 'conversations', logs);
   return [{ json: { action: 'connected_relay_handled', booking_id: booking.id } }];
 } else if (booking.status !== 'inquiry') {
-  // Never connected yet (still queued in the FIFO, PM hasn't opened it), or
-  // past the 7-day-post-event connection cutoff -- either way, back to the
+  // Never connected yet, or past the 7-day-post-event connection cutoff -- either way, back to the
   // normal automated flow. Going completely silent here reads as broken --
   // actually answer genuine questions via the knowledge base, and give a
   // warm, freshly-worded reassurance for anything else, instead of ignoring
@@ -932,7 +917,7 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
   );
   const justCompleted = missingAfter.length === 0 && booking.status === 'inquiry';
   if (justCompleted) {
-    await sbPatch(`bookings?id=eq.${booking.id}`, { status: 'negotiating', negotiation_queued_at: new Date().toISOString() });
+    await sbPatch(`bookings?id=eq.${booking.id}`, { status: 'negotiating' });
     booking.status = 'negotiating';
   }
 

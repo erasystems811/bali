@@ -28,10 +28,14 @@ create index contacts_role_idx on contacts (role);
 
 -- ---------------------------------------------------------------------------
 -- bookings
--- One row per event. status walks the pipeline in Section 9; mode drives
--- whether the bot or the PM is currently driving the client conversation.
--- One event per day: enforce via a unique index on event_date for booking
--- rows that aren't cancelled/lost, since Bali only hosts one event/day.
+-- One row per event. status walks the pipeline in Section 9. `mode` is a
+-- legacy leftover from the old single-slot "one live negotiation at a time"
+-- lock (removed 2026-08-01 -- every connected booking now relays to the PM
+-- simultaneously, see connected_to_pm_at below) and is no longer written
+-- meaningfully anywhere; kept only because dropping a column carries more
+-- migration risk than leaving an inert one. One event per day: enforce via
+-- a unique index on event_date for booking rows that aren't cancelled/lost,
+-- since Bali only hosts one event/day.
 -- ---------------------------------------------------------------------------
 create table bookings (
   id uuid primary key default gen_random_uuid(),
@@ -59,17 +63,16 @@ create table bookings (
   security_notes text, -- "vigilante" needs etc.
   day_of_checklist_sent_at timestamptz, -- Section 6: setup checklist to supervisor + facility manager
   last_lawyer_nudge_at timestamptz, -- Section 5: 24h nudge while awaiting_contract
-  -- Set when status becomes 'negotiating'. Drives the FIFO negotiation queue:
-  -- the oldest bot-led, still-negotiating booking is next up when the PM
-  -- closes whatever's currently open (see pm-toggle-code.js).
+  -- Legacy leftover from the removed FIFO negotiation queue -- no longer
+  -- written or read anywhere, see the `mode` comment above.
   negotiation_queued_at timestamptz,
-  -- Set once, the first time the PM opens this booking (mode -> 'pm-led'),
-  -- and never cleared -- unlike `mode`, which toggles back to 'bot-led' for
-  -- the FIFO negotiation-queue lock alone. From that point on, the client's
-  -- messages relay straight to the PM (bot only intercepts if it has a
-  -- confident knowledge-base answer) regardless of status or the current
-  -- mode toggle, until 7 days after event_date, when it reverts to the
-  -- normal automated/KB-escalation flow (see stage1-code.js).
+  -- Set once, the first time this booking connects to the PM (on intake
+  -- completion, see notifyPmOfCompletedIntake), and never cleared except by
+  -- an explicit "[event]: close" from the PM. From that point on, the
+  -- client's messages relay straight to the PM (bot only intercepts if it
+  -- has a confident knowledge-base answer), simultaneously alongside any
+  -- number of other connected bookings, until 7 days after event_date, when
+  -- it reverts to the normal automated/KB-escalation flow (see stage1-code.js).
   connected_to_pm_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -81,13 +84,6 @@ create unique index bookings_one_active_event_per_day
 
 create index bookings_status_idx on bookings (status);
 create index bookings_client_idx on bookings (client_contact_id);
-
--- Only one booking may be pm-led at a time (single-PM system for v1).
--- Enforced here as a DB-level backstop even though the primary enforcement
--- is in the n8n PM-toggle workflow.
-create unique index bookings_single_pm_led
-  on bookings (mode)
-  where mode = 'pm-led';
 
 -- ---------------------------------------------------------------------------
 -- conversations
