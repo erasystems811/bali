@@ -197,6 +197,7 @@
   <button id="toggleAdd" class="secondary">+ Add persona</button>
   <button id="undoBtn" class="secondary">Undo</button>
   <span class="sub" id="undoCount"></span>
+  <button id="syncBtn" class="secondary">Sync latest code</button>
   <button id="resetBtn" class="danger">Reset sandbox</button>
 </header>
 
@@ -412,6 +413,28 @@ document.getElementById('createPersona').addEventListener('click', async () => {
   document.getElementById('newName').value = '';
   await loadPersonas();
   await refreshUndoCount();
+});
+
+document.getElementById('syncBtn').addEventListener('click', async () => {
+  // sandbox-sync-trigger lives outside this page's own /sandbox/webhook/
+  // path (it's a plain internal HTTP listener on the droplet, not an n8n
+  // webhook), so this needs an absolute path -- the api() helper's relative
+  // fetch()/res.json() wouldn't reach it or parse its plain-text response.
+  const btn = document.getElementById('syncBtn');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Syncing…';
+  try {
+    const res = await fetch('/sandbox-sync-trigger', { method: 'POST' });
+    const text = (await res.text()).trim();
+    alert(text || (res.ok ? 'Synced.' : 'Sync failed.'));
+  } catch (e) {
+    alert('Sync failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
 });
 
 document.getElementById('resetBtn').addEventListener('click', async () => {
