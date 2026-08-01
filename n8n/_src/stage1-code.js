@@ -52,7 +52,7 @@ async function askOpenAIJson(systemPrompt, userText) {
       'Content-Type': 'application/json',
     },
     body: {
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: systemPrompt },
@@ -352,10 +352,11 @@ async function transcribeVoiceNote(mediaId) {
 }
 
 // Relative dates ("next Friday", "this weekend") need an anchor, but even with
-// one, gpt-4o-mini's own date arithmetic is unreliable (verified: it resolved
-// "friday next week" to a Tuesday). Resolve the common patterns deterministically
-// in code instead of trusting the model's arithmetic -- only fall back to the
-// model's answer for things actual date parsing can't help with (e.g. "August 4th").
+// one, an LLM's own date arithmetic isn't reliable enough to trust outright
+// (verified live with gpt-4o-mini: it resolved "friday next week" to a
+// Tuesday). Resolve the common patterns deterministically in code instead of
+// trusting the model's arithmetic -- only fall back to the model's answer for
+// things actual date parsing can't help with (e.g. "August 4th").
 const today = new Date();
 const todayStr = today.toISOString().slice(0, 10);
 const todayWeekday = today.toLocaleDateString('en-US', { weekday: 'long' });
@@ -821,9 +822,9 @@ ${transcript}
 
 Client's latest message: "${effectiveText || ''}"
 
-Extract EVERY still-needed field this message provides, not just the one you were "expecting" next -- e.g. "birthday party for my sister" gives you both event_type ("birthday party") AND enough for event_name ("Sister's Birthday Party"), extract both in the same pass rather than leaving event_type blank because event_name came first in priority order. Resolve relative dates ("next Friday", "this weekend", a bare day name) against today's date. If an event_date is extracted, also report event_date_year_stated: true only if the client's message explicitly included a year (e.g. "24th July 2027"), false if they only gave a day/month ("24th july", "next friday") -- this matters, don't guess. If the message is instead (or also) a genuine question or comment not covered by the fields above (pricing, parking, capacity, "what dates are open", small talk, etc.), note it as off_topic -- something the venue needs to actually answer, not guess at. Separately, if the client is stating or correcting their own name (e.g. "I'm Chidera", "my name is X", "it's actually X not Y"), extract it as customer_name -- never guess a name from anything else they say.
+Extract EVERY still-needed field this message provides, not just the one you were "expecting" next -- e.g. "birthday party for my sister" gives you both event_type ("birthday party") AND enough for event_name ("Sister's Birthday Party"), extract both in the same pass rather than leaving event_type blank because event_name came first in priority order. Resolve relative dates ("next Friday", "this weekend", a bare day name) against today's date; if an event_date is extracted from a bare day/month with no year (e.g. "24th july"), resolve it against the CURRENT year regardless of anything discussed earlier in the conversation -- never carry a year over from an earlier message or an earlier "did you mean [year]?" question. If the message is instead (or also) a genuine question or comment not covered by the fields above (pricing, parking, capacity, "what dates are open", small talk, etc.), note it as off_topic -- something the venue needs to actually answer, not guess at. Separately, if the client is stating or correcting their own name (e.g. "I'm Chidera", "my name is X", "it's actually X not Y"), extract it as customer_name -- never guess a name from anything else they say.
 
-Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?: "...", "event_name"?: "...", "is_existing_client"?: true/false, "client_reference"?: "..."}, "event_date_year_stated"?: true/false, "off_topic": "..." or null, "customer_name": "..." or null}`,
+Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?: "...", "event_name"?: "...", "is_existing_client"?: true/false, "client_reference"?: "..."}, "off_topic": "..." or null, "customer_name": "..." or null}`,
     effectiveText || ''
   );
 
@@ -833,6 +834,22 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
     if (extracted[f] !== undefined && extracted[f] !== null && extracted[f] !== '') {
       patch[f] = extracted[f];
     }
+  }
+
+  // The model's own event_date_year_stated claim isn't trustworthy either --
+  // verified live: with an earlier "did you mean [year]?" question still
+  // sitting in the transcript, it silently carried that year over onto a
+  // completely different date the client typed next, one that never stated
+  // a year at all, so the past-date check below never fired since the date
+  // it was checking already had the wrong (future) year baked in. Decide
+  // "did they actually state a year" deterministically from the raw message
+  // instead, and strip any year the model invented when they didn't --
+  // resolveRelativeDate's output is untouched by this since it never invents
+  // a year the client didn't imply, it always resolves against `today`.
+  const yearStatedInText = /\b(19|20)\d{2}\b/.test(effectiveText || '');
+  if (patch.event_date && !yearStatedInText) {
+    const [, m, d] = patch.event_date.split('-');
+    patch.event_date = `${today.getUTCFullYear()}-${m}-${d}`;
   }
 
   // Customer name: captured (or corrected) whenever they state it, regardless
@@ -877,7 +894,7 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
   let datePastSuggestion = null;
   if (patch.event_date && patch.event_date < todayStr) {
     datePast = true;
-    if (extraction?.event_date_year_stated === false) {
+    if (!yearStatedInText) {
       const [y, m, d] = patch.event_date.split('-').map(Number);
       datePastSuggestion = `${y + 1}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
       await sbRequest('POST', 'pending_questions', {

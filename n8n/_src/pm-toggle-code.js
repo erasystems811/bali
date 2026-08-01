@@ -131,7 +131,7 @@ async function openaiExtract(fieldPrompt, userText) {
     url: 'https://api.openai.com/v1/chat/completions',
     headers: { Authorization: `Bearer ${env.OPENAI_KEY}`, 'Content-Type': 'application/json' },
     body: {
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: fieldPrompt },
@@ -154,7 +154,7 @@ async function askOpenAIText(systemPrompt, userText) {
     url: 'https://api.openai.com/v1/chat/completions',
     headers: { Authorization: `Bearer ${env.OPENAI_KEY}`, 'Content-Type': 'application/json' },
     body: {
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userText || '' },
