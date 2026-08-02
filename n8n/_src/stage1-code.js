@@ -536,30 +536,33 @@ if (!booking) {
   }, { Prefer: 'return=representation' });
   booking = created[0];
   replyText = contact.name ? returningGreeting(contact.name.split(' ')[0]) : GREETING;
-} else if (booking.status === 'sent_to_client' && input.media_type === 'document') {
-  // Stage 4 signature detection: client sent back a PDF while we're waiting on the
-  // signed contract. No e-signature tool for v1 -- ask the PM to confirm receipt/validity.
-  logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: '[PDF received]', media_url: input.media_id, stage: booking.status });
+} else if (booking.status === 'sent_to_client' && (input.media_type === 'document' || input.media_type === 'image')) {
+  // Stage 4 signature detection: client sent back the signed contract while
+  // we're waiting on it -- a proper PDF scan or just a photo of the signed
+  // paper, both are real signed contracts and neither should be rejected
+  // (a photo is often the more realistic case). No e-signature tool for v1
+  // -- ask the PM to confirm receipt/validity either way.
+  logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: `[${input.media_type} received]`, media_url: input.media_id, stage: booking.status });
   await sbRequest('POST', 'conversations', logs);
   const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
   const pm = pmRows[0];
   if (pm) {
-    // Forward the actual signed PDF, not just a text notification -- same
+    // Forward the actual signed file, not just a text notification -- same
     // fix already applied to proof-of-payment: the PM was being asked to
     // confirm a document he'd never actually seen.
-    const questionText = `${booking.event_name}: client sent back a signed PDF (above). Confirm it's valid? Reply yes or no.`;
+    const questionText = `${booking.event_name}: client sent back the signed contract (above). Confirm it's valid? Reply yes or no.`;
     const pendingRows = await sbRequest('POST', 'pending_questions', {
       booking_id: booking.id,
       field_name: 'contract_confirmed',
       question_text: questionText,
     }, { Prefer: 'return=representation' });
-    // Track the PDF's own message id (not just the confirm question below) as
+    // Track the file's own message id (not just the confirm question below) as
     // a swipe-reply target for relaying straight back to the client -- swipe
     // to reply on the client's own message should always go to that person,
     // never get reinterpreted by the bot. See findPlanningBookingByForwardedMessageId
     // in pm-toggle-code.js.
-    const docMsgId = await sendWhatsAppMedia(pm.phone_number, 'document', input.media_id, `${booking.event_name}, signed contract`);
-    await sbRequest('POST', 'conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: '[relayed signed PDF to PM]', stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null }]);
+    const docMsgId = await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}, signed contract`);
+    await sbRequest('POST', 'conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed signed ${input.media_type} to PM]`, stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null }]);
     const msgId = await sendWhatsApp(pm.phone_number, questionText);
     if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
   }
