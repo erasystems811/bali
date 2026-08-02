@@ -804,8 +804,24 @@ async function handleLawyerInbound(input) {
   if (!text) return { ok: true, action: 'lawyer_message_logged' };
 
   if (!active) {
+    // Found live in the sandbox 2026-08-02: this branch used to forward to
+    // the PM without ever logging a 'staff_question_relay' conversations row
+    // -- meaning a PM swipe-reply to THIS message could never be matched by
+    // findStaffRelayByForwardedMessageId (pm-toggle-code.js), so it silently
+    // fell through to the bot's generic chat reply instead of reaching the
+    // lawyer. The PM was left with only the "lawyer: message" typed prefix
+    // as a workaround. conversations.booking_id is NOT NULL and there's no
+    // real active contract to attach to here, so fall back to the most
+    // recently active booking purely so the row can exist -- it's never used
+    // for anything beyond swipe-reply routing in this no-context case.
     const pm = await findPm();
-    if (pm) await sendWhatsApp(pm.phone_number, `Lawyer: ${text}`);
+    if (pm) {
+      const msgId = await sendWhatsApp(pm.phone_number, `Lawyer: ${text}`);
+      const fallbackBooking = (await sbRequest('GET', 'bookings?status=neq.cancelled&select=id&order=created_at.desc&limit=1'))[0];
+      if (fallbackBooking) {
+        await sbInsert('conversations', [{ booking_id: fallbackBooking.id, sender_contact_id: contact_id, direction: 'outbound', message_text: `Lawyer: ${text}`, stage: 'staff_question_relay', whatsapp_message_id: msgId }]);
+      }
+    }
     return { ok: true, action: 'lawyer_message_relayed_no_context' };
   }
 
