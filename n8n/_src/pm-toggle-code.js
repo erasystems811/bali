@@ -360,6 +360,34 @@ if (roleMatch && PM_CAN_REACH_ROLES.includes(roleMatch[1].toLowerCase())) {
 // negotiation transcript -- same collective-vs-itemized handling, same
 // final-agreed-state logic, just with this one line standing in for (or
 // added on top of) whatever's actually in the conversation history.
+// --- Command: "revoke [event name]" -- undo an invoice or contract that was
+// already sent to the client. WhatsApp itself has no way to delete/unsend a
+// message that already landed on someone else's phone (a hard platform
+// limit, not something this bot can work around), so this can only tell the
+// client to disregard it and reset the booking so a corrected one can be
+// sent. Whichever is further along (a sent-but-unsigned contract takes
+// precedence over an already-sent invoice) is what gets revoked -- see
+// revokeApproval in stage3-4-action-code.js for exactly which state each
+// case resets to.
+const revokeMatch = trimmed.match(/^revoke(?:\s+(?:the\s+)?(?:invoice|contract)\s+(?:for|on)?)?\s+(.+)$/i);
+if (revokeMatch) {
+  const eventName = revokeMatch[1].trim();
+  const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(eventName)}*&status=neq.cancelled&select=*`);
+  if (matches.length === 0) {
+    await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}". Check the spelling?`);
+    return [{ json: { action: 'revoke_not_found', query: eventName } }];
+  }
+  await helpers.httpRequest({
+    method: 'POST',
+    url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+    headers: { 'Content-Type': 'application/json' },
+    body: { action: 'revoke_approval', booking_id: matches[0].id },
+    json: true,
+    timeout: 15000,
+  });
+  return [{ json: { action: 'revoke_triggered', booking_id: matches[0].id } }];
+}
+
 const invoiceMatch = trimmed.match(/^(?:please\s+)?(?:generate|create|make|send|draft)?\s*(?:an?\s+)?invoice(?:\s+(?:for|to))?\s+(.+)$/i);
 if (invoiceMatch) {
   const rest = invoiceMatch[1].trim();
@@ -849,7 +877,7 @@ if (!target) {
   const reply = await askOpenAIText(
     `You are Bali, an event venue's own WhatsApp operational assistant. You're talking directly with venue staff (the PM) here, no client is on this thread, and nothing you say here is ever sent to a client. Your job is to actually get things done for him, run errands, take action, and answer questions, effectively, not make him work to get a straight answer. Answer his question or act on what he's asking using anything below that's relevant. If the recent back-and-forth below shows you just asked him something, treat his new message as answering that, not as a brand-new unrelated request.
 
-What you can actually do today: every connected client stays connected at once (no need to open or close one before working another), generate invoices, correct a draft invoice's amounts, items, or terms even without swiping to reply to it, rename an event, and relay a message to a specific client either by swipe-replying to something they sent, or by starting a message with the event name followed by a colon. Reaching a client always requires one of those two, if he seems to want something sent to a client, say so and tell him how.
+What you can actually do today: every connected client stays connected at once (no need to open or close one before working another), generate invoices, correct a draft invoice's amounts, items, or terms even without swiping to reply to it, rename an event, revoke an already-sent invoice or unsigned contract ("revoke [event]" -- can't unsend the WhatsApp message itself, just tells the client to disregard it and resets for a corrected one), and relay a message to a specific client either by swipe-replying to something they sent, or by starting a message with the event name followed by a colon. Reaching a client always requires one of those two, if he seems to want something sent to a client, say so and tell him how.
 
 For anything else, messaging other staff, pulling reports, other operational tasks, you don't have that built yet. If asked for something like that, say plainly that you can't do it yet rather than pretending to. Keep your reply short, natural, and professional, no filler, no fake enthusiasm.
 
