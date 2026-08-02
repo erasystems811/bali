@@ -6,7 +6,10 @@
 // deliberate choice, not something this script papers over.
 import { execSync } from "node:child_process";
 
-const DROPLET = "root@143.198.179.150";
+// Hetzner (bali-production), migrated 2026-08-01. The old DigitalOcean
+// droplet (143.198.179.150) is rollback-only and no longer receives live
+// traffic or code updates -- don't point this at it.
+const DROPLET = "root@167.233.242.179";
 
 function run(cmd, opts = {}) {
   return execSync(cmd, { stdio: "pipe", encoding: "utf8", ...opts });
