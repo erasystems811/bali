@@ -254,6 +254,55 @@ async function findStaffRelayByForwardedMessageId(messageId) {
   return rows[0] || null;
 }
 
+// Same pattern again, for a PM swipe-replying with the items/price after the
+// bot asked for them on a standalone invoice (no matching booking -- see the
+// "invoice [name]" command above). No booking exists here at all, so this
+// can't be a pending_questions/booking-scoped lookup like the others --
+// booking_id is null on this conversations row (see schema.sql), and the
+// client name is pulled back out of the exact fixed wording the request was
+// sent with, since there's nowhere else to park it.
+async function findStandaloneInvoiceRequestByForwardedMessageId(messageId) {
+  if (!messageId) return null;
+  const rows = await sbRequest(
+    'GET',
+    `conversations?whatsapp_message_id=eq.${encodeURIComponent(messageId)}&stage=eq.standalone_invoice_request&select=message_text&limit=1`
+  );
+  const match = rows[0]?.message_text?.match(/Couldn't find a booking called "([^"]+)"/);
+  return match ? { client_name: match[1] } : null;
+}
+
+// Same idea, for the confirm step after the PM gave the standalone invoice's
+// details -- swipe-reply case. draft_raw is passed through as-is to
+// stage3-4, which owns parsing/using it (see resolveStandaloneInvoiceConfirm).
+async function findStandaloneInvoiceDraftByForwardedMessageId(messageId) {
+  if (!messageId) return null;
+  const rows = await sbRequest(
+    'GET',
+    `conversations?whatsapp_message_id=eq.${encodeURIComponent(messageId)}&stage=eq.standalone_invoice_confirm&select=message_text&limit=1`
+  );
+  return rows[0]?.message_text || null;
+}
+
+// Non-swipe-reply fallback: a standalone invoice draft has no
+// pending_questions row (no booking to hang it off), so it never shows up
+// in the pending/planningCandidates pool that plain-typed replies auto-match
+// against below -- without this, a plain "yes" here always fell through to
+// the generic fallback chat, which happily said "I'll generate it" without
+// ever actually doing anything (confirmed live). Only returns something if
+// no OTHER pending/planning item is open, and only if the most recent
+// standalone confirm hasn't already been resolved (yes/no/PDF-sent) since.
+async function findOpenStandaloneInvoiceDraft() {
+  const [confirmRows, resolvedRows] = await Promise.all([
+    sbRequest('GET', `conversations?stage=eq.standalone_invoice_confirm&select=message_text,created_at&order=created_at.desc&limit=1`),
+    sbRequest('GET', `conversations?stage=eq.standalone_invoice_resolved&select=created_at&order=created_at.desc&limit=1`),
+  ]);
+  const confirm = confirmRows[0];
+  if (!confirm) return null;
+  const resolved = resolvedRows[0];
+  if (resolved && resolved.created_at > confirm.created_at) return null;
+  return confirm.message_text;
+}
+
 // Title-cases a role for display (event_assistant -> Event Assistant) --
 // duplicated from stage3-4-action-code.js's version (separate n8n Code node,
 // no shared module system in this codebase, matching the existing per-file
@@ -319,7 +368,29 @@ if (invoiceMatch) {
   const pmDetails = colonIdx === -1 ? null : rest.slice(colonIdx + 1).trim();
   const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(eventName)}*&status=neq.cancelled&select=*`);
   if (matches.length === 0) {
-    await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}". Check the spelling?`);
+    // No real booking for this -- if the PM gave actual items/price after a
+    // colon, treat it as a one-off invoice with no booking/customer needed
+    // at all (see draftStandaloneInvoice), rather than just refusing. With
+    // nothing after a colon there's nothing to generate from either way.
+    if (pmDetails) {
+      await helpers.httpRequest({
+        method: 'POST',
+        url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+        headers: { 'Content-Type': 'application/json' },
+        body: { action: 'draft_standalone_invoice', client_name: eventName, pm_details: pmDetails, pm_phone: from_number },
+        json: true,
+        timeout: 15000,
+      });
+      return [{ json: { action: 'standalone_invoice_triggered', client_name: eventName } }];
+    }
+    // No booking and no details given yet -- ask for them, and log this
+    // exact outbound message (stage: standalone_invoice_request) so a
+    // swipe-reply to it is recognized above and routed straight into
+    // draftStandaloneInvoice, instead of falling through to the generic
+    // "did you mean to send this to a customer?" fallback chat.
+    const askText = `Couldn't find a booking called "${eventName}" -- send me:\n\n- Items\n- Price\n- Payment agreement\n\nand I'll draft it and send you the PDF.`;
+    const msgId = await sendWhatsApp(from_number, askText);
+    await logConversation(null, null, 'outbound', askText, 'standalone_invoice_request', msgId);
     return [{ json: { action: 'invoice_command_not_found', query: eventName } }];
   }
   await helpers.httpRequest({
@@ -422,6 +493,34 @@ if (reply_to_message_id) {
     }
     await logConversation(planningTarget.id, contact_id, 'inbound', answerText, 'pm_message');
     return [{ json: { action: 'planning_relayed_to_client', booking_id: planningTarget.id } }];
+  }
+  if (!target) {
+    const standaloneReq = await findStandaloneInvoiceRequestByForwardedMessageId(reply_to_message_id);
+    if (standaloneReq) {
+      await helpers.httpRequest({
+        method: 'POST',
+        url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+        headers: { 'Content-Type': 'application/json' },
+        body: { action: 'draft_standalone_invoice', client_name: standaloneReq.client_name, pm_details: answerText, pm_phone: from_number },
+        json: true,
+        timeout: 15000,
+      });
+      return [{ json: { action: 'standalone_invoice_triggered_via_reply', client_name: standaloneReq.client_name } }];
+    }
+  }
+  if (!target) {
+    const draftRaw = await findStandaloneInvoiceDraftByForwardedMessageId(reply_to_message_id);
+    if (draftRaw) {
+      await helpers.httpRequest({
+        method: 'POST',
+        url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+        headers: { 'Content-Type': 'application/json' },
+        body: { action: 'resolve_standalone_invoice_confirm', draft_raw: draftRaw, answer_text: answerText },
+        json: true,
+        timeout: 15000,
+      });
+      return [{ json: { action: 'standalone_invoice_confirm_resolved' } }];
+    }
   }
   if (!target) {
     const staffRelay = await findStaffRelayByForwardedMessageId(reply_to_message_id);
@@ -592,6 +691,26 @@ if (leadingMatch) {
 // said (and can list what's pending if he genuinely asks, see its prompt) --
 // bot serves the PM, not the other way around. --------------------------
 if (!reply_to_message_id) {
+  // Checked first, unconditionally -- a pending_questions row elsewhere
+  // (a completely unrelated booking's stale question, say) used to block
+  // this: it counted toward totalCandidates below, forcing a numbered reply
+  // even though it had nothing to do with what the PM was actually
+  // answering. Pending questions are a "may answer" thing, not a lock on
+  // everything else -- an unrelated one being open should never stop a
+  // clearly-standalone reply like this from being understood.
+  const draftRaw = await findOpenStandaloneInvoiceDraft();
+  if (draftRaw) {
+    await helpers.httpRequest({
+      method: 'POST',
+      url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+      headers: { 'Content-Type': 'application/json' },
+      body: { action: 'resolve_standalone_invoice_confirm', draft_raw: draftRaw, answer_text: trimmed },
+      json: true,
+      timeout: 15000,
+    });
+    return [{ json: { action: 'standalone_invoice_confirm_resolved_no_reply' } }];
+  }
+
   const totalCandidates = pending.length + planningCandidates.length;
   if (totalCandidates === 1) {
     if (pending.length === 1) target = pending[0];
@@ -754,6 +873,10 @@ const STAGE3_4_DELEGATED_FIELDS = {
   contract_approval: 'resolve_contract_approval',
   payment_confirmed: 'resolve_payment_confirmed',
   payment_terms_confirm: 'resolve_payment_terms_confirm',
+  // Delegated (not handled by the generic FIELD_PROMPTS path below) because
+  // resolving it now needs to resume draftInvoice, not just patch a column
+  // -- see resolveStaffingType in stage3-4-action-code.js.
+  staffing_type: 'resolve_staffing_type',
 };
 if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
   // Fire-and-forget: the stage3-4 webhook responds immediately on receipt

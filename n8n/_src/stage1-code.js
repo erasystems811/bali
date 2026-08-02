@@ -194,7 +194,7 @@ async function contractInfoStillMissing(booking) {
   if (booking.status !== 'awaiting_contract') return false;
   const contractRows = await sbRequest('GET', `contracts?booking_id=eq.${booking.id}&order=created_at.desc&limit=1&select=*`);
   const contract = contractRows[0];
-  return !!(contract && (!contract.organizer_legal_name || !contract.organizer_registered_address || !booking.event_type));
+  return !!(contract && (!contract.organizer_legal_name || !contract.organizer_registered_address || !contract.details_confirmed_at || !booking.event_type));
 }
 
 // Real booking history for this contact (signed/onboarded only -- not just
@@ -536,30 +536,33 @@ if (!booking) {
   }, { Prefer: 'return=representation' });
   booking = created[0];
   replyText = contact.name ? returningGreeting(contact.name.split(' ')[0]) : GREETING;
-} else if (booking.status === 'sent_to_client' && input.media_type === 'document') {
-  // Stage 4 signature detection: client sent back a PDF while we're waiting on the
-  // signed contract. No e-signature tool for v1 -- ask the PM to confirm receipt/validity.
-  logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: '[PDF received]', media_url: input.media_id, stage: booking.status });
+} else if (booking.status === 'sent_to_client' && (input.media_type === 'document' || input.media_type === 'image')) {
+  // Stage 4 signature detection: client sent back the signed contract while
+  // we're waiting on it -- a proper PDF scan or just a photo of the signed
+  // paper, both are real signed contracts and neither should be rejected
+  // (a photo is often the more realistic case). No e-signature tool for v1
+  // -- ask the PM to confirm receipt/validity either way.
+  logs.push({ booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: `[${input.media_type} received]`, media_url: input.media_id, stage: booking.status });
   await sbRequest('POST', 'conversations', logs);
   const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
   const pm = pmRows[0];
   if (pm) {
-    // Forward the actual signed PDF, not just a text notification -- same
+    // Forward the actual signed file, not just a text notification -- same
     // fix already applied to proof-of-payment: the PM was being asked to
     // confirm a document he'd never actually seen.
-    const questionText = `${booking.event_name}: client sent back a signed PDF (above). Confirm it's valid? Reply yes or no.`;
+    const questionText = `${booking.event_name}: client sent back the signed contract (above). Confirm it's valid? Reply yes or no.`;
     const pendingRows = await sbRequest('POST', 'pending_questions', {
       booking_id: booking.id,
       field_name: 'contract_confirmed',
       question_text: questionText,
     }, { Prefer: 'return=representation' });
-    // Track the PDF's own message id (not just the confirm question below) as
+    // Track the file's own message id (not just the confirm question below) as
     // a swipe-reply target for relaying straight back to the client -- swipe
     // to reply on the client's own message should always go to that person,
     // never get reinterpreted by the bot. See findPlanningBookingByForwardedMessageId
     // in pm-toggle-code.js.
-    const docMsgId = await sendWhatsAppMedia(pm.phone_number, 'document', input.media_id, `${booking.event_name}, signed contract`);
-    await sbRequest('POST', 'conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: '[relayed signed PDF to PM]', stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null }]);
+    const docMsgId = await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}, signed contract`);
+    await sbRequest('POST', 'conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed signed ${input.media_type} to PM]`, stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null }]);
     const msgId = await sendWhatsApp(pm.phone_number, questionText);
     if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
   }
@@ -617,7 +620,7 @@ if (!booking) {
 
   if (contract && !contract.organizer_legal_name) {
     const extraction = await askOpenAIJson(
-      'The venue asked a client for their organization\'s full legal name. Does this WhatsApp message actually state one (in any format, labels like "name:" are fine)? Reply ONLY with JSON: {"organizer_legal_name": "..." or null}.',
+      'The venue asked a client for their organization\'s full legal name. Does this WhatsApp message actually state one? Accept ANY capitalization -- WhatsApp users often type in all lowercase, and a lowercase name is exactly as valid as a capitalized one (e.g. "mad party entertainment" is a valid answer, same as "Mad Party Entertainment"). Labels like "name:" are fine but not required. Reply ONLY with JSON: {"organizer_legal_name": "..." or null}.',
       effectiveText || ''
     );
     if (extraction?.organizer_legal_name) {
@@ -633,14 +636,28 @@ if (!booking) {
     );
     if (extraction?.organizer_registered_address) {
       await sbPatch(`contracts?id=eq.${contract.id}`, { organizer_registered_address: extraction.organizer_registered_address });
+      replyText = `Please confirm these are correct -- reply YES if accurate or NO if not.\nName: ${contract.organizer_legal_name}\nAddress: ${extraction.organizer_registered_address}`;
+    } else {
+      replyText = "Sorry, I need your organization's official registered address, could you send that?";
+    }
+  } else if (contract && !contract.details_confirmed_at) {
+    const extraction = await askOpenAIJson(
+      'The venue asked a client to confirm their organization name and address are accurate, by replying YES or NO. Does this WhatsApp message clearly say yes/confirm, or clearly say no/incorrect? Reply ONLY with JSON: {"confirmed": true, false, or null}. Use null if the message is not actually a yes/no answer to this.',
+      effectiveText || ''
+    );
+    if (extraction?.confirmed === true) {
+      await sbPatch(`contracts?id=eq.${contract.id}`, { details_confirmed_at: new Date().toISOString() });
       // Normal intake always collects event_type before a booking can even
       // reach negotiation, but a booking can land here without it having
       // ever gone through that (e.g. a PM-driven "invoice [event]" command
       // on a booking that skipped intake) -- catch that here, last, rather
       // than send the lawyer a contract request with the event type blank.
       replyText = booking.event_type ? await sendToLawyerNow() : "Thanks. One more thing, what type of event is this?";
+    } else if (extraction?.confirmed === false) {
+      await sbPatch(`contracts?id=eq.${contract.id}`, { organizer_legal_name: null, organizer_registered_address: null });
+      replyText = "No problem, let's redo it. What's your organization's full legal name?";
     } else {
-      replyText = "Sorry, I need your organization's official registered address, could you send that?";
+      replyText = "Sorry, just reply YES if those details are accurate, or NO if not.";
     }
   } else if (contract && !booking.event_type) {
     const extraction = await askOpenAIJson(
@@ -684,19 +701,26 @@ if (!booking) {
   } else {
     const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
     const pm = pmRows[0];
-    if (pm && input.media_type) {
-      // A document/image reaching a connected booking through this general
-      // path (any status other than the specific invoiced/sent_to_client
-      // stages that already handle their own media) is most likely the
-      // signed contract -- the PM often sends it manually rather than
-      // through the official approve-and-send flow, which is the only thing
-      // that sets status to 'sent_to_client' and is the ONLY status the bot
-      // otherwise recognizes as "expect a signed PDF back". Confirmed live:
-      // PM manually sent the contract and told the client to resend it
-      // signed, the reply landed here (status never became sent_to_client)
-      // and just got passively forwarded with no confirm prompt at all.
-      // Treat it the same way that specific branch already does, rather
-      // than assuming a document only matters in one exact status.
+    // A document/image reaching a connected booking through this general
+    // path (any status other than the specific invoiced/sent_to_client
+    // stages that already handle their own media) is ONLY the signed
+    // contract if a contract was actually sent to this client at some point
+    // (PM often sends it manually rather than through the official
+    // approve-and-send flow, which is the only thing that sets status to
+    // 'sent_to_client') and hasn't already been marked signed. Checked
+    // directly against the contract row's own sent_to_client_at/signed_at,
+    // not inferred from booking.status. Confirmed live as a real bug without
+    // this check: a document sent any time after invoice approval -- proof
+    // of payment arriving late, or literally anything else -- got assumed
+    // to be a signed contract and asked "confirm it's valid?" even though no
+    // contract had ever been sent to sign in the first place.
+    const activeContract = (await sbRequest(
+      'GET',
+      `contracts?booking_id=eq.${booking.id}&order=created_at.desc&limit=1&select=sent_to_client_at,signed_at`
+    ))[0];
+    const awaitingSignedContract = !!(activeContract && activeContract.sent_to_client_at && !activeContract.signed_at);
+
+    if (pm && input.media_type && awaitingSignedContract) {
       const questionText = `${booking.event_name}: client sent back a signed PDF (above). Confirm it's valid? Reply yes or no.`;
       const pendingRows = await sbRequest('POST', 'pending_questions', {
         booking_id: booking.id,
@@ -710,6 +734,11 @@ if (!booking) {
       logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed ${input.media_type} to PM]`, stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null });
       const msgId = await sendWhatsApp(pm.phone_number, questionText);
       if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
+    } else if (pm && input.media_type) {
+      // No contract awaiting signature -- just forward whatever it is,
+      // no "is this signed?" assumption attached.
+      const docMsgId = await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}, from client`);
+      logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed ${input.media_type} to PM]`, stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null });
     } else if (pm) {
       const forwardText = `${booking.event_name}: ${effectiveText}`;
       const msgId = await sendWhatsApp(pm.phone_number, forwardText);
@@ -822,9 +851,9 @@ ${transcript}
 
 Client's latest message: "${effectiveText || ''}"
 
-Extract EVERY still-needed field this message provides, not just the one you were "expecting" next -- e.g. "birthday party for my sister" gives you both event_type ("birthday party") AND enough for event_name ("Sister's Birthday Party"), extract both in the same pass rather than leaving event_type blank because event_name came first in priority order. Resolve relative dates ("next Friday", "this weekend", a bare day name) against today's date; if an event_date is extracted from a bare day/month with no year (e.g. "24th july"), resolve it against the CURRENT year regardless of anything discussed earlier in the conversation -- never carry a year over from an earlier message or an earlier "did you mean [year]?" question. If the message is instead (or also) a genuine question or comment not covered by the fields above (pricing, parking, capacity, "what dates are open", small talk, etc.), note it as off_topic -- something the venue needs to actually answer, not guess at. Separately, if the client is stating or correcting their own name (e.g. "I'm Chidera", "my name is X", "it's actually X not Y"), extract it as customer_name -- never guess a name from anything else they say.
+Extract EVERY still-needed field this message provides, not just the one you were "expecting" next -- e.g. "birthday party for my sister" gives you both event_type ("birthday party") AND enough for event_name ("Sister's Birthday Party"), extract both in the same pass rather than leaving event_type blank because event_name came first in priority order. Resolve relative dates ("next Friday", "this weekend", a bare day name) against today's date; if an event_date is extracted from a bare day/month with no year (e.g. "24th july"), resolve it against the CURRENT year regardless of anything discussed earlier in the conversation -- never carry a year over from an earlier message or an earlier "did you mean [year]?" question. A bare day-of-month with NO month stated (e.g. "23rd", "the 5th") is NOT enough to extract a full event_date -- never guess or default a month for this; leave event_date unextracted and instead set day_of_month_given to the day as they wrote it (e.g. "23rd"), so the reply can ask specifically which month. If the message is instead (or also) a genuine question or comment not covered by the fields above (pricing, parking, capacity, "what dates are open", small talk, etc.), note it as off_topic -- something the venue needs to actually answer, not guess at. Separately, if the client is stating or correcting their own name (e.g. "I'm Chidera", "my name is X", "it's actually X not Y"), extract it as customer_name -- never guess a name from anything else they say.
 
-Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?: "...", "event_name"?: "...", "is_existing_client"?: true/false, "client_reference"?: "..."}, "off_topic": "..." or null, "customer_name": "..." or null}`,
+Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?: "...", "event_name"?: "...", "is_existing_client"?: true/false, "client_reference"?: "..."}, "day_of_month_given": "..." or null, "off_topic": "..." or null, "customer_name": "..." or null}`,
     effectiveText || ''
   );
 
@@ -984,12 +1013,13 @@ What actually happened this turn: ${JSON.stringify({
         saved_this_turn: patch,
         date_confirmed_available: dateConfirmed,
         date_rejected_already_booked: dateRejected,
+        date_day_given_needs_month: extraction?.day_of_month_given || null,
         knowledge_base_question_pending: kbPending,
         ask_about: stepLabels,
         intake_just_completed: justCompleted,
       })}
 
-Write the next short message to the client. Rules: ask ONLY about the items in ask_about -- never invent or add anything not listed and not in ask_about. If date_confirmed_available is true, briefly confirm the date's available (e.g. "That date's available!") before asking about ask_about. If ask_about is empty and intake_just_completed is true, say only something brief like "Give me a moment, I'll follow up with you shortly" -- don't mention a person/manager, don't ask anything further. If a date was just rejected as already booked, mention that plainly first, then still ask about ask_about if not empty. If a knowledge base question is pending, briefly acknowledge you're checking on it, then still ask about ask_about if not empty (or just the acknowledgment if ask_about is empty).
+Write the next short message to the client. Rules: ask ONLY about the items in ask_about -- never invent or add anything not listed and not in ask_about. If date_confirmed_available is true, briefly confirm the date's available (e.g. "That date's available!") before asking about ask_about. If date_day_given_needs_month is set, the client gave that day of the month but not which month -- ask specifically which month it's for (referencing the day naturally, e.g. "The 23rd -- which month?"), and treat the date as still not answered (don't also ask about ask_about's other items yet if event_date is one of them, wait for the month first). If ask_about is empty and intake_just_completed is true, say only something brief like "Give me a moment, I'll follow up with you shortly" -- don't mention a person/manager, don't ask anything further. If a date was just rejected as already booked, mention that plainly first, then still ask about ask_about if not empty. If a knowledge base question is pending, briefly acknowledge you're checking on it, then still ask about ask_about if not empty (or just the acknowledgment if ask_about is empty).
 
 Reply ONLY with JSON: {"reply": "..."}`,
       effectiveText || ''

@@ -441,17 +441,11 @@ async function buildNegotiationTranscript(bookingId) {
     .join('\n');
 }
 
-async function draftInvoice(bookingId, pmDetails) {
-  const booking = await getBooking(bookingId);
-  // pmDetails lets the PM hand the bot agreed items/price directly (e.g. the
-  // "invoice [event]: 2m for sound, screen and staff" command) with no real
-  // negotiation conversation on record -- appended as one more "PM:" line so
-  // the exact same extraction logic below (collective-vs-itemized, final-
-  // agreed-state) handles it, on top of whatever's actually in the history.
-  const history = await buildNegotiationTranscript(bookingId);
-  const transcript = pmDetails ? `${history}${history ? '\n' : ''}PM: ${pmDetails}` : history;
-
-  const extraction = await askOpenAIJson(
+// Shared by draftInvoice (real booking, transcript-based) and
+// draftStandaloneInvoice (no booking, just a one-off "PM: ..." line) -- same
+// extraction rules apply either way, only the transcript differs.
+async function extractInvoiceLineItems(transcript) {
+  return askOpenAIJson(
     `Extract invoice details from this WhatsApp negotiation transcript for an event venue called Bali. "PM" is the venue's own negotiator -- treat PM lines as authoritative for what was agreed, alongside anything the Client said.
 
 A negotiation is not a shopping list -- items and prices get proposed, countered, dropped, and changed as the conversation goes on. Only extract what was FINALLY agreed, not everything that was ever mentioned. If an item was discussed but later removed, replaced, or never confirmed, leave it out. If a price for an item changed partway through, use the LATEST stated figure, not an earlier offer. Read the whole conversation in order and settle on its end state before extracting -- don't just collect every item/number that appears anywhere in it.
@@ -481,12 +475,46 @@ PM: Sound, screen, power, staff, ticketing
 
 Amounts are in Nigerian Naira. Shorthand like "6m" means 6,000,000 and "500k" means 500,000 -- convert to a plain number, no currency symbols or commas. Only include PAID items (things the client is actually being charged for).
 
-payment_terms must be null unless the transcript explicitly states one -- if it does, phrase it the way it was actually agreed (things like "100% Full Payment Due" or "60/40 split" are just illustrations of the KIND of value this field holds, not something to output when nothing was actually said).
+payment_terms must be null unless the transcript explicitly states one -- if it does, phrase it the way it was actually agreed (things like "100% Full Payment Due" or "60/40 split" are just illustrations of the KIND of value this field holds, not something to output when nothing was actually said). "Full-time"/"part-time" (with or without a hyphen) describe STAFFING, never payment -- never extract these as payment_terms even if they immediately follow a payment question; if the PM's actual answer is about staffing rather than payment, leave payment_terms null.
 
 Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}], "payment_terms": "<string exactly as agreed in the transcript, or null if not discussed>", "bill_to_name": "<the client's real name or organization ONLY if actually stated somewhere in the transcript, else null (never a generic placeholder like the word \"Client\") -- the invoice defaults to billing the event name itself when this is null, so leave it null rather than guessing>", "bill_to_location": "<client city/location if mentioned, else null>"}.`,
     transcript,
     0
   );
+}
+
+async function draftInvoice(bookingId, pmDetails) {
+  const booking = await getBooking(bookingId);
+
+  // Asked FIRST, before anything else about this invoice -- owner's call.
+  // Used to be asked only after the draft/PDF questions, which left TWO
+  // pending questions open on the same booking at once; a plain "yes" or
+  // "full-time" from the PM (no swipe-reply, no number) only auto-matches
+  // when exactly one is open, so with two it fell through to the generic
+  // fallback chat every time -- which cheerfully said "I'll generate the PDF
+  // now" without ever actually doing it. Confirmed live as a real, repeatable
+  // failure. Asking this first and gating everything else on it means only
+  // one question is ever open at a time.
+  //
+  // Skipped when pmDetails is given directly (the "invoice X: details"
+  // command) -- pmDetails only ever exists as this one function argument,
+  // never logged to conversations, so gating here would lose it permanently
+  // (the PM would have to retype it after answering staffing_type). That
+  // command path keeps the old asked-later behavior for now.
+  if (!pmDetails && (booking.staffing_type === null || booking.staffing_type === undefined)) {
+    await askPmDirectly(bookingId, 'staffing_type', `For ${booking.event_name}, full-time or part-time staff needed?`);
+    return { ok: true, action: 'awaiting_staffing_type' };
+  }
+
+  // pmDetails lets the PM hand the bot agreed items/price directly (e.g. the
+  // "invoice [event]: 2m for sound, screen and staff" command) with no real
+  // negotiation conversation on record -- appended as one more "PM:" line so
+  // the exact same extraction logic below (collective-vs-itemized, final-
+  // agreed-state) handles it, on top of whatever's actually in the history.
+  const history = await buildNegotiationTranscript(bookingId);
+  const transcript = pmDetails ? `${history}${history ? '\n' : ''}PM: ${pmDetails}` : history;
+
+  const extraction = await extractInvoiceLineItems(transcript);
   if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
     const pm = await findPm();
     if (pm) await sendWhatsApp(pm.phone_number, `Couldn't figure out the invoice line items for ${booking.event_name} from the conversation, can you send me the agreed items and amounts directly?`);
@@ -542,11 +570,105 @@ Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}
   // automated flow instead of staying connected to the PM.
   await sbPatch(`bookings?id=eq.${bookingId}`, { status: 'invoiced', connected_to_pm_at: booking.connected_to_pm_at || new Date().toISOString() });
 
-  if (booking.staffing_type === null || booking.staffing_type === undefined) {
-    await askPmDirectly(bookingId, 'staffing_type', `For ${booking.event_name}, full-time or part-time staff needed?`);
-  }
+  // staffing_type is deliberately NOT asked here anymore -- asking it in the
+  // same breath as invoice_draft_confirm left TWO pending questions open at
+  // once, and a plain "yes" from the PM (no swipe-reply, no number) only
+  // auto-matches when exactly one is open -- with two, it fell through to
+  // the generic fallback chat every time, which cheerfully said "I'll
+  // generate the PDF now" without ever actually doing it. Confirmed live as
+  // a real, repeatable failure, not a one-off. Asked instead from
+  // resolveInvoiceApproval, once the PDF has actually gone to the client and
+  // nothing else was just opened in that same step.
 
   return { ok: true, invoice_id: invoice.id };
+}
+
+// One-off invoice for someone who was never taken through the booking flow
+// at all -- no booking row, no customer contact, nothing saved to the
+// invoices table, no message ever goes to a client. The PM just names who
+// it's for and states the items/price directly, and gets a PDF back
+// straight to their own WhatsApp. Deliberately skips every piece of the
+// normal booking lifecycle (see draftInvoice above) -- this is for a PM who
+// explicitly does not want to "follow the customer route" for a quick or
+// hypothetical invoice.
+// Two-phase, same shape as the real-booking invoice flow (draftInvoice /
+// resolveInvoiceDraftConfirm) -- extract, show the PM a plain confirmation
+// (name / items / price / payment, one per line), only render and send the
+// actual PDF once he says yes. No booking/invoice row exists for this
+// (see the note on draftStandaloneInvoice's caller), so the draft itself is
+// carried in the tracking conversations row rather than re-fetched from a
+// table -- stored as JSON in message_text, never shown to the PM as-is;
+// what he actually sees is confirmText below.
+async function draftStandaloneInvoice(clientName, pmDetails, pmPhone) {
+  const extraction = await extractInvoiceLineItems(`PM: ${pmDetails}`);
+  if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
+    await sendWhatsApp(pmPhone, `Couldn't figure out line items for that from what you sent -- send me the items and price directly.`);
+    return { ok: false, reason: 'extraction_failed' };
+  }
+  return sendStandaloneInvoiceConfirm({
+    client_name: extraction.bill_to_name || clientName,
+    line_items: extraction.line_items,
+    payment_terms: extraction.payment_terms || null,
+  }, pmPhone);
+}
+
+async function sendStandaloneInvoiceConfirm(draft, pmPhone) {
+  const itemLines = draft.line_items.map((li) => `- ${li.description}: ${formatMoney(li.amount)}`).join('\n');
+  const confirmText = `Please confirm -- reply YES to generate, NO to cancel, or tell me what to change.\n\nName: ${draft.client_name}\nItems:\n${itemLines}\nPayment: ${draft.payment_terms || 'not stated'}`;
+  const msgId = await sendWhatsApp(pmPhone, confirmText);
+  await sbInsert('conversations', [{
+    booking_id: null,
+    direction: 'outbound',
+    message_text: `STANDALONE_INVOICE_DRAFT:${JSON.stringify({ ...draft, pm_phone: pmPhone })}`,
+    stage: 'standalone_invoice_confirm',
+    whatsapp_message_id: msgId,
+  }]);
+  return { ok: true, action: 'awaiting_standalone_confirm' };
+}
+
+// Swipe-reply (or fallback-chat-routed) resolution for the confirm above.
+// Looked up by pm-toggle-code.js the same way as findStandaloneInvoiceRequestByForwardedMessageId.
+async function resolveStandaloneInvoiceConfirm(draft, answerText, pmPhone) {
+  if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
+    const { subtotal, vat, wht, total } = recomputeInvoiceTotals(draft.line_items);
+    const invoice = {
+      invoice_number: `DRAFT-${Date.now()}`,
+      date_issued: new Date().toISOString().slice(0, 10),
+      bill_to_name: draft.client_name,
+      bill_to_location: null,
+      line_items: draft.line_items,
+      payment_terms: draft.payment_terms,
+      subtotal,
+      vat_amount: vat,
+      wht_amount: wht,
+      total_net_payable: total,
+    };
+    const html = formatInvoiceHtml(invoice, { event_name: draft.client_name });
+    const pdfBuffer = await renderPdf(html);
+    const mediaId = await uploadWhatsAppMedia(pdfBuffer, `${invoice.invoice_number}.pdf`);
+    await sendWhatsAppDocument(pmPhone, mediaId, `${invoice.invoice_number}.pdf`, `Standalone invoice for ${draft.client_name} -- not saved anywhere, not sent to anyone.`);
+    await sbInsert('conversations', [{ booking_id: null, direction: 'outbound', message_text: 'STANDALONE_INVOICE_RESOLVED', stage: 'standalone_invoice_resolved' }]);
+    return { ok: true, invoice_number: invoice.invoice_number };
+  }
+  if (/^n(o)?\b/i.test((answerText || '').trim())) {
+    await sendWhatsApp(pmPhone, 'Cancelled -- nothing generated.');
+    await sbInsert('conversations', [{ booking_id: null, direction: 'outbound', message_text: 'STANDALONE_INVOICE_RESOLVED', stage: 'standalone_invoice_resolved' }]);
+    return { ok: true, action: 'standalone_invoice_cancelled' };
+  }
+  // Anything else is a correction -- re-extract against the change on top of
+  // what was already agreed, same collective-vs-itemized handling as a real
+  // negotiation transcript, then show the updated confirmation again.
+  const transcript = `PM: ${JSON.stringify(draft.line_items.map((li) => `${li.description} ${li.amount}`).join(', '))} (payment: ${draft.payment_terms || 'not stated'})\nPM: ${answerText}`;
+  const extraction = await extractInvoiceLineItems(transcript);
+  if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
+    await sendWhatsApp(pmPhone, `Didn't catch that change -- can you say it again?`);
+    return { ok: false };
+  }
+  return sendStandaloneInvoiceConfirm({
+    client_name: extraction.bill_to_name || draft.client_name,
+    line_items: extraction.line_items,
+    payment_terms: extraction.payment_terms || draft.payment_terms,
+  }, pmPhone);
 }
 
 // Phase 1 resolution: PM confirming/correcting the plain-text draft, before
@@ -628,7 +750,32 @@ async function applyInvoiceCorrectionAndResend(booking, invoice, answerText) {
 async function resolvePaymentTermsConfirm(pendingId, answerText) {
   const pq = (await sbRequest('GET', `pending_questions?id=eq.${pendingId}&select=*`))[0];
   await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
-  return draftInvoice(pq.booking_id, answerText);
+  // A bare short answer ("full", "60/40") only makes sense alongside the
+  // question it's answering -- fed on its own into the extraction below,
+  // with no transcript context that a payment-terms question was even
+  // asked, the model correctly (by its own logic) can't tell "full" means
+  // anything and asks again -- confirmed live as an actual retry loop.
+  // Restating the question inline gives it that context in one line.
+  return draftInvoice(pq.booking_id, `(re: "${pq.question_text}") ${answerText}`);
+}
+
+// Resolves the staffing_type gate at the top of draftInvoice -- see the
+// comment there for why this is asked first now. Re-runs draftInvoice once
+// staffing_type is saved, same re-entrant pattern as payment_terms above.
+async function resolveStaffingType(pendingId, answerText) {
+  const pq = (await sbRequest('GET', `pending_questions?id=eq.${pendingId}&select=*`))[0];
+  const extraction = await askOpenAIJson(
+    'The venue asked whether an event needs full-time or part-time staff. Does this WhatsApp reply clearly say one or the other? Reply ONLY with JSON: {"value": "full-time"|"part-time"|null}. null if it does not clearly say either (e.g. it is about something else entirely, like payment).',
+    answerText || ''
+  );
+  if (!extraction?.value) {
+    const pm = await findPm();
+    if (pm) await sendWhatsApp(pm.phone_number, `Sorry, full-time or part-time staff?`);
+    return { ok: true, action: 're_ask_staffing_type' };
+  }
+  await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
+  await sbPatch(`bookings?id=eq.${pq.booking_id}`, { staffing_type: extraction.value });
+  return draftInvoice(pq.booking_id, null);
 }
 
 // Entry point for the PM fallback chat (pm-toggle-code.js) when a plain-typed
@@ -676,6 +823,13 @@ async function resolveInvoiceApproval(pendingId, answerText) {
     await sendInvoicePdf(client.phone_number, invoice, booking, caption);
     await sendWhatsApp(client.phone_number, "Whenever you're ready, please send proof of payment and we'll get it confirmed.");
     await logConversation(booking.id, null, 'outbound', `[invoice PDF sent] ${invoice.invoice_number}`, 'invoice_sent');
+    // Asked here, not back in draftInvoice -- see the comment there. This is
+    // the first point after invoice_draft_confirm where nothing else is
+    // simultaneously open, so a plain "full-time"/"part-time" reply from the
+    // PM will actually auto-match instead of falling through to chat.
+    if (booking.staffing_type === null || booking.staffing_type === undefined) {
+      await askPmDirectly(booking.id, 'staffing_type', `For ${booking.event_name}, full-time or part-time staff needed?`);
+    }
     return { ok: true, action: 'invoice_sent_to_client' };
   }
 
@@ -906,9 +1060,15 @@ const action = input.action;
 
 let result;
 if (action === 'draft_invoice') result = await draftInvoice(input.booking_id, input.pm_details);
+else if (action === 'draft_standalone_invoice') result = await draftStandaloneInvoice(input.client_name, input.pm_details, input.pm_phone);
+else if (action === 'resolve_standalone_invoice_confirm') {
+  const draft = JSON.parse(input.draft_raw.replace('STANDALONE_INVOICE_DRAFT:', ''));
+  result = await resolveStandaloneInvoiceConfirm(draft, input.answer_text, draft.pm_phone);
+}
 else if (action === 'resolve_invoice_draft_confirm') result = await resolveInvoiceDraftConfirm(input.pending_question_id, input.answer_text);
 else if (action === 'correct_invoice_from_fallback') result = await correctInvoiceFromFallbackChat(input.booking_id, input.answer_text);
 else if (action === 'resolve_payment_terms_confirm') result = await resolvePaymentTermsConfirm(input.pending_question_id, input.answer_text);
+else if (action === 'resolve_staffing_type') result = await resolveStaffingType(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_invoice_approval') result = await resolveInvoiceApproval(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_payment_confirmed') result = await resolvePaymentConfirmed(input.pending_question_id, input.answer_text);
 else if (action === 'send_to_lawyer') result = await sendToLawyer(input.booking_id);
