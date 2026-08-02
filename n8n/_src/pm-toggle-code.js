@@ -691,6 +691,26 @@ if (leadingMatch) {
 // said (and can list what's pending if he genuinely asks, see its prompt) --
 // bot serves the PM, not the other way around. --------------------------
 if (!reply_to_message_id) {
+  // Checked first, unconditionally -- a pending_questions row elsewhere
+  // (a completely unrelated booking's stale question, say) used to block
+  // this: it counted toward totalCandidates below, forcing a numbered reply
+  // even though it had nothing to do with what the PM was actually
+  // answering. Pending questions are a "may answer" thing, not a lock on
+  // everything else -- an unrelated one being open should never stop a
+  // clearly-standalone reply like this from being understood.
+  const draftRaw = await findOpenStandaloneInvoiceDraft();
+  if (draftRaw) {
+    await helpers.httpRequest({
+      method: 'POST',
+      url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+      headers: { 'Content-Type': 'application/json' },
+      body: { action: 'resolve_standalone_invoice_confirm', draft_raw: draftRaw, answer_text: trimmed },
+      json: true,
+      timeout: 15000,
+    });
+    return [{ json: { action: 'standalone_invoice_confirm_resolved_no_reply' } }];
+  }
+
   const totalCandidates = pending.length + planningCandidates.length;
   if (totalCandidates === 1) {
     if (pending.length === 1) target = pending[0];
@@ -707,22 +727,6 @@ if (!reply_to_message_id) {
     }
     // No swipe-reply and no number given -- don't force a choice, fall
     // through to the fallback chat and let it actually address what he said.
-  } else if (totalCandidates === 0) {
-    // Nothing else open -- safe to check the one thing that never shows up
-    // in pending/planningCandidates at all (no booking to hang a
-    // pending_questions row off). See findOpenStandaloneInvoiceDraft.
-    const draftRaw = await findOpenStandaloneInvoiceDraft();
-    if (draftRaw) {
-      await helpers.httpRequest({
-        method: 'POST',
-        url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
-        headers: { 'Content-Type': 'application/json' },
-        body: { action: 'resolve_standalone_invoice_confirm', draft_raw: draftRaw, answer_text: trimmed },
-        json: true,
-        timeout: 15000,
-      });
-      return [{ json: { action: 'standalone_invoice_confirm_resolved_no_reply' } }];
-    }
   }
 }
 
