@@ -475,7 +475,7 @@ PM: Sound, screen, power, staff, ticketing
 
 Amounts are in Nigerian Naira. Shorthand like "6m" means 6,000,000 and "500k" means 500,000 -- convert to a plain number, no currency symbols or commas. Only include PAID items (things the client is actually being charged for).
 
-payment_terms must be null unless the transcript explicitly states one -- if it does, phrase it the way it was actually agreed (things like "100% Full Payment Due" or "60/40 split" are just illustrations of the KIND of value this field holds, not something to output when nothing was actually said).
+payment_terms must be null unless the transcript explicitly states one -- if it does, phrase it the way it was actually agreed (things like "100% Full Payment Due" or "60/40 split" are just illustrations of the KIND of value this field holds, not something to output when nothing was actually said). "Full-time"/"part-time" (with or without a hyphen) describe STAFFING, never payment -- never extract these as payment_terms even if they immediately follow a payment question; if the PM's actual answer is about staffing rather than payment, leave payment_terms null.
 
 Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}], "payment_terms": "<string exactly as agreed in the transcript, or null if not discussed>", "bill_to_name": "<the client's real name or organization ONLY if actually stated somewhere in the transcript, else null (never a generic placeholder like the word \"Client\") -- the invoice defaults to billing the event name itself when this is null, so leave it null rather than guessing>", "bill_to_location": "<client city/location if mentioned, else null>"}.`,
     transcript,
