@@ -904,7 +904,11 @@ if (target.field_name === 'contract_confirmed') {
   const saysYes = /^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test(answerText.trim());
   if (saysYes) {
     await sbPatch(`bookings?id=eq.${target.booking_id}`, { status: 'signed' });
-    await sendWhatsApp(from_number, "Marked as signed. Fanning out to departments now.");
+    // Not literally "now" -- 05-stage5-fanout.json only runs on its 5-minute
+    // cron, so the actual department messages can land anywhere up to ~5min
+    // later. The old wording said "now" and looked broken when checked right
+    // away -- confirmed live 2026-08-02.
+    await sendWhatsApp(from_number, "Marked as signed. Department briefs will go out shortly.");
   } else {
     await sendWhatsApp(from_number, "Got it, not confirmed. Ask the client to resend a valid signed copy.");
   }

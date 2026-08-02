@@ -629,11 +629,34 @@ async function draftStandaloneInvoice(clientName, pmDetails, pmPhone) {
     await sendWhatsApp(pmPhone, `Couldn't figure out line items for that from what you sent -- send me the items and price directly.`);
     return { ok: false, reason: 'extraction_failed' };
   }
-  return sendStandaloneInvoiceConfirm({
+  const draft = {
     client_name: extraction.bill_to_name || clientName,
     line_items: extraction.line_items,
     payment_terms: extraction.payment_terms || null,
-  }, pmPhone);
+  };
+  // Same real-booking rule (see draftInvoice's payment_terms guard) applied
+  // here too -- confirmed live 2026-08-02: without this, a missing payment
+  // agreement just silently showed "Payment: not stated" on the confirm text
+  // and the PM's follow-up (meant to answer that) got misread as a
+  // correction to the items instead, looping the confirm several times.
+  // Asked as its own separate question, same tracking mechanism (stage
+  // standalone_invoice_confirm) so no new swipe-reply/fallback wiring is
+  // needed -- see resolveStandaloneInvoiceConfirm's needs_payment_terms check.
+  if (!draft.payment_terms) return sendStandalonePaymentTermsAsk(draft, pmPhone);
+  return sendStandaloneInvoiceConfirm(draft, pmPhone);
+}
+
+async function sendStandalonePaymentTermsAsk(draft, pmPhone) {
+  const askText = `For ${draft.client_name}, is payment full or in parts? If in parts, let me know the split (e.g. 60/40, or a percentage deposit).`;
+  const msgId = await sendWhatsApp(pmPhone, askText);
+  await sbInsert('conversations', [{
+    booking_id: null,
+    direction: 'outbound',
+    message_text: `STANDALONE_INVOICE_DRAFT:${JSON.stringify({ ...draft, needs_payment_terms: true, pm_phone: pmPhone })}`,
+    stage: 'standalone_invoice_confirm',
+    whatsapp_message_id: msgId,
+  }]);
+  return { ok: true, action: 'awaiting_standalone_payment_terms' };
 }
 
 async function sendStandaloneInvoiceConfirm(draft, pmPhone) {
@@ -653,6 +676,21 @@ async function sendStandaloneInvoiceConfirm(draft, pmPhone) {
 // Swipe-reply (or fallback-chat-routed) resolution for the confirm above.
 // Looked up by pm-toggle-code.js the same way as findStandaloneInvoiceRequestByForwardedMessageId.
 async function resolveStandaloneInvoiceConfirm(draft, answerText, pmPhone) {
+  // Continuation of the payment-terms ask above -- this reply is answering
+  // "full or in parts", not a yes/no/correction on a confirm the PM hasn't
+  // even seen yet. Extract it with its own small, focused prompt (not the
+  // full line-item extractor, which has nothing to do here and previously
+  // misread a bare answer like "60/40" as an item correction).
+  if (draft.needs_payment_terms) {
+    const extraction = await askOpenAIJson(
+      'The venue asked how payment will be made -- in full, or split into parts (e.g. a percentage deposit). Extract what they described. Reply ONLY with JSON: {"payment_terms": "..." or null}. Use null only if this genuinely does not answer the question at all. Examples: "full" -> "100% Full Payment Due", "60/40" -> "60/40 split", "half now half after" -> "50/50 split", "30% deposit" -> "30% deposit, balance before event".',
+      answerText || ''
+    );
+    if (!extraction?.payment_terms) {
+      return sendStandalonePaymentTermsAsk(draft, pmPhone);
+    }
+    return sendStandaloneInvoiceConfirm({ ...draft, payment_terms: extraction.payment_terms, needs_payment_terms: undefined }, pmPhone);
+  }
   if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
     const { subtotal, vat, wht, total } = recomputeInvoiceTotals(draft.line_items);
     const invoice = {
@@ -907,7 +945,16 @@ async function sendToLawyer(bookingId) {
   const lawyer = await findLawyer();
   if (!lawyer) return { ok: false, reason: 'no_lawyer_contact' };
 
-  const text = `New contract needed:\nOrganizer: ${contract.organizer_legal_name}, ${contract.organizer_registered_address}\nEvent: ${booking.event_name}, ${booking.event_date}\nType: ${booking.event_type}\nFee: ${formatMoney(contract.total_fee)}\nPayment: ${contract.payment_terms}`;
+  // The lawyer only ever got the total fee, not what it's actually for --
+  // real contracts need to name what's being paid for. Reuse the invoice's
+  // own line items (already extracted from the real negotiation back in
+  // Stage 3) rather than re-deriving them.
+  const invoice = (await sbRequest('GET', `invoices?booking_id=eq.${bookingId}&order=created_at.desc&limit=1&select=*`))[0];
+  const itemsText = invoice?.line_items?.length
+    ? invoice.line_items.map((li) => `- ${li.description}: ${formatMoney(li.amount)}`).join('\n')
+    : null;
+
+  const text = `New contract needed:\nOrganizer: ${contract.organizer_legal_name}, ${contract.organizer_registered_address}\nEvent: ${booking.event_name}, ${booking.event_date}\nType: ${booking.event_type}${itemsText ? `\nItems paid for:\n${itemsText}` : ''}\nFee: ${formatMoney(contract.total_fee)}\nPayment: ${contract.payment_terms}`;
   await sendWhatsApp(lawyer.phone_number, text);
   await sbPatch(`contracts?id=eq.${contract.id}`, { sent_to_lawyer_at: new Date().toISOString() });
   return { ok: true };
