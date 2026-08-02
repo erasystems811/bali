@@ -1039,47 +1039,11 @@ async function resolveContractApproval(pendingId, answerText) {
   return { ok: true, action: 'change_relayed_to_lawyer' };
 }
 
-// Undo an already-sent invoice or contract. WhatsApp gives no way to
-// delete/unsend a message already delivered to someone else's phone -- all
-// this can actually do is tell the client to disregard it and reset the
-// booking's state so a corrected one can be sent through the normal flow.
-// Whichever is further along wins: a contract that's been sent but not yet
-// signed takes precedence over a sent invoice, since revoking the invoice
-// wouldn't make sense once things have already moved past it. Neither an
-// already-signed contract nor a paid invoice can be revoked this way --
-// those are past the point a plain "disregard" message covers.
-async function revokeApproval(bookingId) {
-  const booking = await getBooking(bookingId);
-  const client = await getContact(booking.client_contact_id);
-  const pm = await findPm();
-  const contract = (await sbRequest('GET', `contracts?booking_id=eq.${bookingId}&order=created_at.desc&limit=1&select=*`))[0];
-  const invoice = (await sbRequest('GET', `invoices?booking_id=eq.${bookingId}&order=created_at.desc&limit=1&select=*`))[0];
-
-  if (contract && contract.sent_to_client_at && !contract.signed_at) {
-    await sbPatch(`contracts?id=eq.${contract.id}`, { sent_to_client_at: null, approved_by_pm_at: null });
-    await sbPatch(`bookings?id=eq.${bookingId}`, { status: 'contract_drafted' });
-    if (client) await sendWhatsApp(client.phone_number, `Please disregard the contract we just sent for ${booking.event_name} -- an updated one will follow shortly.`);
-    if (pm) await sendWhatsApp(pm.phone_number, `Contract revoked for ${booking.event_name}. Client was told to disregard it -- reply yes once the lawyer's update is in to send the corrected one.`);
-    return { ok: true, action: 'contract_revoked' };
-  }
-
-  if (invoice && invoice.status === 'sent_to_client') {
-    await sbPatch(`invoices?id=eq.${invoice.id}`, { status: 'pending_pm_approval' });
-    if (client) await sendWhatsApp(client.phone_number, `Please disregard the invoice we just sent for ${booking.event_name} -- an updated one will follow shortly.`);
-    if (pm) await sendWhatsApp(pm.phone_number, `Invoice revoked for ${booking.event_name}. Client was told to disregard it -- correct it and I'll resend for your approval.`);
-    return { ok: true, action: 'invoice_revoked' };
-  }
-
-  if (pm) await sendWhatsApp(pm.phone_number, `Nothing to revoke for ${booking.event_name} -- no invoice or contract has been sent to the client yet (or it's already signed/paid, which this can't undo).`);
-  return { ok: false, reason: 'nothing_to_revoke' };
-}
-
 const input = $input.first().json.body || $input.first().json;
 const action = input.action;
 
 let result;
 if (action === 'draft_invoice') result = await draftInvoice(input.booking_id, input.pm_details);
-else if (action === 'revoke_approval') result = await revokeApproval(input.booking_id);
 else if (action === 'draft_standalone_invoice') result = await draftStandaloneInvoice(input.client_name, input.pm_details, input.pm_phone);
 else if (action === 'resolve_standalone_invoice_confirm') {
   const draft = JSON.parse(input.draft_raw.replace('STANDALONE_INVOICE_DRAFT:', ''));
