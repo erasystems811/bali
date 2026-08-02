@@ -701,19 +701,26 @@ if (!booking) {
   } else {
     const pmRows = await sbRequest('GET', 'contacts?role=eq.pm&select=*&limit=1');
     const pm = pmRows[0];
-    if (pm && input.media_type) {
-      // A document/image reaching a connected booking through this general
-      // path (any status other than the specific invoiced/sent_to_client
-      // stages that already handle their own media) is most likely the
-      // signed contract -- the PM often sends it manually rather than
-      // through the official approve-and-send flow, which is the only thing
-      // that sets status to 'sent_to_client' and is the ONLY status the bot
-      // otherwise recognizes as "expect a signed PDF back". Confirmed live:
-      // PM manually sent the contract and told the client to resend it
-      // signed, the reply landed here (status never became sent_to_client)
-      // and just got passively forwarded with no confirm prompt at all.
-      // Treat it the same way that specific branch already does, rather
-      // than assuming a document only matters in one exact status.
+    // A document/image reaching a connected booking through this general
+    // path (any status other than the specific invoiced/sent_to_client
+    // stages that already handle their own media) is ONLY the signed
+    // contract if a contract was actually sent to this client at some point
+    // (PM often sends it manually rather than through the official
+    // approve-and-send flow, which is the only thing that sets status to
+    // 'sent_to_client') and hasn't already been marked signed. Checked
+    // directly against the contract row's own sent_to_client_at/signed_at,
+    // not inferred from booking.status. Confirmed live as a real bug without
+    // this check: a document sent any time after invoice approval -- proof
+    // of payment arriving late, or literally anything else -- got assumed
+    // to be a signed contract and asked "confirm it's valid?" even though no
+    // contract had ever been sent to sign in the first place.
+    const activeContract = (await sbRequest(
+      'GET',
+      `contracts?booking_id=eq.${booking.id}&order=created_at.desc&limit=1&select=sent_to_client_at,signed_at`
+    ))[0];
+    const awaitingSignedContract = !!(activeContract && activeContract.sent_to_client_at && !activeContract.signed_at);
+
+    if (pm && input.media_type && awaitingSignedContract) {
       const questionText = `${booking.event_name}: client sent back a signed PDF (above). Confirm it's valid? Reply yes or no.`;
       const pendingRows = await sbRequest('POST', 'pending_questions', {
         booking_id: booking.id,
@@ -727,6 +734,11 @@ if (!booking) {
       logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed ${input.media_type} to PM]`, stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null });
       const msgId = await sendWhatsApp(pm.phone_number, questionText);
       if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
+    } else if (pm && input.media_type) {
+      // No contract awaiting signature -- just forward whatever it is,
+      // no "is this signed?" assumption attached.
+      const docMsgId = await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}, from client`);
+      logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed ${input.media_type} to PM]`, stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null });
     } else if (pm) {
       const forwardText = `${booking.event_name}: ${effectiveText}`;
       const msgId = await sendWhatsApp(pm.phone_number, forwardText);
