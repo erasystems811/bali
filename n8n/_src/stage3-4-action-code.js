@@ -591,31 +591,84 @@ async function draftInvoice(bookingId, pmDetails) {
 // normal booking lifecycle (see draftInvoice above) -- this is for a PM who
 // explicitly does not want to "follow the customer route" for a quick or
 // hypothetical invoice.
+// Two-phase, same shape as the real-booking invoice flow (draftInvoice /
+// resolveInvoiceDraftConfirm) -- extract, show the PM a plain confirmation
+// (name / items / price / payment, one per line), only render and send the
+// actual PDF once he says yes. No booking/invoice row exists for this
+// (see the note on draftStandaloneInvoice's caller), so the draft itself is
+// carried in the tracking conversations row rather than re-fetched from a
+// table -- stored as JSON in message_text, never shown to the PM as-is;
+// what he actually sees is confirmText below.
 async function draftStandaloneInvoice(clientName, pmDetails, pmPhone) {
   const extraction = await extractInvoiceLineItems(`PM: ${pmDetails}`);
   if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
-    await sendWhatsApp(pmPhone, `Couldn't figure out line items for that from what you sent -- send me the agreed items and amounts directly.`);
+    await sendWhatsApp(pmPhone, `Couldn't figure out line items for that from what you sent -- send me the items and price directly.`);
     return { ok: false, reason: 'extraction_failed' };
   }
-
-  const { subtotal, vat, wht, total } = recomputeInvoiceTotals(extraction.line_items);
-  const invoice = {
-    invoice_number: `DRAFT-${Date.now()}`,
-    date_issued: new Date().toISOString().slice(0, 10),
-    bill_to_name: extraction.bill_to_name || clientName,
-    bill_to_location: extraction.bill_to_location || null,
+  return sendStandaloneInvoiceConfirm({
+    client_name: extraction.bill_to_name || clientName,
     line_items: extraction.line_items,
     payment_terms: extraction.payment_terms || null,
-    subtotal,
-    vat_amount: vat,
-    wht_amount: wht,
-    total_net_payable: total,
-  };
-  const html = formatInvoiceHtml(invoice, { event_name: clientName });
-  const pdfBuffer = await renderPdf(html);
-  const mediaId = await uploadWhatsAppMedia(pdfBuffer, `${invoice.invoice_number}.pdf`);
-  await sendWhatsAppDocument(pmPhone, mediaId, `${invoice.invoice_number}.pdf`, `Standalone invoice for ${clientName} -- not saved anywhere, not sent to anyone.`);
-  return { ok: true, invoice_number: invoice.invoice_number };
+  }, pmPhone);
+}
+
+async function sendStandaloneInvoiceConfirm(draft, pmPhone) {
+  const itemLines = draft.line_items.map((li) => `- ${li.description}: ${formatMoney(li.amount)}`).join('\n');
+  const confirmText = `Please confirm -- reply YES to generate, NO to cancel, or tell me what to change.\n\nName: ${draft.client_name}\nItems:\n${itemLines}\nPayment: ${draft.payment_terms || 'not stated'}`;
+  const msgId = await sendWhatsApp(pmPhone, confirmText);
+  await sbInsert('conversations', [{
+    booking_id: null,
+    direction: 'outbound',
+    message_text: `STANDALONE_INVOICE_DRAFT:${JSON.stringify({ ...draft, pm_phone: pmPhone })}`,
+    stage: 'standalone_invoice_confirm',
+    whatsapp_message_id: msgId,
+  }]);
+  return { ok: true, action: 'awaiting_standalone_confirm' };
+}
+
+// Swipe-reply (or fallback-chat-routed) resolution for the confirm above.
+// Looked up by pm-toggle-code.js the same way as findStandaloneInvoiceRequestByForwardedMessageId.
+async function resolveStandaloneInvoiceConfirm(draft, answerText, pmPhone) {
+  if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
+    const { subtotal, vat, wht, total } = recomputeInvoiceTotals(draft.line_items);
+    const invoice = {
+      invoice_number: `DRAFT-${Date.now()}`,
+      date_issued: new Date().toISOString().slice(0, 10),
+      bill_to_name: draft.client_name,
+      bill_to_location: null,
+      line_items: draft.line_items,
+      payment_terms: draft.payment_terms,
+      subtotal,
+      vat_amount: vat,
+      wht_amount: wht,
+      total_net_payable: total,
+    };
+    const html = formatInvoiceHtml(invoice, { event_name: draft.client_name });
+    const pdfBuffer = await renderPdf(html);
+    const mediaId = await uploadWhatsAppMedia(pdfBuffer, `${invoice.invoice_number}.pdf`);
+    await sendWhatsAppDocument(pmPhone, mediaId, `${invoice.invoice_number}.pdf`, `Standalone invoice for ${draft.client_name} -- not saved anywhere, not sent to anyone.`);
+    await sbInsert('conversations', [{ booking_id: null, direction: 'outbound', message_text: 'STANDALONE_INVOICE_RESOLVED', stage: 'standalone_invoice_resolved' }]);
+    return { ok: true, invoice_number: invoice.invoice_number };
+  }
+  if (/^n(o)?\b/i.test((answerText || '').trim())) {
+    await sendWhatsApp(pmPhone, 'Cancelled -- nothing generated.');
+    await sbInsert('conversations', [{ booking_id: null, direction: 'outbound', message_text: 'STANDALONE_INVOICE_RESOLVED', stage: 'standalone_invoice_resolved' }]);
+    return { ok: true, action: 'standalone_invoice_cancelled' };
+  }
+  // Anything else is a correction -- re-extract against the change on top of
+  // what was already agreed, same collective-vs-itemized handling as a real
+  // negotiation transcript, then show the updated confirmation again.
+  const transcript = `PM: ${JSON.stringify(draft.line_items.map((li) => `${li.description} ${li.amount}`).join(', '))} (payment: ${draft.payment_terms || 'not stated'})\nPM: ${answerText}`;
+  const extraction = await extractInvoiceLineItems(transcript);
+  if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
+    await sendWhatsApp(pmPhone, `Didn't catch that change -- can you say it again?`);
+    return { ok: false };
+  }
+  return sendStandaloneInvoiceConfirm({
+    client_name: extraction.bill_to_name || draft.client_name,
+    line_items: extraction.line_items,
+    payment_terms: extraction.payment_terms || draft.payment_terms,
+  }, pmPhone);
 }
 
 // Phase 1 resolution: PM confirming/correcting the plain-text draft, before
@@ -992,6 +1045,10 @@ const action = input.action;
 let result;
 if (action === 'draft_invoice') result = await draftInvoice(input.booking_id, input.pm_details);
 else if (action === 'draft_standalone_invoice') result = await draftStandaloneInvoice(input.client_name, input.pm_details, input.pm_phone);
+else if (action === 'resolve_standalone_invoice_confirm') {
+  const draft = JSON.parse(input.draft_raw.replace('STANDALONE_INVOICE_DRAFT:', ''));
+  result = await resolveStandaloneInvoiceConfirm(draft, input.answer_text, draft.pm_phone);
+}
 else if (action === 'resolve_invoice_draft_confirm') result = await resolveInvoiceDraftConfirm(input.pending_question_id, input.answer_text);
 else if (action === 'correct_invoice_from_fallback') result = await correctInvoiceFromFallbackChat(input.booking_id, input.answer_text);
 else if (action === 'resolve_payment_terms_confirm') result = await resolvePaymentTermsConfirm(input.pending_question_id, input.answer_text);
