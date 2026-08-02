@@ -276,4 +276,28 @@ create table if not exists sandbox_snapshots (
   created_at timestamptz not null default now()
 );
 
+-- ---------------------------------------------------------------------------
+-- pgrst_watch: keeps PostgREST's in-memory schema cache in sync automatically.
+-- Without this, PostgREST only learns about a new/changed column on restart --
+-- confirmed live 2026-08-02: contracts.details_confirmed_at existed in the
+-- real table for hours before anyone restarted postgrest, and every write to
+-- it 400'd with PGRST204 ("column not found in schema cache") the whole time,
+-- even though the column was genuinely there. This event trigger fires
+-- automatically after ANY schema change (this file, a manual ALTER, whatever)
+-- and tells PostgREST to reload -- no more manual "did anyone restart
+-- postgrest after this migration?" step, ever. Needs to be applied on both
+-- `bali` and `bali_sandbox` (event triggers are per-database, not
+-- cluster-wide). PostgREST 14's db-channel listener defaults to on, so no
+-- docker-compose/env changes were needed on the PostgREST side.
+-- ---------------------------------------------------------------------------
+create or replace function public.pgrst_watch() returns event_trigger
+language plpgsql as $$
+begin
+  notify pgrst, 'reload schema';
+end;
+$$;
+
+drop event trigger if exists pgrst_watch;
+create event trigger pgrst_watch on ddl_command_end execute procedure public.pgrst_watch();
+
 create index if not exists sandbox_snapshots_created_at_idx on sandbox_snapshots (created_at);
