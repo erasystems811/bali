@@ -670,7 +670,13 @@ async function applyInvoiceCorrectionAndResend(booking, invoice, answerText) {
 async function resolvePaymentTermsConfirm(pendingId, answerText) {
   const pq = (await sbRequest('GET', `pending_questions?id=eq.${pendingId}&select=*`))[0];
   await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
-  return draftInvoice(pq.booking_id, answerText);
+  // A bare short answer ("full", "60/40") only makes sense alongside the
+  // question it's answering -- fed on its own into the extraction below,
+  // with no transcript context that a payment-terms question was even
+  // asked, the model correctly (by its own logic) can't tell "full" means
+  // anything and asks again -- confirmed live as an actual retry loop.
+  // Restating the question inline gives it that context in one line.
+  return draftInvoice(pq.booking_id, `(re: "${pq.question_text}") ${answerText}`);
 }
 
 // Entry point for the PM fallback chat (pm-toggle-code.js) when a plain-typed
