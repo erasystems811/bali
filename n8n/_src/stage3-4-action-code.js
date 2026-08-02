@@ -485,6 +485,27 @@ Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}
 
 async function draftInvoice(bookingId, pmDetails) {
   const booking = await getBooking(bookingId);
+
+  // Asked FIRST, before anything else about this invoice -- owner's call.
+  // Used to be asked only after the draft/PDF questions, which left TWO
+  // pending questions open on the same booking at once; a plain "yes" or
+  // "full-time" from the PM (no swipe-reply, no number) only auto-matches
+  // when exactly one is open, so with two it fell through to the generic
+  // fallback chat every time -- which cheerfully said "I'll generate the PDF
+  // now" without ever actually doing it. Confirmed live as a real, repeatable
+  // failure. Asking this first and gating everything else on it means only
+  // one question is ever open at a time.
+  //
+  // Skipped when pmDetails is given directly (the "invoice X: details"
+  // command) -- pmDetails only ever exists as this one function argument,
+  // never logged to conversations, so gating here would lose it permanently
+  // (the PM would have to retype it after answering staffing_type). That
+  // command path keeps the old asked-later behavior for now.
+  if (!pmDetails && (booking.staffing_type === null || booking.staffing_type === undefined)) {
+    await askPmDirectly(bookingId, 'staffing_type', `For ${booking.event_name}, full-time or part-time staff needed?`);
+    return { ok: true, action: 'awaiting_staffing_type' };
+  }
+
   // pmDetails lets the PM hand the bot agreed items/price directly (e.g. the
   // "invoice [event]: 2m for sound, screen and staff" command) with no real
   // negotiation conversation on record -- appended as one more "PM:" line so
@@ -549,9 +570,15 @@ async function draftInvoice(bookingId, pmDetails) {
   // automated flow instead of staying connected to the PM.
   await sbPatch(`bookings?id=eq.${bookingId}`, { status: 'invoiced', connected_to_pm_at: booking.connected_to_pm_at || new Date().toISOString() });
 
-  if (booking.staffing_type === null || booking.staffing_type === undefined) {
-    await askPmDirectly(bookingId, 'staffing_type', `For ${booking.event_name}, full-time or part-time staff needed?`);
-  }
+  // staffing_type is deliberately NOT asked here anymore -- asking it in the
+  // same breath as invoice_draft_confirm left TWO pending questions open at
+  // once, and a plain "yes" from the PM (no swipe-reply, no number) only
+  // auto-matches when exactly one is open -- with two, it fell through to
+  // the generic fallback chat every time, which cheerfully said "I'll
+  // generate the PDF now" without ever actually doing it. Confirmed live as
+  // a real, repeatable failure, not a one-off. Asked instead from
+  // resolveInvoiceApproval, once the PDF has actually gone to the client and
+  // nothing else was just opened in that same step.
 
   return { ok: true, invoice_id: invoice.id };
 }
@@ -679,6 +706,25 @@ async function resolvePaymentTermsConfirm(pendingId, answerText) {
   return draftInvoice(pq.booking_id, `(re: "${pq.question_text}") ${answerText}`);
 }
 
+// Resolves the staffing_type gate at the top of draftInvoice -- see the
+// comment there for why this is asked first now. Re-runs draftInvoice once
+// staffing_type is saved, same re-entrant pattern as payment_terms above.
+async function resolveStaffingType(pendingId, answerText) {
+  const pq = (await sbRequest('GET', `pending_questions?id=eq.${pendingId}&select=*`))[0];
+  const extraction = await askOpenAIJson(
+    'The venue asked whether an event needs full-time or part-time staff. Does this WhatsApp reply clearly say one or the other? Reply ONLY with JSON: {"value": "full-time"|"part-time"|null}. null if it does not clearly say either (e.g. it is about something else entirely, like payment).',
+    answerText || ''
+  );
+  if (!extraction?.value) {
+    const pm = await findPm();
+    if (pm) await sendWhatsApp(pm.phone_number, `Sorry, full-time or part-time staff?`);
+    return { ok: true, action: 're_ask_staffing_type' };
+  }
+  await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
+  await sbPatch(`bookings?id=eq.${pq.booking_id}`, { staffing_type: extraction.value });
+  return draftInvoice(pq.booking_id, null);
+}
+
 // Entry point for the PM fallback chat (pm-toggle-code.js) when a plain-typed
 // message names an invoice change but nothing is currently open to
 // swipe-reply/auto-match to -- e.g. the PM already confirmed or asked a
@@ -724,6 +770,13 @@ async function resolveInvoiceApproval(pendingId, answerText) {
     await sendInvoicePdf(client.phone_number, invoice, booking, caption);
     await sendWhatsApp(client.phone_number, "Whenever you're ready, please send proof of payment and we'll get it confirmed.");
     await logConversation(booking.id, null, 'outbound', `[invoice PDF sent] ${invoice.invoice_number}`, 'invoice_sent');
+    // Asked here, not back in draftInvoice -- see the comment there. This is
+    // the first point after invoice_draft_confirm where nothing else is
+    // simultaneously open, so a plain "full-time"/"part-time" reply from the
+    // PM will actually auto-match instead of falling through to chat.
+    if (booking.staffing_type === null || booking.staffing_type === undefined) {
+      await askPmDirectly(booking.id, 'staffing_type', `For ${booking.event_name}, full-time or part-time staff needed?`);
+    }
     return { ok: true, action: 'invoice_sent_to_client' };
   }
 
@@ -942,6 +995,7 @@ else if (action === 'draft_standalone_invoice') result = await draftStandaloneIn
 else if (action === 'resolve_invoice_draft_confirm') result = await resolveInvoiceDraftConfirm(input.pending_question_id, input.answer_text);
 else if (action === 'correct_invoice_from_fallback') result = await correctInvoiceFromFallbackChat(input.booking_id, input.answer_text);
 else if (action === 'resolve_payment_terms_confirm') result = await resolvePaymentTermsConfirm(input.pending_question_id, input.answer_text);
+else if (action === 'resolve_staffing_type') result = await resolveStaffingType(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_invoice_approval') result = await resolveInvoiceApproval(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_payment_confirmed') result = await resolvePaymentConfirmed(input.pending_question_id, input.answer_text);
 else if (action === 'send_to_lawyer') result = await sendToLawyer(input.booking_id);

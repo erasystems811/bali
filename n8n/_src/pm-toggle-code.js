@@ -807,6 +807,10 @@ const STAGE3_4_DELEGATED_FIELDS = {
   contract_approval: 'resolve_contract_approval',
   payment_confirmed: 'resolve_payment_confirmed',
   payment_terms_confirm: 'resolve_payment_terms_confirm',
+  // Delegated (not handled by the generic FIELD_PROMPTS path below) because
+  // resolving it now needs to resume draftInvoice, not just patch a column
+  // -- see resolveStaffingType in stage3-4-action-code.js.
+  staffing_type: 'resolve_staffing_type',
 };
 if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
   // Fire-and-forget: the stage3-4 webhook responds immediately on receipt
