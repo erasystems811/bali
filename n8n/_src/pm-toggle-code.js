@@ -254,6 +254,23 @@ async function findStaffRelayByForwardedMessageId(messageId) {
   return rows[0] || null;
 }
 
+// Same pattern again, for a PM swipe-replying with the items/price after the
+// bot asked for them on a standalone invoice (no matching booking -- see the
+// "invoice [name]" command above). No booking exists here at all, so this
+// can't be a pending_questions/booking-scoped lookup like the others --
+// booking_id is null on this conversations row (see schema.sql), and the
+// client name is pulled back out of the exact fixed wording the request was
+// sent with, since there's nowhere else to park it.
+async function findStandaloneInvoiceRequestByForwardedMessageId(messageId) {
+  if (!messageId) return null;
+  const rows = await sbRequest(
+    'GET',
+    `conversations?whatsapp_message_id=eq.${encodeURIComponent(messageId)}&stage=eq.standalone_invoice_request&select=message_text&limit=1`
+  );
+  const match = rows[0]?.message_text?.match(/Couldn't find a booking called "([^"]+)"/);
+  return match ? { client_name: match[1] } : null;
+}
+
 // Title-cases a role for display (event_assistant -> Event Assistant) --
 // duplicated from stage3-4-action-code.js's version (separate n8n Code node,
 // no shared module system in this codebase, matching the existing per-file
@@ -334,7 +351,14 @@ if (invoiceMatch) {
       });
       return [{ json: { action: 'standalone_invoice_triggered', client_name: eventName } }];
     }
-    await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}". Check the spelling, or give me the items/price after a colon (e.g. "invoice ${eventName}: sound and light for 500k") for a one-off invoice with no booking needed.`);
+    // No booking and no details given yet -- ask for them, and log this
+    // exact outbound message (stage: standalone_invoice_request) so a
+    // swipe-reply to it is recognized above and routed straight into
+    // draftStandaloneInvoice, instead of falling through to the generic
+    // "did you mean to send this to a customer?" fallback chat.
+    const askText = `Couldn't find a booking called "${eventName}" -- what are the items and price? I'll draft it and send you the PDF.`;
+    const msgId = await sendWhatsApp(from_number, askText);
+    await logConversation(null, null, 'outbound', askText, 'standalone_invoice_request', msgId);
     return [{ json: { action: 'invoice_command_not_found', query: eventName } }];
   }
   await helpers.httpRequest({
@@ -437,6 +461,20 @@ if (reply_to_message_id) {
     }
     await logConversation(planningTarget.id, contact_id, 'inbound', answerText, 'pm_message');
     return [{ json: { action: 'planning_relayed_to_client', booking_id: planningTarget.id } }];
+  }
+  if (!target) {
+    const standaloneReq = await findStandaloneInvoiceRequestByForwardedMessageId(reply_to_message_id);
+    if (standaloneReq) {
+      await helpers.httpRequest({
+        method: 'POST',
+        url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+        headers: { 'Content-Type': 'application/json' },
+        body: { action: 'draft_standalone_invoice', client_name: standaloneReq.client_name, pm_details: answerText, pm_phone: from_number },
+        json: true,
+        timeout: 15000,
+      });
+      return [{ json: { action: 'standalone_invoice_triggered_via_reply', client_name: standaloneReq.client_name } }];
+    }
   }
   if (!target) {
     const staffRelay = await findStaffRelayByForwardedMessageId(reply_to_message_id);
