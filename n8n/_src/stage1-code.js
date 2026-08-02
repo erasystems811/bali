@@ -194,7 +194,7 @@ async function contractInfoStillMissing(booking) {
   if (booking.status !== 'awaiting_contract') return false;
   const contractRows = await sbRequest('GET', `contracts?booking_id=eq.${booking.id}&order=created_at.desc&limit=1&select=*`);
   const contract = contractRows[0];
-  return !!(contract && (!contract.organizer_legal_name || !contract.organizer_registered_address || !booking.event_type));
+  return !!(contract && (!contract.organizer_legal_name || !contract.organizer_registered_address || !contract.details_confirmed_at || !booking.event_type));
 }
 
 // Real booking history for this contact (signed/onboarded only -- not just
@@ -617,7 +617,7 @@ if (!booking) {
 
   if (contract && !contract.organizer_legal_name) {
     const extraction = await askOpenAIJson(
-      'The venue asked a client for their organization\'s full legal name. Does this WhatsApp message actually state one (in any format, labels like "name:" are fine)? Reply ONLY with JSON: {"organizer_legal_name": "..." or null}.',
+      'The venue asked a client for their organization\'s full legal name. Does this WhatsApp message actually state one? Accept ANY capitalization -- WhatsApp users often type in all lowercase, and a lowercase name is exactly as valid as a capitalized one (e.g. "mad party entertainment" is a valid answer, same as "Mad Party Entertainment"). Labels like "name:" are fine but not required. Reply ONLY with JSON: {"organizer_legal_name": "..." or null}.',
       effectiveText || ''
     );
     if (extraction?.organizer_legal_name) {
@@ -633,14 +633,28 @@ if (!booking) {
     );
     if (extraction?.organizer_registered_address) {
       await sbPatch(`contracts?id=eq.${contract.id}`, { organizer_registered_address: extraction.organizer_registered_address });
+      replyText = `Please confirm these are correct -- reply YES if accurate or NO if not.\nName: ${contract.organizer_legal_name}\nAddress: ${extraction.organizer_registered_address}`;
+    } else {
+      replyText = "Sorry, I need your organization's official registered address, could you send that?";
+    }
+  } else if (contract && !contract.details_confirmed_at) {
+    const extraction = await askOpenAIJson(
+      'The venue asked a client to confirm their organization name and address are accurate, by replying YES or NO. Does this WhatsApp message clearly say yes/confirm, or clearly say no/incorrect? Reply ONLY with JSON: {"confirmed": true, false, or null}. Use null if the message is not actually a yes/no answer to this.',
+      effectiveText || ''
+    );
+    if (extraction?.confirmed === true) {
+      await sbPatch(`contracts?id=eq.${contract.id}`, { details_confirmed_at: new Date().toISOString() });
       // Normal intake always collects event_type before a booking can even
       // reach negotiation, but a booking can land here without it having
       // ever gone through that (e.g. a PM-driven "invoice [event]" command
       // on a booking that skipped intake) -- catch that here, last, rather
       // than send the lawyer a contract request with the event type blank.
       replyText = booking.event_type ? await sendToLawyerNow() : "Thanks. One more thing, what type of event is this?";
+    } else if (extraction?.confirmed === false) {
+      await sbPatch(`contracts?id=eq.${contract.id}`, { organizer_legal_name: null, organizer_registered_address: null });
+      replyText = "No problem, let's redo it. What's your organization's full legal name?";
     } else {
-      replyText = "Sorry, I need your organization's official registered address, could you send that?";
+      replyText = "Sorry, just reply YES if those details are accurate, or NO if not.";
     }
   } else if (contract && !booking.event_type) {
     const extraction = await askOpenAIJson(
