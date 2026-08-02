@@ -147,6 +147,30 @@ async function sendWhatsAppDocument(toNumber, mediaId, filename, caption) {
   return res?.messages?.[0]?.id || null;
 }
 
+// Same idea as sendWhatsAppDocument but type-generic (image or document) --
+// duplicated from stage1-code.js's version (no shared module system in this
+// codebase). Used where the sender might reasonably send either (e.g. a
+// lawyer forwarding a photo of a signed page instead of a proper PDF scan --
+// same real-world case already handled for the client's signed-contract
+// upload in stage1-code.js).
+async function sendWhatsAppMedia(toNumber, mediaType, mediaId, caption) {
+  if (SANDBOX) return sandboxLog(toNumber, `[${mediaType}]${caption ? ' ' + caption : ''}`, mediaType);
+  const res = await helpers.httpRequest({
+    method: 'POST',
+    url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
+    headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
+    body: {
+      messaging_product: 'whatsapp',
+      to: toNumber,
+      type: mediaType,
+      [mediaType]: { id: mediaId, caption },
+    },
+    json: true,
+    timeout: 20000,
+  });
+  return res?.messages?.[0]?.id || null;
+}
+
 // Renders invoice HTML (styled to match the real BALI-2026-003 template) to a
 // PDF Buffer. Goes through a small internal sub-workflow (Webhook -> Code
 // [prepareBinaryData] -> HTTP Request -> Respond to Webhook) instead of
@@ -927,7 +951,13 @@ async function handleLawyerInbound(input) {
     'contracts?sent_to_lawyer_at=not.is.null&select=*,bookings(*)&order=sent_to_lawyer_at.desc&limit=1'
   ))[0];
 
-  if (media_type === 'document') {
+  // Accept a photo of the draft, not just a proper PDF scan -- a lawyer
+  // snapping a picture of a printed/signed page is a real case, same reason
+  // the client's signed-contract upload already accepts either (see
+  // stage1-code.js). Confirmed live 2026-08-02: an image from the lawyer
+  // fell through this whole function silently (no reply, no PM forward) since
+  // this branch only ever matched 'document'.
+  if (media_type === 'document' || media_type === 'image') {
     const booking = active?.bookings;
     if (active) {
       await sbPatch(`contracts?id=eq.${active.id}`, { draft_media_id: media_id, draft_received_at: new Date().toISOString() });
@@ -938,7 +968,9 @@ async function handleLawyerInbound(input) {
       ? `Contract draft in for ${booking.event_name}, review and reply yes to approve and send to the client, or reply with changes for the lawyer.`
       : `Document from the lawyer, review and let me know what to do with it.`;
     if (pm) {
-      const msgId = await sendWhatsAppDocument(pm.phone_number, media_id, booking ? `${booking.event_name} - Contract Draft.pdf` : 'Document from lawyer.pdf', questionText);
+      const msgId = media_type === 'document'
+        ? await sendWhatsAppDocument(pm.phone_number, media_id, booking ? `${booking.event_name} - Contract Draft.pdf` : 'Document from lawyer.pdf', questionText)
+        : await sendWhatsAppMedia(pm.phone_number, media_type, media_id, questionText);
       if (active) {
         const pending = (await sbInsert('pending_questions', { booking_id: active.booking_id, field_name: 'contract_approval', question_text: questionText }))[0];
         if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
