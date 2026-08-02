@@ -57,7 +57,7 @@ function sanitizeTemplateParam(text) {
 
 // Department fan-out and day-of checklists go to staff who may have never
 // texted the bot at all -- these will very often land outside the 24h window
-// (error 131047). Fall back to the approved "bali_notification" utility
+// (error 131047). Fall back to the approved "bali_update" utility
 // template (single body variable) instead of the send just failing.
 async function sendWhatsAppTemplate(toNumber, text) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'template');
@@ -70,7 +70,7 @@ async function sendWhatsAppTemplate(toNumber, text) {
       to: toNumber,
       type: 'template',
       template: {
-        name: 'bali_notification',
+        name: 'bali_update',
         language: { code: 'en_US' },
         components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(text) }] }],
       },

@@ -58,7 +58,7 @@ function sanitizeTemplateParam(text) {
 
 // WhatsApp rejects free-form text once 24h have passed since the recipient's
 // last inbound message (error 131047) -- fall back to the approved
-// "bali_notification" utility template (single body variable) instead of
+// "bali_update" utility template (single body variable) instead of
 // the send just failing.
 async function sendWhatsAppTemplate(toNumber, text) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'template');
@@ -71,7 +71,7 @@ async function sendWhatsAppTemplate(toNumber, text) {
       to: toNumber,
       type: 'template',
       template: {
-        name: 'bali_notification',
+        name: 'bali_update',
         language: { code: 'en_US' },
         components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(text) }] }],
       },
