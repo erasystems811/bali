@@ -319,7 +319,22 @@ if (invoiceMatch) {
   const pmDetails = colonIdx === -1 ? null : rest.slice(colonIdx + 1).trim();
   const matches = await sbRequest('GET', `bookings?event_name=ilike.*${encodeURIComponent(eventName)}*&status=neq.cancelled&select=*`);
   if (matches.length === 0) {
-    await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}". Check the spelling?`);
+    // No real booking for this -- if the PM gave actual items/price after a
+    // colon, treat it as a one-off invoice with no booking/customer needed
+    // at all (see draftStandaloneInvoice), rather than just refusing. With
+    // nothing after a colon there's nothing to generate from either way.
+    if (pmDetails) {
+      await helpers.httpRequest({
+        method: 'POST',
+        url: `${env.N8N_BASE_URL}/webhook/stage3-4`,
+        headers: { 'Content-Type': 'application/json' },
+        body: { action: 'draft_standalone_invoice', client_name: eventName, pm_details: pmDetails, pm_phone: from_number },
+        json: true,
+        timeout: 15000,
+      });
+      return [{ json: { action: 'standalone_invoice_triggered', client_name: eventName } }];
+    }
+    await sendWhatsApp(from_number, `Couldn't find a booking called "${eventName}". Check the spelling, or give me the items/price after a colon (e.g. "invoice ${eventName}: sound and light for 500k") for a one-off invoice with no booking needed.`);
     return [{ json: { action: 'invoice_command_not_found', query: eventName } }];
   }
   await helpers.httpRequest({

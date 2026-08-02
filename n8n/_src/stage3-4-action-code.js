@@ -441,17 +441,11 @@ async function buildNegotiationTranscript(bookingId) {
     .join('\n');
 }
 
-async function draftInvoice(bookingId, pmDetails) {
-  const booking = await getBooking(bookingId);
-  // pmDetails lets the PM hand the bot agreed items/price directly (e.g. the
-  // "invoice [event]: 2m for sound, screen and staff" command) with no real
-  // negotiation conversation on record -- appended as one more "PM:" line so
-  // the exact same extraction logic below (collective-vs-itemized, final-
-  // agreed-state) handles it, on top of whatever's actually in the history.
-  const history = await buildNegotiationTranscript(bookingId);
-  const transcript = pmDetails ? `${history}${history ? '\n' : ''}PM: ${pmDetails}` : history;
-
-  const extraction = await askOpenAIJson(
+// Shared by draftInvoice (real booking, transcript-based) and
+// draftStandaloneInvoice (no booking, just a one-off "PM: ..." line) -- same
+// extraction rules apply either way, only the transcript differs.
+async function extractInvoiceLineItems(transcript) {
+  return askOpenAIJson(
     `Extract invoice details from this WhatsApp negotiation transcript for an event venue called Bali. "PM" is the venue's own negotiator -- treat PM lines as authoritative for what was agreed, alongside anything the Client said.
 
 A negotiation is not a shopping list -- items and prices get proposed, countered, dropped, and changed as the conversation goes on. Only extract what was FINALLY agreed, not everything that was ever mentioned. If an item was discussed but later removed, replaced, or never confirmed, leave it out. If a price for an item changed partway through, use the LATEST stated figure, not an earlier offer. Read the whole conversation in order and settle on its end state before extracting -- don't just collect every item/number that appears anywhere in it.
@@ -487,6 +481,19 @@ Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}
     transcript,
     0
   );
+}
+
+async function draftInvoice(bookingId, pmDetails) {
+  const booking = await getBooking(bookingId);
+  // pmDetails lets the PM hand the bot agreed items/price directly (e.g. the
+  // "invoice [event]: 2m for sound, screen and staff" command) with no real
+  // negotiation conversation on record -- appended as one more "PM:" line so
+  // the exact same extraction logic below (collective-vs-itemized, final-
+  // agreed-state) handles it, on top of whatever's actually in the history.
+  const history = await buildNegotiationTranscript(bookingId);
+  const transcript = pmDetails ? `${history}${history ? '\n' : ''}PM: ${pmDetails}` : history;
+
+  const extraction = await extractInvoiceLineItems(transcript);
   if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
     const pm = await findPm();
     if (pm) await sendWhatsApp(pm.phone_number, `Couldn't figure out the invoice line items for ${booking.event_name} from the conversation, can you send me the agreed items and amounts directly?`);
@@ -547,6 +554,41 @@ Reply ONLY with JSON: {"line_items": [{"description": "...", "amount": <number>}
   }
 
   return { ok: true, invoice_id: invoice.id };
+}
+
+// One-off invoice for someone who was never taken through the booking flow
+// at all -- no booking row, no customer contact, nothing saved to the
+// invoices table, no message ever goes to a client. The PM just names who
+// it's for and states the items/price directly, and gets a PDF back
+// straight to their own WhatsApp. Deliberately skips every piece of the
+// normal booking lifecycle (see draftInvoice above) -- this is for a PM who
+// explicitly does not want to "follow the customer route" for a quick or
+// hypothetical invoice.
+async function draftStandaloneInvoice(clientName, pmDetails, pmPhone) {
+  const extraction = await extractInvoiceLineItems(`PM: ${pmDetails}`);
+  if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
+    await sendWhatsApp(pmPhone, `Couldn't figure out line items for that from what you sent -- send me the agreed items and amounts directly.`);
+    return { ok: false, reason: 'extraction_failed' };
+  }
+
+  const { subtotal, vat, wht, total } = recomputeInvoiceTotals(extraction.line_items);
+  const invoice = {
+    invoice_number: `DRAFT-${Date.now()}`,
+    date_issued: new Date().toISOString().slice(0, 10),
+    bill_to_name: extraction.bill_to_name || clientName,
+    bill_to_location: extraction.bill_to_location || null,
+    line_items: extraction.line_items,
+    payment_terms: extraction.payment_terms || null,
+    subtotal,
+    vat_amount: vat,
+    wht_amount: wht,
+    total_net_payable: total,
+  };
+  const html = formatInvoiceHtml(invoice, { event_name: clientName });
+  const pdfBuffer = await renderPdf(html);
+  const mediaId = await uploadWhatsAppMedia(pdfBuffer, `${invoice.invoice_number}.pdf`);
+  await sendWhatsAppDocument(pmPhone, mediaId, `${invoice.invoice_number}.pdf`, `Standalone invoice for ${clientName} -- not saved anywhere, not sent to anyone.`);
+  return { ok: true, invoice_number: invoice.invoice_number };
 }
 
 // Phase 1 resolution: PM confirming/correcting the plain-text draft, before
@@ -890,6 +932,7 @@ const action = input.action;
 
 let result;
 if (action === 'draft_invoice') result = await draftInvoice(input.booking_id, input.pm_details);
+else if (action === 'draft_standalone_invoice') result = await draftStandaloneInvoice(input.client_name, input.pm_details, input.pm_phone);
 else if (action === 'resolve_invoice_draft_confirm') result = await resolveInvoiceDraftConfirm(input.pending_question_id, input.answer_text);
 else if (action === 'correct_invoice_from_fallback') result = await correctInvoiceFromFallbackChat(input.booking_id, input.answer_text);
 else if (action === 'resolve_payment_terms_confirm') result = await resolvePaymentTermsConfirm(input.pending_question_id, input.answer_text);
