@@ -54,11 +54,17 @@ function sanitizeTemplateParam(text) {
 }
 
 // A daily scheduled nudge almost never lands inside the lawyer's 24h window --
-// fall back to the approved "bali_update" utility template (single body
-// variable) whenever the free-form send is rejected with error 131047.
-async function sendWhatsAppTemplate(toNumber, text) {
-  if (SANDBOX) return sandboxLog(toNumber, text, 'template');
-  return helpers.httpRequest({
+// fall back to the approved "bali_update" utility template whenever the
+// free-form send is rejected with error 131047.
+//
+// Owner's explicit correction (2026-08-03): this used to stuff the ENTIRE
+// message text into the template's one body variable. shortLabel is now a
+// short description instead (an event name, or a generic fallback) -- the
+// real content always follows as a genuine, unmodified send in sendWhatsApp
+// below.
+async function sendWhatsAppTemplate(toNumber, shortLabel) {
+  if (SANDBOX) return sandboxLog(toNumber, shortLabel, 'template');
+  const res = await helpers.httpRequest({
     method: 'POST',
     url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
     headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
@@ -69,12 +75,13 @@ async function sendWhatsAppTemplate(toNumber, text) {
       template: {
         name: 'bali_update',
         language: { code: 'en_US' },
-        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(text) }] }],
+        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(shortLabel) }] }],
       },
     },
     json: true,
     timeout: 20000,
   });
+  return res?.messages?.[0]?.id || null;
 }
 
 // Confirmed live: a direct text send to a contact whose last inbound message
@@ -98,26 +105,36 @@ async function isWithinMessagingWindow(toNumber) {
   return hoursSinceLastInbound < 23; // stay a safety margin under the real 24h cutoff
 }
 
-async function sendWhatsApp(toNumber, text) {
+async function sendRawText(toNumber, text) {
+  const res = await helpers.httpRequest({
+    method: 'POST',
+    url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
+    headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
+    body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
+    json: true,
+    timeout: 20000,
+  });
+  return res?.messages?.[0]?.id || null;
+}
+
+// shortLabel: see sendWhatsAppTemplate above.
+async function sendWhatsApp(toNumber, text, shortLabel) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
-    return sendWhatsAppTemplate(toNumber, text);
+    await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
+    // Known, accepted risk (owner's explicit call, 2026-08-03) -- see
+    // stage1-code.js's version of this function for the full explanation.
+    return sendRawText(toNumber, text).catch(() => null);
   }
   try {
-    return await helpers.httpRequest({
-      method: 'POST',
-      url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
-      headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
-      body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
-      json: true,
-      timeout: 20000,
-    });
+    return await sendRawText(toNumber, text);
   } catch (err) {
     let errStr;
     try { errStr = JSON.stringify(err, Object.getOwnPropertyNames(err)); } catch (e) { errStr = String(err); }
     errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
     if (errStr.includes('131047')) {
-      return sendWhatsAppTemplate(toNumber, text);
+      await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
+      return sendRawText(toNumber, text).catch(() => null);
     }
     throw err;
   }
@@ -136,7 +153,7 @@ let nudged = 0;
 for (const booking of waiting) {
   const last = booking.last_lawyer_nudge_at ? new Date(booking.last_lawyer_nudge_at).getTime() : 0;
   if (Date.now() - last >= DAY_MS) {
-    await sendWhatsApp(lawyer.phone_number, `Reminder: still waiting on the contract draft for ${booking.event_name} (event date ${booking.event_date || 'TBD'}).`);
+    await sendWhatsApp(lawyer.phone_number, `Reminder: still waiting on the contract draft for ${booking.event_name} (event date ${booking.event_date || 'TBD'}).`, booking.event_name);
     await sbPatch(`bookings?id=eq.${booking.id}`, { last_lawyer_nudge_at: new Date().toISOString() });
     nudged += 1;
   }

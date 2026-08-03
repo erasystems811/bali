@@ -56,12 +56,34 @@ function sanitizeTemplateParam(text) {
     .slice(0, 1000) || '(see details)';
 }
 
+// Strips markdown formatting artifacts out of an LLM's free-text output
+// before it ever reaches a WhatsApp send. See stage5-fanout-code.js's
+// version for the full explanation -- owner's explicit, repeated rule is no
+// "*" or "-" anywhere in this bot's messages, but nothing enforced that on
+// LLM-generated free text (only ever applied to hand-written fixed
+// strings). Hard backstop, not just a prompt ask.
+function stripMarkdown(text) {
+  return String(text || '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/`+/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
+}
+
 // WhatsApp rejects free-form text once 24h have passed since the recipient's
 // last inbound message (error 131047) -- fall back to the approved
-// "bali_update" utility template (single body variable) instead of
-// the send just failing.
-async function sendWhatsAppTemplate(toNumber, text) {
-  if (SANDBOX) return sandboxLog(toNumber, text, 'template');
+// "bali_update" utility template instead of the send just failing.
+//
+// Owner's explicit correction (2026-08-03): this used to stuff the ENTIRE
+// message text into the template's one body variable, mangling the owner's
+// own intentional message formats. shortLabel is now a short description
+// instead (an event name, or a generic fallback) -- the real content always
+// follows as a genuine, unmodified send in sendWhatsApp below.
+async function sendWhatsAppTemplate(toNumber, shortLabel) {
+  if (SANDBOX) return sandboxLog(toNumber, shortLabel, 'template');
   const res = await helpers.httpRequest({
     method: 'POST',
     url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
@@ -73,7 +95,7 @@ async function sendWhatsAppTemplate(toNumber, text) {
       template: {
         name: 'bali_update',
         language: { code: 'en_US' },
-        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(text) }] }],
+        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(shortLabel) }] }],
       },
     },
     json: true,
@@ -115,27 +137,36 @@ async function isWithinMessagingWindow(toNumber) {
   return hoursSinceLastInbound < 23; // stay a safety margin under the real 24h cutoff
 }
 
-async function sendWhatsApp(toNumber, text) {
+async function sendRawText(toNumber, text) {
+  const res = await helpers.httpRequest({
+    method: 'POST',
+    url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
+    headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
+    body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
+    json: true,
+    timeout: 20000,
+  });
+  return res?.messages?.[0]?.id || null;
+}
+
+// shortLabel: see sendWhatsAppTemplate above.
+async function sendWhatsApp(toNumber, text, shortLabel) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
-    return sendWhatsAppTemplate(toNumber, text);
+    await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
+    // Known, accepted risk (owner's explicit call, 2026-08-03) -- see
+    // stage1-code.js's version of this function for the full explanation.
+    return sendRawText(toNumber, text).catch(() => null);
   }
   try {
-    const res = await helpers.httpRequest({
-      method: 'POST',
-      url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
-      headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
-      body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
-      json: true,
-      timeout: 20000,
-    });
-    return res?.messages?.[0]?.id || null;
+    return await sendRawText(toNumber, text);
   } catch (err) {
     let errStr;
     try { errStr = JSON.stringify(err, Object.getOwnPropertyNames(err)); } catch (e) { errStr = String(err); }
     errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
     if (errStr.includes('131047')) {
-      return sendWhatsAppTemplate(toNumber, text);
+      await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
+      return sendRawText(toNumber, text).catch(() => null);
     }
     throw err;
   }
@@ -257,11 +288,11 @@ async function logConversation(bookingId, senderContactId, direction, text, stag
   await sbInsert('conversations', [{ booking_id: bookingId, sender_contact_id: senderContactId, direction, message_text: text, stage }]);
 }
 
-async function askPmDirectly(bookingId, fieldName, questionText) {
+async function askPmDirectly(bookingId, fieldName, questionText, shortLabel) {
   const pm = await findPm();
   if (!pm) return null;
   const pending = (await sbInsert('pending_questions', { booking_id: bookingId, field_name: fieldName, question_text: questionText }))[0];
-  const msgId = await sendWhatsApp(pm.phone_number, questionText);
+  const msgId = await sendWhatsApp(pm.phone_number, questionText, shortLabel);
   if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
   return pending;
 }
@@ -553,7 +584,7 @@ async function draftInvoice(bookingId, pmDetails) {
   const extraction = await extractInvoiceLineItems(transcript);
   if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
     const pm = await findPm();
-    if (pm) await sendWhatsApp(pm.phone_number, `Couldn't figure out the invoice line items for ${booking.event_name} from the conversation, can you send me the agreed items and amounts directly?`);
+    if (pm) await sendWhatsApp(pm.phone_number, `Couldn't figure out the invoice line items for ${booking.event_name} from the conversation, can you send me the agreed items and amounts directly?`, booking.event_name);
     return { ok: false, reason: 'extraction_failed' };
   }
 
@@ -565,7 +596,7 @@ async function draftInvoice(bookingId, pmDetails) {
     // payment", whatever phrasing -- goes through the exact same flexible
     // extraction above that already handles items and prices, not a
     // separate rigid parser bolted on just for this.
-    await askPmDirectly(bookingId, 'payment_terms_confirm', `For ${booking.event_name}, is payment full or in parts? If in parts, let me know the split.`);
+    await askPmDirectly(bookingId, 'payment_terms_confirm', `For ${booking.event_name}, is payment full or in parts? If in parts, let me know the split.`, booking.event_name);
     return { ok: true, action: 'awaiting_payment_terms' };
   }
 
@@ -595,7 +626,7 @@ async function draftInvoice(bookingId, pmDetails) {
   const draftText = formatInvoiceDraftText(invoice, booking);
   const pending = (await sbInsert('pending_questions', { booking_id: bookingId, field_name: 'invoice_draft_confirm', question_text: draftText }))[0];
   if (pm) {
-    const msgId = await sendWhatsApp(pm.phone_number, draftText);
+    const msgId = await sendWhatsApp(pm.phone_number, draftText, booking.event_name);
     if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
   }
 
@@ -638,7 +669,7 @@ async function draftInvoice(bookingId, pmDetails) {
 async function draftStandaloneInvoice(clientName, pmDetails, pmPhone) {
   const extraction = await extractInvoiceLineItems(`PM: ${pmDetails}`);
   if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
-    await sendWhatsApp(pmPhone, `Couldn't figure out line items for that from what you sent -- send me the items and price directly.`);
+    await sendWhatsApp(pmPhone, `Couldn't figure out line items for that from what you sent -- send me the items and price directly.`, clientName);
     return { ok: false, reason: 'extraction_failed' };
   }
   const draft = {
@@ -660,7 +691,7 @@ async function draftStandaloneInvoice(clientName, pmDetails, pmPhone) {
 
 async function sendStandalonePaymentTermsAsk(draft, pmPhone) {
   const askText = `For ${draft.client_name}, is payment full or in parts? If in parts, let me know the split (e.g. 60/40, or a percentage deposit).`;
-  const msgId = await sendWhatsApp(pmPhone, askText);
+  const msgId = await sendWhatsApp(pmPhone, askText, draft.client_name);
   await sbInsert('conversations', [{
     booking_id: null,
     direction: 'outbound',
@@ -674,7 +705,7 @@ async function sendStandalonePaymentTermsAsk(draft, pmPhone) {
 async function sendStandaloneInvoiceConfirm(draft, pmPhone) {
   const itemLines = draft.line_items.map((li) => `- ${li.description}: ${formatMoney(li.amount)}`).join('\n');
   const confirmText = `Please confirm -- reply YES to generate, NO to cancel, or tell me what to change.\n\nName: ${draft.client_name}\nItems:\n${itemLines}\nPayment: ${draft.payment_terms || 'not stated'}`;
-  const msgId = await sendWhatsApp(pmPhone, confirmText);
+  const msgId = await sendWhatsApp(pmPhone, confirmText, draft.client_name);
   await sbInsert('conversations', [{
     booking_id: null,
     direction: 'outbound',
@@ -725,7 +756,7 @@ async function resolveStandaloneInvoiceConfirm(draft, answerText, pmPhone) {
     return { ok: true, invoice_number: invoice.invoice_number };
   }
   if (/^n(o)?\b/i.test((answerText || '').trim())) {
-    await sendWhatsApp(pmPhone, 'Cancelled -- nothing generated.');
+    await sendWhatsApp(pmPhone, 'Cancelled -- nothing generated.', draft.client_name);
     await sbInsert('conversations', [{ booking_id: null, direction: 'outbound', message_text: 'STANDALONE_INVOICE_RESOLVED', stage: 'standalone_invoice_resolved' }]);
     return { ok: true, action: 'standalone_invoice_cancelled' };
   }
@@ -735,7 +766,7 @@ async function resolveStandaloneInvoiceConfirm(draft, answerText, pmPhone) {
   const transcript = `PM: ${JSON.stringify(draft.line_items.map((li) => `${li.description} ${li.amount}`).join(', '))} (payment: ${draft.payment_terms || 'not stated'})\nPM: ${answerText}`;
   const extraction = await extractInvoiceLineItems(transcript);
   if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
-    await sendWhatsApp(pmPhone, `Didn't catch that change -- can you say it again?`);
+    await sendWhatsApp(pmPhone, `Didn't catch that change -- can you say it again?`, draft.client_name);
     return { ok: false };
   }
   return sendStandaloneInvoiceConfirm({
@@ -772,7 +803,7 @@ async function resolveInvoiceDraftConfirm(pendingId, answerText) {
   );
   if (questionCheck?.is_question && questionCheck.answer) {
     const pm = await findPm();
-    if (pm) await sendWhatsApp(pm.phone_number, questionCheck.answer);
+    if (pm) await sendWhatsApp(pm.phone_number, stripMarkdown(questionCheck.answer), booking.event_name);
     return { ok: true, action: 'invoice_question_answered' };
   }
 
@@ -789,7 +820,7 @@ async function applyInvoiceCorrectionAndResend(booking, invoice, answerText) {
   const extraction = await extractInvoiceCorrection(invoice, answerText);
   if (!extraction) {
     const pm = await findPm();
-    if (pm) await sendWhatsApp(pm.phone_number, "Didn't catch that correction, can you say it again?");
+    if (pm) await sendWhatsApp(pm.phone_number, "Didn't catch that correction, can you say it again?", booking.event_name);
     return { ok: false };
   }
 
@@ -809,7 +840,7 @@ async function applyInvoiceCorrectionAndResend(booking, invoice, answerText) {
   const draftText = formatInvoiceDraftText(updated, booking);
   const pending = (await sbInsert('pending_questions', { booking_id: booking.id, field_name: 'invoice_draft_confirm', question_text: draftText }))[0];
   if (pm) {
-    const msgId = await sendWhatsApp(pm.phone_number, draftText);
+    const msgId = await sendWhatsApp(pm.phone_number, draftText, booking.event_name);
     if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
   }
   return { ok: true, action: 'invoice_draft_corrected' };
@@ -895,7 +926,7 @@ async function resolveInvoiceApproval(pendingId, answerText) {
     const client = await getContact(booking.client_contact_id);
     const caption = `Here's your invoice for ${booking.event_name}.`;
     await sendInvoicePdf(client.phone_number, invoice, booking, caption);
-    await sendWhatsApp(client.phone_number, "Whenever you're ready, please send proof of payment and we'll get it confirmed.");
+    await sendWhatsApp(client.phone_number, "Whenever you're ready, please send proof of payment and we'll get it confirmed.", booking.event_name);
     await logConversation(booking.id, null, 'outbound', `[invoice PDF sent] ${invoice.invoice_number}`, 'invoice_sent');
     // Asked here, not back in draftInvoice -- see the comment there. This is
     // the first point after invoice_draft_confirm where nothing else is
@@ -910,7 +941,7 @@ async function resolveInvoiceApproval(pendingId, answerText) {
   const extraction = await extractInvoiceCorrection(invoice, answerText);
   if (!extraction) {
     const pm = await findPm();
-    if (pm) await sendWhatsApp(pm.phone_number, "Didn't catch that correction, can you say it again?");
+    if (pm) await sendWhatsApp(pm.phone_number, "Didn't catch that correction, can you say it again?", booking.event_name);
     return { ok: false };
   }
 
@@ -938,7 +969,7 @@ async function resolvePaymentConfirmed(pendingId, answerText) {
 
   if (!/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|approved?|agreed?|confirmed)\b/i.test((answerText || '').trim())) {
     const client = await getContact(booking.client_contact_id);
-    await sendWhatsApp(client.phone_number, "We couldn't confirm that payment yet, could you resend proof of payment?");
+    await sendWhatsApp(client.phone_number, "We couldn't confirm that payment yet, could you resend proof of payment?", booking.event_name);
     return { ok: true, action: 'payment_not_confirmed' };
   }
 
@@ -947,7 +978,7 @@ async function resolvePaymentConfirmed(pendingId, answerText) {
   await sbInsert('contracts', { booking_id: booking.id, total_fee: invoice.total_net_payable, payment_terms: invoice.payment_terms });
 
   const client = await getContact(booking.client_contact_id);
-  await sendWhatsApp(client.phone_number, "Payment confirmed, thank you! Last thing before we get the contract moving, what's your organization's full legal name?");
+  await sendWhatsApp(client.phone_number, "Payment confirmed, thank you! Last thing before we get the contract moving, what's your organization's full legal name?", booking.event_name);
   return { ok: true, action: 'moved_to_awaiting_contract' };
 }
 
@@ -967,7 +998,7 @@ async function sendToLawyer(bookingId) {
     : null;
 
   const text = `New contract needed:\nOrganizer: ${contract.organizer_legal_name}, ${contract.organizer_registered_address}\nEvent: ${booking.event_name}, ${booking.event_date}\nType: ${booking.event_type}${itemsText ? `\nItems paid for:\n${itemsText}` : ''}\nFee: ${formatMoney(contract.total_fee)}\nPayment: ${contract.payment_terms}`;
-  await sendWhatsApp(lawyer.phone_number, text);
+  await sendWhatsApp(lawyer.phone_number, text, booking.event_name);
   await sbPatch(`contracts?id=eq.${contract.id}`, { sent_to_lawyer_at: new Date().toISOString() });
   return { ok: true };
 }
@@ -1061,8 +1092,8 @@ async function handleLawyerInbound(input) {
     // for anything beyond swipe-reply routing in this no-context case.
     const pm = await findPm();
     if (pm) {
-      const msgId = await sendWhatsApp(pm.phone_number, `Lawyer: ${text}`);
-      const fallbackBooking = (await sbRequest('GET', 'bookings?status=neq.cancelled&select=id&order=created_at.desc&limit=1'))[0];
+      const fallbackBooking = (await sbRequest('GET', 'bookings?status=neq.cancelled&select=id,event_name&order=created_at.desc&limit=1'))[0];
+      const msgId = await sendWhatsApp(pm.phone_number, `Lawyer: ${text}`, fallbackBooking?.event_name);
       if (fallbackBooking) {
         await sbInsert('conversations', [{ booking_id: fallbackBooking.id, sender_contact_id: contact_id, direction: 'outbound', message_text: `Lawyer: ${text}`, stage: 'staff_question_relay', whatsapp_message_id: msgId }]);
       }
@@ -1091,14 +1122,14 @@ Reply ONLY with JSON: {"can_answer": true/false, "answer": "..." or null}.`,
     text
   );
   if (answerCheck?.can_answer && answerCheck.answer) {
-    await sendWhatsApp(from_number, answerCheck.answer);
+    await sendWhatsApp(from_number, stripMarkdown(answerCheck.answer));
     return { ok: true, action: 'lawyer_question_answered' };
   }
 
   const pm = await findPm();
   if (pm) {
     const label = await labelForContact(contact_id);
-    const msgId = await sendWhatsApp(pm.phone_number, `${label}: ${text}`);
+    const msgId = await sendWhatsApp(pm.phone_number, `${label}: ${text}`, booking.event_name);
     // Logged to conversations (not pending_questions) specifically so
     // swipe-replying to THIS message works every time, not just once --
     // pm-toggle-code.js's findStaffRelayByForwardedMessageId matches against
@@ -1142,7 +1173,7 @@ async function resolveContractApproval(pendingId, answerText) {
   // one got silently dropped -- confirmed live.
   await sbPatch(`contracts?id=eq.${contract.id}`, { draft_received_at: null });
   const lawyer = await findLawyer();
-  if (lawyer) await sendWhatsApp(lawyer.phone_number, `PM requested a change on the ${booking.event_name} contract: "${answerText}"`);
+  if (lawyer) await sendWhatsApp(lawyer.phone_number, `PM requested a change on the ${booking.event_name} contract: "${answerText}"`, booking.event_name);
   return { ok: true, action: 'change_relayed_to_lawyer' };
 }
 

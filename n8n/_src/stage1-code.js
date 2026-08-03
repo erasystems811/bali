@@ -29,6 +29,23 @@ async function sbPatch(path, body) {
   return sbRequest('PATCH', path, body, { Prefer: 'return=representation' });
 }
 
+// Strips markdown formatting artifacts out of an LLM's free-text output
+// before it ever reaches a WhatsApp send. See stage5-fanout-code.js's
+// version for the full explanation -- owner's explicit, repeated rule is no
+// "*" or "-" anywhere in this bot's messages, but nothing enforced that on
+// LLM-generated free text (only ever applied to hand-written fixed
+// strings). Hard backstop, not just a prompt ask.
+function stripMarkdown(text) {
+  return String(text || '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/`+/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
+}
+
 // Sandbox mode: on when there's no real Meta token configured (the sandbox
 // n8n instance is deliberately deployed without one, so it's structurally
 // incapable of reaching real WhatsApp, not just told not to). Every outbound
@@ -80,10 +97,20 @@ function sanitizeTemplateParam(text) {
 // WhatsApp rejects free-form text once 24h have passed since the recipient's
 // last inbound message (error 131047) -- many of our sends (PM notifications,
 // escalations, staff pings) are proactive and can easily land outside that
-// window. Fall back to the approved "bali_update" utility template
-// (single body variable) instead of the send just failing.
-async function sendWhatsAppTemplate(toNumber, text) {
-  if (SANDBOX) return sandboxLog(toNumber, text, 'template');
+// window. Fall back to the approved "bali_update" utility template instead
+// of the send just failing.
+//
+// Owner's explicit correction (2026-08-03): this used to stuff the ENTIRE
+// message text into the template's one body variable -- so a normal PM
+// relay like "Mad Party: hey, any update?" came out wrapped as "Bali update
+// for you: Mad Party: hey, any update?. Please take a look when you get a
+// chance.", mangling the owner's own intentional message format/wording.
+// Now the template only ever carries a SHORT label (an event name, or a
+// generic fallback) -- the real content always follows as a genuine,
+// unmodified follow-up send in sendWhatsApp below, exactly as it would have
+// read without any window issue at all.
+async function sendWhatsAppTemplate(toNumber, shortLabel) {
+  if (SANDBOX) return sandboxLog(toNumber, shortLabel, 'template');
   const res = await helpers.httpRequest({
     method: 'POST',
     url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
@@ -95,7 +122,7 @@ async function sendWhatsAppTemplate(toNumber, text) {
       template: {
         name: 'bali_update',
         language: { code: 'en_US' },
-        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(text) }] }],
+        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(shortLabel) }] }],
       },
     },
     json: true,
@@ -139,35 +166,54 @@ async function isWithinMessagingWindow(toNumber) {
   return hoursSinceLastInbound < 23; // stay a safety margin under the real 24h cutoff
 }
 
-async function sendWhatsApp(toNumber, text) {
+async function sendRawText(toNumber, text) {
+  const res = await helpers.httpRequest({
+    method: 'POST',
+    url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
+    headers: {
+      Authorization: `Bearer ${env.META_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: {
+      messaging_product: 'whatsapp',
+      to: toNumber,
+      type: 'text',
+      text: { body: text },
+    },
+    json: true,
+    timeout: 20000,
+  });
+  return res?.messages?.[0]?.id || null;
+}
+
+// shortLabel: what to put in the template's body variable if this lands
+// outside the messaging window -- an event name, or any short description
+// of what this message is about. Falls back to a generic phrase if omitted.
+// See sendWhatsAppTemplate above for why this is a separate, short value
+// rather than the message text itself.
+async function sendWhatsApp(toNumber, text, shortLabel) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
-    return sendWhatsAppTemplate(toNumber, text);
+    await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
+    // Known, accepted risk (owner's explicit call, 2026-08-03): Meta doesn't
+    // actually grant a fresh messaging window just because WE sent a
+    // template -- only the recipient replying does -- so this real-content
+    // follow-up can still silently fail exactly like the original bug this
+    // template system exists to catch, if they never open/react to the
+    // template nudge. Preferred over burying the real content inside the
+    // template's own fixed wrapper sentence, which mangled every message's
+    // intended format regardless of whether it delivered.
+    return sendRawText(toNumber, text).catch(() => null);
   }
   try {
-    const res = await helpers.httpRequest({
-      method: 'POST',
-      url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
-      headers: {
-        Authorization: `Bearer ${env.META_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: {
-        messaging_product: 'whatsapp',
-        to: toNumber,
-        type: 'text',
-        text: { body: text },
-      },
-      json: true,
-      timeout: 20000,
-    });
-    return res?.messages?.[0]?.id || null;
+    return await sendRawText(toNumber, text);
   } catch (err) {
     let errStr;
     try { errStr = JSON.stringify(err, Object.getOwnPropertyNames(err)); } catch (e) { errStr = String(err); }
     errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
     if (errStr.includes('131047')) {
-      return sendWhatsAppTemplate(toNumber, text);
+      await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
+      return sendRawText(toNumber, text).catch(() => null);
     }
     throw err;
   }
@@ -317,7 +363,7 @@ async function notifyPmOfCompletedIntake(booking) {
     `- ${booking.event_name}: close ends that conversation and hands the customer back to me.`,
     `- ${booking.event_name}: open reconnects it.`,
   ].join('\n');
-  const msgId = await sendWhatsApp(pm.phone_number, notifyText);
+  const msgId = await sendWhatsApp(pm.phone_number, notifyText, booking.event_name);
   // Logged with the same stage/whatsapp_message_id pattern as every other
   // customer-message forward -- swipe-replying to THIS notification relays
   // straight to the client, same rule as swipe-replying to anything else
@@ -604,7 +650,7 @@ if (!booking) {
     // in pm-toggle-code.js.
     const docMsgId = await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}, signed contract`);
     await sbRequest('POST', 'conversations', [{ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed signed ${input.media_type} to PM]`, stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null }]);
-    const msgId = await sendWhatsApp(pm.phone_number, questionText);
+    const msgId = await sendWhatsApp(pm.phone_number, questionText, booking.event_name);
     if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
   }
   return [{ json: { action: 'signature_pending_pm_confirmation', booking_id: booking.id } }];
@@ -628,7 +674,7 @@ if (!booking) {
       field_name: 'payment_confirmed',
       question_text: questionText,
     }, { Prefer: 'return=representation' });
-    const msgId = await sendWhatsApp(pm.phone_number, questionText);
+    const msgId = await sendWhatsApp(pm.phone_number, questionText, booking.event_name);
     if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
   }
   await sendWhatsApp(from_number, "Got it, thanks. Confirming with our team now.");
@@ -773,7 +819,7 @@ if (!booking) {
       // them, never get treated as an answer to the bot's own question.
       const docMsgId = await sendWhatsAppMedia(pm.phone_number, input.media_type, input.media_id, `${booking.event_name}, signed contract`);
       logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed ${input.media_type} to PM]`, stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null });
-      const msgId = await sendWhatsApp(pm.phone_number, questionText);
+      const msgId = await sendWhatsApp(pm.phone_number, questionText, booking.event_name);
       if (msgId) await sbPatch(`pending_questions?id=eq.${pendingRows[0].id}`, { whatsapp_message_id: msgId });
     } else if (pm && input.media_type) {
       // No contract awaiting signature -- just forward whatever it is,
@@ -782,7 +828,7 @@ if (!booking) {
       logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed ${input.media_type} to PM]`, stage: 'connected_relay_to_pm', whatsapp_message_id: docMsgId || null });
     } else if (pm) {
       const forwardText = `${booking.event_name}: ${effectiveText}`;
-      const msgId = await sendWhatsApp(pm.phone_number, forwardText);
+      const msgId = await sendWhatsApp(pm.phone_number, forwardText, booking.event_name);
       logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: `[relayed to PM] ${effectiveText}`, stage: 'connected_relay_to_pm', whatsapp_message_id: msgId || null });
     }
   }
@@ -834,7 +880,7 @@ ${recentTranscript}
 Write one brief, warm, professional reassurance letting them know you're still on it -- vary the wording from anything you've said recently in this conversation, never "Awesome" or over-enthusiastic. Reply ONLY with JSON: {"reply": "..."}`,
       effectiveText || ''
     );
-    const waitingReply = waitingReplyResult?.reply || "Still with our team on this, I'll follow up as soon as I can.";
+    const waitingReply = stripMarkdown(waitingReplyResult?.reply) || "Still with our team on this, I'll follow up as soon as I can.";
     await sendWhatsApp(from_number, waitingReply);
     logs.push({ booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: waitingReply, stage: booking.status });
   }
@@ -1112,7 +1158,7 @@ Reply ONLY with JSON: {"reply": "..."}`,
       effectiveText || ''
     );
 
-    replyText = replyResult?.reply || null;
+    replyText = stripMarkdown(replyResult?.reply) || null;
     if (!replyText) {
       // Model call failed outright -- fall back to something serviceable.
       replyText = stepLabels.length > 0

@@ -43,6 +43,23 @@ async function sandboxLog(toNumber, text, kind) {
   return messageId;
 }
 
+// Strips markdown formatting artifacts out of an LLM's free-text output
+// before it ever reaches a WhatsApp send. See stage5-fanout-code.js's
+// version for the full explanation -- owner's explicit, repeated rule is no
+// "*" or "-" anywhere in this bot's messages, but nothing enforced that on
+// LLM-generated free text (only ever applied to hand-written fixed
+// strings). Hard backstop, not just a prompt ask.
+function stripMarkdown(text) {
+  return String(text || '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/`+/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
+}
+
 function sanitizeTemplateParam(text) {
   return String(text || '')
     .replace(/[\r\n]+/g, ' -- ')
@@ -53,11 +70,18 @@ function sanitizeTemplateParam(text) {
 
 // WhatsApp rejects free-form text once 24h have passed since the recipient's
 // last inbound message (error 131047) -- fall back to the approved
-// "bali_update" utility template (single body variable) instead of
-// the send just failing.
-async function sendWhatsAppTemplate(toNumber, text) {
-  if (SANDBOX) return sandboxLog(toNumber, text, 'template');
-  return helpers.httpRequest({
+// "bali_update" utility template instead of the send just failing.
+//
+// Owner's explicit correction (2026-08-03): this used to stuff the ENTIRE
+// message text into the template's one body variable, mangling the owner's
+// own intentional message formats (e.g. "Mad Party: hey, any update?" came
+// out wrapped inside the template's fixed wrapper sentence). shortLabel is
+// now a short description instead (an event name, or a generic fallback) --
+// the real content always follows as a genuine, unmodified send in
+// sendWhatsApp below.
+async function sendWhatsAppTemplate(toNumber, shortLabel) {
+  if (SANDBOX) return sandboxLog(toNumber, shortLabel, 'template');
+  const res = await helpers.httpRequest({
     method: 'POST',
     url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
     headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
@@ -68,12 +92,13 @@ async function sendWhatsAppTemplate(toNumber, text) {
       template: {
         name: 'bali_update',
         language: { code: 'en_US' },
-        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(text) }] }],
+        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(shortLabel) }] }],
       },
     },
     json: true,
     timeout: 20000,
   });
+  return res?.messages?.[0]?.id || null;
 }
 
 // Confirmed live: a direct text send to a contact whose last inbound message
@@ -103,29 +128,53 @@ async function isWithinMessagingWindow(toNumber) {
   return hoursSinceLastInbound < 23; // stay a safety margin under the real 24h cutoff
 }
 
-async function sendWhatsApp(toNumber, text) {
+async function sendRawText(toNumber, text) {
+  const res = await helpers.httpRequest({
+    method: 'POST',
+    url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
+    headers: {
+      Authorization: `Bearer ${env.META_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
+    json: true,
+    timeout: 20000,
+  });
+  return res?.messages?.[0]?.id || null;
+}
+
+// shortLabel: see sendWhatsAppTemplate above -- an event name, or any short
+// description of what this message is about, used only if this lands
+// outside the messaging window.
+//
+// Also fixed here 2026-08-03: this used to return the ENTIRE raw HTTP
+// response object instead of extracting the message id like every other
+// file's version does -- any caller storing the result as a
+// `whatsapp_message_id` (e.g. the standalone-invoice-request swipe-reply
+// tracking below) was silently saving the wrong value, breaking that
+// swipe-reply match without ever throwing an error anywhere.
+async function sendWhatsApp(toNumber, text, shortLabel) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
-    return sendWhatsAppTemplate(toNumber, text);
+    await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
+    // Known, accepted risk (owner's explicit call, 2026-08-03): Meta doesn't
+    // grant a fresh messaging window just because WE sent a template -- only
+    // the recipient replying does -- so this real-content follow-up can
+    // still silently fail if they never open/react to the template nudge.
+    // Preferred over burying the real content inside the template's own
+    // fixed wrapper sentence, which mangled every message's intended format
+    // regardless of whether it delivered.
+    return sendRawText(toNumber, text).catch(() => null);
   }
   try {
-    return await helpers.httpRequest({
-      method: 'POST',
-      url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
-      headers: {
-        Authorization: `Bearer ${env.META_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
-      json: true,
-      timeout: 20000,
-    });
+    return await sendRawText(toNumber, text);
   } catch (err) {
     let errStr;
     try { errStr = JSON.stringify(err, Object.getOwnPropertyNames(err)); } catch (e) { errStr = String(err); }
     errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
     if (errStr.includes('131047')) {
-      return sendWhatsAppTemplate(toNumber, text);
+      await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
+      return sendRawText(toNumber, text).catch(() => null);
     }
     throw err;
   }
@@ -494,7 +543,7 @@ if (reply_to_message_id) {
     const client = (await sbRequest('GET', `contacts?id=eq.${planningTarget.client_contact_id}&select=*`))[0];
     const relayText = stripAccidentalEventPrefix(answerText, planningTarget.event_name);
     if (client?.phone_number) {
-      await sendWhatsApp(client.phone_number, relayText);
+      await sendWhatsApp(client.phone_number, relayText, planningTarget.event_name);
       await logConversation(planningTarget.id, null, 'outbound', relayText, 'planning_relay');
     }
     await logConversation(planningTarget.id, contact_id, 'inbound', answerText, 'pm_message');
@@ -651,7 +700,7 @@ if (leadingMatch) {
     const client = (await sbRequest('GET', `contacts?id=eq.${booking.client_contact_id}&select=*`))[0];
     const replyBody = leadingMatch.rest;
     if (client?.phone_number) {
-      await sendWhatsApp(client.phone_number, replyBody);
+      await sendWhatsApp(client.phone_number, replyBody, booking.event_name);
       await logConversation(booking.id, null, 'outbound', replyBody, 'planning_relay');
     }
     await logConversation(booking.id, contact_id, 'inbound', replyBody, 'pm_message');
@@ -740,7 +789,7 @@ if (planningTarget) {
   const client = (await sbRequest('GET', `contacts?id=eq.${planningTarget.client_contact_id}&select=*`))[0];
   const relayText = stripAccidentalEventPrefix(answerText, planningTarget.event_name);
   if (client?.phone_number) {
-    await sendWhatsApp(client.phone_number, relayText);
+    await sendWhatsApp(client.phone_number, relayText, planningTarget.event_name);
     await logConversation(planningTarget.id, null, 'outbound', relayText, 'planning_relay');
   }
   await logConversation(planningTarget.id, contact_id, 'inbound', answerText, 'pm_message');
@@ -864,10 +913,11 @@ Pending items waiting on him right now (only mention or list these if he explici
 ${subjectBooking ? `What this conversation with him has most recently been about: ${subjectBooking.event_name}.` : ''}${recentTranscript ? `\n\nYour recent back-and-forth with the PM about this:\n${recentTranscript}` : ''}`,
     text || ''
   ) || "Sorry, I couldn't process that, try rephrasing?";
-  await sendWhatsApp(from_number, reply);
+  const cleanReply = stripMarkdown(reply);
+  await sendWhatsApp(from_number, cleanReply);
   if (subjectBooking) {
     await logConversation(subjectBooking.id, contact_id, 'inbound', text || '', 'pm_fallback_chat');
-    await logConversation(subjectBooking.id, null, 'outbound', reply, 'pm_fallback_chat');
+    await logConversation(subjectBooking.id, null, 'outbound', cleanReply, 'pm_fallback_chat');
   }
   return [{ json: { action: 'unclassified' } }];
 }

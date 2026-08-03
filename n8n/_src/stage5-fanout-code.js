@@ -57,10 +57,16 @@ function sanitizeTemplateParam(text) {
 
 // Department fan-out and day-of checklists go to staff who may have never
 // texted the bot at all -- these will very often land outside the 24h window
-// (error 131047). Fall back to the approved "bali_update" utility
-// template (single body variable) instead of the send just failing.
-async function sendWhatsAppTemplate(toNumber, text) {
-  if (SANDBOX) return sandboxLog(toNumber, text, 'template');
+// (error 131047). Fall back to the approved "bali_update" utility template
+// instead of the send just failing.
+//
+// Owner's explicit correction (2026-08-03): this used to stuff the ENTIRE
+// message text into the template's one body variable. shortLabel is now a
+// short description instead (an event name, or a generic fallback) -- the
+// real content always follows as a genuine, unmodified send in sendWhatsApp
+// below.
+async function sendWhatsAppTemplate(toNumber, shortLabel) {
+  if (SANDBOX) return sandboxLog(toNumber, shortLabel, 'template');
   const res = await helpers.httpRequest({
     method: 'POST',
     url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
@@ -72,7 +78,7 @@ async function sendWhatsAppTemplate(toNumber, text) {
       template: {
         name: 'bali_update',
         language: { code: 'en_US' },
-        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(text) }] }],
+        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(shortLabel) }] }],
       },
     },
     json: true,
@@ -102,27 +108,36 @@ async function isWithinMessagingWindow(toNumber) {
   return hoursSinceLastInbound < 23; // stay a safety margin under the real 24h cutoff
 }
 
-async function sendWhatsApp(toNumber, text) {
+async function sendRawText(toNumber, text) {
+  const res = await helpers.httpRequest({
+    method: 'POST',
+    url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
+    headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
+    body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
+    json: true,
+    timeout: 20000,
+  });
+  return res?.messages?.[0]?.id || null;
+}
+
+// shortLabel: see sendWhatsAppTemplate above.
+async function sendWhatsApp(toNumber, text, shortLabel) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
-    return sendWhatsAppTemplate(toNumber, text);
+    await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
+    // Known, accepted risk (owner's explicit call, 2026-08-03) -- see
+    // stage1-code.js's version of this function for the full explanation.
+    return sendRawText(toNumber, text).catch(() => null);
   }
   try {
-    const res = await helpers.httpRequest({
-      method: 'POST',
-      url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
-      headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
-      body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
-      json: true,
-      timeout: 20000,
-    });
-    return res?.messages?.[0]?.id || null;
+    return await sendRawText(toNumber, text);
   } catch (err) {
     let errStr;
     try { errStr = JSON.stringify(err, Object.getOwnPropertyNames(err)); } catch (e) { errStr = String(err); }
     errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
     if (errStr.includes('131047')) {
-      return sendWhatsAppTemplate(toNumber, text);
+      await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
+      return sendRawText(toNumber, text).catch(() => null);
     }
     throw err;
   }
@@ -130,6 +145,29 @@ async function sendWhatsApp(toNumber, text) {
 
 async function contactsByRole(role) {
   return sbRequest('GET', `contacts?role=eq.${role}&select=*`);
+}
+
+// Strips markdown formatting artifacts (**bold**, *emphasis*, bullet
+// markers, headers, code ticks) out of an LLM's free-text output before it
+// ever reaches a WhatsApp send. Owner's explicit, repeated rule: this bot
+// never uses "*" or "-" in its conversations, no exceptions -- but nothing
+// enforced that on FREE-TEXT model output (only ever applied to hand-written
+// fixed strings). Confirmed live 2026-08-02: the event-assistant brief came
+// back as "**Event Overview Brief for On-Site Event Assistant:**" with a
+// bulleted list, sent to WhatsApp verbatim -- markdown headers/bullets don't
+// render there, so it arrived as a garbled wall of asterisks and dashes. A
+// prompt instruction alone isn't trustworthy for this (same lesson as every
+// other "don't trust the model, enforce it in code" fix in this codebase) --
+// this runs as a hard backstop regardless of what the prompt says.
+function stripMarkdown(text) {
+  return String(text || '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/`+/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
 }
 
 async function askOpenAI(systemPrompt, userText) {
@@ -147,14 +185,14 @@ async function askOpenAI(systemPrompt, userText) {
     json: true,
     timeout: 30000,
   });
-  return res?.choices?.[0]?.message?.content || '';
+  return stripMarkdown(res?.choices?.[0]?.message?.content || '');
 }
 
-async function askPmDirectly(bookingId, fieldName, questionText) {
+async function askPmDirectly(bookingId, fieldName, questionText, shortLabel) {
   const pm = (await contactsByRole('pm'))[0];
   if (!pm) return;
   const pending = (await sbInsert('pending_questions', { booking_id: bookingId, field_name: fieldName, question_text: questionText }))[0];
-  const msgId = await sendWhatsApp(pm.phone_number, questionText);
+  const msgId = await sendWhatsApp(pm.phone_number, questionText, shortLabel);
   if (msgId) await sbPatch(`pending_questions?id=eq.${pending.id}`, { whatsapp_message_id: msgId });
 }
 
@@ -164,16 +202,16 @@ async function fanOutBooking(booking) {
   // HR: event date, staff count/type
   const hr = await contactsByRole('hr');
   if (booking.staffing_type) {
-    for (const c of hr) await sendWhatsApp(c.phone_number, `New event onboarded: ${booking.event_name} on ${dateStr}. Staffing: ${booking.staffing_type}.`);
+    for (const c of hr) await sendWhatsApp(c.phone_number, `New event onboarded: ${booking.event_name} on ${dateStr}. Staffing: ${booking.staffing_type}.`, booking.event_name);
   } else {
-    await askPmDirectly(booking.id, 'staffing_type', `For ${booking.event_name} (${dateStr}), full-time or part-time staff needed?`);
+    await askPmDirectly(booking.id, 'staffing_type', `For ${booking.event_name} (${dateStr}), full-time or part-time staff needed?`, booking.event_name);
   }
 
   // Procurement: current stock + stock needed. Recipe-based inventory (Section 7) isn't
   // built yet -- send the date only for now, flagged clearly so it isn't mistaken for a real brief.
   const procurement = await contactsByRole('procurement');
   for (const c of procurement) {
-    await sendWhatsApp(c.phone_number, `New event onboarded: ${booking.event_name} on ${dateStr}. Stock requirements pending (inventory system not live yet).`);
+    await sendWhatsApp(c.phone_number, `New event onboarded: ${booking.event_name} on ${dateStr}. Stock requirements pending (inventory system not live yet).`, booking.event_name);
   }
 
   // Accounts: the finalized invoice itself, not a placeholder -- it was
@@ -199,25 +237,25 @@ async function fanOutBooking(booking) {
     const convo = await sbRequest('GET', `conversations?booking_id=eq.${booking.id}&order=created_at.asc&select=direction,message_text`);
     const transcript = convo.map((m) => `${m.direction}: ${m.message_text}`).join('\n');
     const brief = await askOpenAI(
-      'Summarize this WhatsApp conversation into a short event overview brief for the on-site Event Assistant. Do NOT include any prices, payment amounts, or revenue figures. Warm, brief, plain language.',
+      'Summarize this WhatsApp conversation into a short event overview brief for the on-site Event Assistant. Do NOT include any prices, payment amounts, or revenue figures. Warm, brief, plain language. Plain WhatsApp text only -- no markdown, no **bold**, no bullet points or numbered lists, no headers, just a couple of short natural sentences.',
       transcript
     );
-    for (const c of eventAssistant) await sendWhatsApp(c.phone_number, `Event brief for ${booking.event_name} (${dateStr}):\n${brief}`);
+    for (const c of eventAssistant) await sendWhatsApp(c.phone_number, `Event brief for ${booking.event_name} (${dateStr}):\n${brief}`, booking.event_name);
   }
 
   // Security: bouncer count + "vigilante" needs, collected from PM if missing.
   const security = await contactsByRole('security');
   if (booking.security_count !== null && booking.security_count !== undefined) {
     for (const c of security) {
-      await sendWhatsApp(c.phone_number, `New event: ${booking.event_name} on ${dateStr}. Security needed: ${booking.security_count}.${booking.security_notes ? ' Notes: ' + booking.security_notes : ''}`);
+      await sendWhatsApp(c.phone_number, `New event: ${booking.event_name} on ${dateStr}. Security needed: ${booking.security_count}.${booking.security_notes ? ' Notes: ' + booking.security_notes : ''}`, booking.event_name);
     }
   } else {
-    await askPmDirectly(booking.id, 'security_count', `For ${booking.event_name} (${dateStr}), how many security/bouncers are needed?`);
+    await askPmDirectly(booking.id, 'security_count', `For ${booking.event_name} (${dateStr}), how many security/bouncers are needed?`, booking.event_name);
   }
 
   // All staff: event date announcement.
   const allStaff = await sbRequest('GET', "contacts?role=in.(staff,hr,procurement,accounts,event_assistant,security,supervisor,facility_manager)&select=*");
-  for (const c of allStaff) await sendWhatsApp(c.phone_number, `Heads up, ${booking.event_name} is confirmed for ${dateStr}.`);
+  for (const c of allStaff) await sendWhatsApp(c.phone_number, `Heads up, ${booking.event_name} is confirmed for ${dateStr}.`, booking.event_name);
 }
 
 async function sendDayOfChecklist(booking) {
@@ -225,7 +263,7 @@ async function sendDayOfChecklist(booking) {
   for (const role of roles) {
     const people = await contactsByRole(role);
     for (const c of people) {
-      await sendWhatsApp(c.phone_number, `Day-of checklist for ${booking.event_name}: please confirm event setup is complete and ready.`);
+      await sendWhatsApp(c.phone_number, `Day-of checklist for ${booking.event_name}: please confirm event setup is complete and ready.`, booking.event_name);
     }
   }
   await sbPatch(`bookings?id=eq.${booking.id}`, { day_of_checklist_sent_at: new Date().toISOString() });

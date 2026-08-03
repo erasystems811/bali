@@ -56,10 +56,15 @@ function sanitizeTemplateParam(text) {
 
 // WhatsApp rejects free-form text once 24h have passed since the recipient's
 // last inbound message (error 131047) -- fall back to the approved
-// "bali_update" utility template (single body variable) instead of
-// the send just failing.
-async function sendWhatsAppTemplate(toNumber, text) {
-  if (SANDBOX) return sandboxLog(toNumber, text, 'template');
+// "bali_update" utility template instead of the send just failing.
+//
+// Owner's explicit correction (2026-08-03): this used to stuff the ENTIRE
+// message text into the template's one body variable, mangling the owner's
+// own intentional message formats. shortLabel is now a short description
+// instead (an event name, or a generic fallback) -- the real content always
+// follows as a genuine, unmodified send in sendWhatsApp below.
+async function sendWhatsAppTemplate(toNumber, shortLabel) {
+  if (SANDBOX) return sandboxLog(toNumber, shortLabel, 'template');
   const res = await helpers.httpRequest({
     method: 'POST',
     url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
@@ -71,7 +76,7 @@ async function sendWhatsAppTemplate(toNumber, text) {
       template: {
         name: 'bali_update',
         language: { code: 'en_US' },
-        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(text) }] }],
+        components: [{ type: 'body', parameters: [{ type: 'text', text: sanitizeTemplateParam(shortLabel) }] }],
       },
     },
     json: true,
@@ -112,30 +117,54 @@ async function isWithinMessagingWindow(toNumber) {
   return hoursSinceLastInbound < 23; // stay a safety margin under the real 24h cutoff
 }
 
-async function sendWhatsApp(toNumber, text) {
+async function sendRawText(toNumber, text) {
+  const res = await helpers.httpRequest({
+    method: 'POST',
+    url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
+    headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
+    body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
+    json: true,
+    timeout: 20000,
+  });
+  return res?.messages?.[0]?.id || null;
+}
+
+// shortLabel: see sendWhatsAppTemplate above.
+async function sendWhatsApp(toNumber, text, shortLabel) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
-    return sendWhatsAppTemplate(toNumber, text);
+    await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
+    // Known, accepted risk (owner's explicit call, 2026-08-03) -- see
+    // stage1-code.js's version of this function for the full explanation.
+    return sendRawText(toNumber, text).catch(() => null);
   }
   try {
-    const res = await helpers.httpRequest({
-      method: 'POST',
-      url: `https://graph.facebook.com/v20.0/${env.META_PHONE_ID}/messages`,
-      headers: { Authorization: `Bearer ${env.META_TOKEN}`, 'Content-Type': 'application/json' },
-      body: { messaging_product: 'whatsapp', to: toNumber, type: 'text', text: { body: text } },
-      json: true,
-      timeout: 20000,
-    });
-    return res?.messages?.[0]?.id || null;
+    return await sendRawText(toNumber, text);
   } catch (err) {
     let errStr;
     try { errStr = JSON.stringify(err, Object.getOwnPropertyNames(err)); } catch (e) { errStr = String(err); }
     errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
     if (errStr.includes('131047')) {
-      return sendWhatsAppTemplate(toNumber, text);
+      await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
+      return sendRawText(toNumber, text).catch(() => null);
     }
     throw err;
   }
+}
+
+// See stage5-fanout-code.js's version for the full explanation -- owner's
+// explicit, repeated rule is no "*" or "-" anywhere in this bot's messages,
+// but nothing enforced that on LLM-generated free text (only ever applied
+// to hand-written fixed strings). Hard backstop, not just a prompt ask.
+function stripMarkdown(text) {
+  return String(text || '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/`+/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
 }
 
 async function askOpenAI(systemPrompt, userText) {
@@ -196,8 +225,9 @@ if (action === 'check') {
   const bookingId = booking?.id || null;
 
   if (result.found && result.answer) {
-    await sendWhatsApp(from_number, result.answer);
-    if (bookingId) await logConversation(bookingId, contact_id, 'outbound', result.answer, 'kb_answered');
+    const answer = stripMarkdown(result.answer);
+    await sendWhatsApp(from_number, answer);
+    if (bookingId) await logConversation(bookingId, contact_id, 'outbound', answer, 'kb_answered');
     return [{ json: { action: 'kb_answered' } }];
   }
 
@@ -224,7 +254,7 @@ if (action === 'check') {
   }
 
   const forwardText = `${booking.event_name || 'New inquiry'}: ${text}`;
-  const msgId = await sendWhatsApp(pm.phone_number, forwardText);
+  const msgId = await sendWhatsApp(pm.phone_number, forwardText, booking.event_name);
   await logConversation(bookingId, null, 'outbound', `[relayed to PM] ${text}`, 'connected_relay_to_pm', msgId);
 
   return [{ json: { action: 'kb_not_found_connected_and_relayed', booking_id: bookingId } }];
