@@ -1,1 +1,431 @@
-{"updatedAt":"2026-07-25T19:18:46.648Z","createdAt":"2026-07-23T02:07:33.516Z","id":"Ci6hb9CbA78eIxy0","name":"Bali - 01 Inbound Router","description":null,"active":false,"isArchived":false,"nodes":[{"parameters":{"httpMethod":"GET","path":"whatsapp-inbound","responseMode":"responseNode","options":{}},"name":"Meta Verify (GET)","type":"n8n-nodes-base.webhook","typeVersion":2,"position":[-200,0],"webhookId":"bali-whatsapp-verify","id":"c209c9dc-f6c6-4f32-9e64-d5f05940582e"},{"parameters":{"mode":"runOnceForAllItems","jsCode":"// Meta webhook verification handshake.\n// Meta calls this once when you register the callback URL in the app dashboard.\nconst q = $input.first().json.query || {};\nconst verifyToken = $env.META_WEBHOOK_VERIFY_TOKEN;\nif (q['hub.mode'] === 'subscribe' && q['hub.verify_token'] === verifyToken) {\n  return [{ json: { status: 200, body: q['hub.challenge'] } }];\n}\nreturn [{ json: { status: 403, body: 'verification failed' } }];"},"name":"Verify Challenge","type":"n8n-nodes-base.code","typeVersion":2,"position":[20,0],"id":"963663f4-1b33-4c78-bbcd-da99a97a4367"},{"parameters":{"respondWith":"text","responseBody":"={{$json.body}}","options":{"responseCode":"={{$json.status}}"}},"name":"Respond Verify","type":"n8n-nodes-base.respondToWebhook","typeVersion":1.1,"position":[240,0],"id":"98f1e5d3-a141-4dd2-9618-0665936ea75c"},{"parameters":{"httpMethod":"POST","path":"whatsapp-inbound","responseMode":"onReceived","options":{}},"name":"Meta Inbound (POST)","type":"n8n-nodes-base.webhook","typeVersion":2,"position":[-200,220],"webhookId":"bali-whatsapp-inbound","id":"e1ba2857-4879-49a4-a13d-f62bbb3236c1"},{"parameters":{"mode":"runOnceForAllItems","jsCode":"// Reject anything that is not a verified relay from Nexa -- Meta's webhook is\n// registered on Nexa's shared Meta app now, not this URL directly (see\n// docs/setup.md, 'Shared Meta app with Nexa'). Silently drop rather than\n// respond 401: this node's webhook responseMode is 'onReceived', so n8n\n// already sent 200 by the time this code runs -- there is no HTTP response\n// left to change, only whether we act on the payload.\nconst headers = $input.first().json.headers || {};\nif (headers['x-bali-forward-secret'] !== $env.BALI_FORWARD_SECRET) {\n  return [{ json: { skip: true } }];\n}\n\n// Parse the Meta WhatsApp Cloud API webhook payload down to the fields we care about.\n// Meta's payload shape: entry[0].changes[0].value.messages[0]\nconst body = $input.first().json.body;\nconst value = body?.entry?.[0]?.changes?.[0]?.value;\nconst message = value?.messages?.[0];\n\nif (!message) {\n  // status callbacks (delivered/read) or other non-message events - nothing to route\n  return [{ json: { skip: true } }];\n}\n\nconst fromNumber = message.from; // E.164 without '+'\nconst text = message.text?.body || null;\nconst mediaId = message.image?.id || message.document?.id || message.audio?.id || null;\nconst mediaType = message.image ? 'image' : message.document ? 'document' : message.audio ? 'audio' : null;\nconst contextMessageId = message.context?.id || null; // set when the sender replied-to a specific message\n\nreturn [{\n  json: {\n    skip: false,\n    from_number: fromNumber,\n    text,\n    media_id: mediaId,\n    media_type: mediaType,\n    reply_to_message_id: contextMessageId,\n    whatsapp_message_id: message.id,\n    received_at: message.timestamp\n  }\n}];"},"name":"Parse Inbound Message","type":"n8n-nodes-base.code","typeVersion":2,"position":[20,220],"id":"46701623-7e62-458a-b380-78367ef65c72"},{"parameters":{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"loose"},"conditions":[{"leftValue":"={{$json.skip}}","rightValue":true,"operator":{"type":"boolean","operation":"true"}}],"combinator":"and"}},"name":"Has Message?","type":"n8n-nodes-base.if","typeVersion":2,"position":[240,220],"id":"480b28ca-6faa-404d-9101-28aa5ca9f93d"},{"parameters":{"method":"GET","url":"={{$env.SUPABASE_URL}}/rest/v1/contacts","sendQuery":true,"queryParameters":{"parameters":[{"name":"phone_number","value":"=eq.{{$('Parse Inbound Message').item.json.from_number}}"},{"name":"select","value":"*"}]},"sendHeaders":true,"headerParameters":{"parameters":[{"name":"apikey","value":"={{$env.SUPABASE_SERVICE_KEY}}"},{"name":"Authorization","value":"=Bearer {{$env.SUPABASE_SERVICE_KEY}}"}]},"options":{"timeout":15000}},"name":"Lookup Contact","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[460,160],"id":"f35a6f03-8194-4d42-a6a3-914d2be00e10","alwaysOutputData":true},{"parameters":{"mode":"runOnceForAllItems","jsCode":"// Section 9a: unrecognized number falls back to 'customer' and the sales flow.\n// Lookup Contact (an HTTP Request node) already returns one item per matched\n// row -- NOT a wrapped array -- or a bare {} via alwaysOutputData when there\n// is no match. Checking Array.isArray() here was always wrong: it made this\n// return 'customer' for EVERY sender regardless of their real role, since\n// launch (confirmed live -- a real PM contact was never once routed as pm).\nconst inbound = $('Parse Inbound Message').first().json;\nconst contactItem = $input.first().json;\nconst contact = contactItem && contactItem.id ? contactItem : null;\n\nconst role = contact ? contact.role : 'customer';\n\nreturn [{\n  json: {\n    ...inbound,\n    contact_id: contact ? contact.id : null,\n    role\n  }\n}];"},"name":"Determine Role","type":"n8n-nodes-base.code","typeVersion":2,"position":[680,160],"id":"6ba9a62f-e994-4ed5-923b-5bb65b5341e0"},{"parameters":{"rules":{"values":[{"conditions":{"combinator":"and","conditions":[{"leftValue":"={{$json.role}}","rightValue":"customer","operator":{"type":"string","operation":"equals"}}]},"renameOutput":true,"outputKey":"customer"},{"conditions":{"combinator":"and","conditions":[{"leftValue":"={{$json.role}}","rightValue":"pm","operator":{"type":"string","operation":"equals"}}]},"renameOutput":true,"outputKey":"pm"},{"conditions":{"combinator":"and","conditions":[{"leftValue":"={{$json.role}}","rightValue":"lawyer","operator":{"type":"string","operation":"equals"}}]},"renameOutput":true,"outputKey":"lawyer"}]},"options":{"fallbackOutput":"extra"}},"name":"Route by Role","type":"n8n-nodes-base.switch","typeVersion":3,"position":[900,160],"id":"69b24f51-8871-41d2-9096-808ddfa6d260"},{"parameters":{"method":"POST","url":"={{$env.N8N_BASE_URL}}/webhook/stage1-sales-flow","sendBody":true,"specifyBody":"json","jsonBody":"={{JSON.stringify($json)}}","options":{"timeout":15000}},"name":"Forward to Stage 1 Sales Flow","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1140,60],"id":"ff3f30cc-927e-497d-8772-7f43f8a0980d"},{"parameters":{"method":"POST","url":"={{$env.N8N_BASE_URL}}/webhook/pm-toggle","sendBody":true,"specifyBody":"json","jsonBody":"={{JSON.stringify($json)}}","options":{"timeout":15000}},"name":"Forward to PM Toggle","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1140,220],"id":"41f3c035-bc2f-4063-92df-a6a118ef6d15"},{"parameters":{"method":"POST","url":"={{$env.N8N_BASE_URL}}/webhook/stage3-4","sendBody":true,"specifyBody":"json","jsonBody":"={{JSON.stringify($json)}}","options":{"timeout":15000}},"name":"Forward to Stage 3-4","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1140,300],"id":"9eb66757-bbde-4a9e-8ae6-a8967762fdab"},{"parameters":{"mode":"runOnceForAllItems","jsCode":"// Other staff roles (HR, procurement, security, etc.): no inbound flow yet --\n// they're only ever messaged (Stage 5 fan-out), not expected to message the bot back.\nconsole.log('Unrouted role, logging only:', $input.first().json.role);\nreturn $input.all();"},"name":"Log Only (unrouted role)","type":"n8n-nodes-base.code","typeVersion":2,"position":[1140,440],"id":"3752491b-e86e-4811-8e8b-867db2fd0675"}],"connections":{"Meta Verify (GET)":{"main":[[{"node":"Verify Challenge","type":"main","index":0}]]},"Verify Challenge":{"main":[[{"node":"Respond Verify","type":"main","index":0}]]},"Meta Inbound (POST)":{"main":[[{"node":"Parse Inbound Message","type":"main","index":0}]]},"Parse Inbound Message":{"main":[[{"node":"Has Message?","type":"main","index":0}]]},"Has Message?":{"main":[[],[{"node":"Lookup Contact","type":"main","index":0}]]},"Lookup Contact":{"main":[[{"node":"Determine Role","type":"main","index":0}]]},"Determine Role":{"main":[[{"node":"Route by Role","type":"main","index":0}]]},"Route by Role":{"main":[[{"node":"Forward to Stage 1 Sales Flow","type":"main","index":0}],[{"node":"Forward to PM Toggle","type":"main","index":0}],[{"node":"Forward to Stage 3-4","type":"main","index":0}],[{"node":"Log Only (unrouted role)","type":"main","index":0}]]}},"settings":{"executionOrder":"v1"},"staticData":null,"meta":null,"nodeGroups":[],"pinData":null,"versionId":"1b27d022-5cd3-47a5-990a-29389d181c15","activeVersionId":null,"versionCounter":7,"triggerCount":2,"sourceWorkflowId":null,"tags":[],"activeVersion":null}
+{
+  "name": "Bali - 01 Inbound Router",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "whatsapp-inbound",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Meta Verify (GET)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        0
+      ],
+      "webhookId": "bali-whatsapp-verify",
+      "id": "c209c9dc-f6c6-4f32-9e64-d5f05940582e"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Meta webhook verification handshake.\n// Meta calls this once when you register the callback URL in the app dashboard.\nconst q = $input.first().json.query || {};\nconst verifyToken = $env.META_WEBHOOK_VERIFY_TOKEN;\nif (q['hub.mode'] === 'subscribe' && q['hub.verify_token'] === verifyToken) {\n  return [{ json: { status: 200, body: q['hub.challenge'] } }];\n}\nreturn [{ json: { status: 403, body: 'verification failed' } }];"
+      },
+      "name": "Verify Challenge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        20,
+        0
+      ],
+      "id": "963663f4-1b33-4c78-bbcd-da99a97a4367"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{$json.body}}",
+        "options": {
+          "responseCode": "={{$json.status}}"
+        }
+      },
+      "name": "Respond Verify",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        0
+      ],
+      "id": "98f1e5d3-a141-4dd2-9618-0665936ea75c"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-inbound",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "name": "Meta Inbound (POST)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        220
+      ],
+      "webhookId": "bali-whatsapp-inbound",
+      "id": "e1ba2857-4879-49a4-a13d-f62bbb3236c1"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Reject anything that is not a verified relay from Nexa -- Meta's webhook is\n// registered on Nexa's shared Meta app now, not this URL directly (see\n// docs/setup.md, 'Shared Meta app with Nexa'). Silently drop rather than\n// respond 401: this node's webhook responseMode is 'onReceived', so n8n\n// already sent 200 by the time this code runs -- there is no HTTP response\n// left to change, only whether we act on the payload.\nconst headers = $input.first().json.headers || {};\nif (headers['x-bali-forward-secret'] !== $env.BALI_FORWARD_SECRET) {\n  return [{ json: { skip: true } }];\n}\n\n// Parse the Meta WhatsApp Cloud API webhook payload down to the fields we care about.\n// Meta's payload shape: entry[0].changes[0].value.messages[0]\nconst body = $input.first().json.body;\nconst value = body?.entry?.[0]?.changes?.[0]?.value;\nconst message = value?.messages?.[0];\n\nif (!message) {\n  // status callbacks (delivered/read) or other non-message events - nothing to route\n  return [{ json: { skip: true } }];\n}\n\nconst fromNumber = message.from; // E.164 without '+'\nconst text = message.text?.body || null;\nconst mediaId = message.image?.id || message.document?.id || message.audio?.id || null;\nconst mediaType = message.image ? 'image' : message.document ? 'document' : message.audio ? 'audio' : null;\nconst contextMessageId = message.context?.id || null; // set when the sender replied-to a specific message\n\n// Owner's explicit call (2026-08-03): one universal \"type okay to receive\n// update\" mechanism, here in the ONE place every inbound message passes\n// through regardless of role -- not per-role logic duplicated in\n// stage1-code.js/pm-toggle-code.js/stage3-4-action-code.js (removed). This\n// means it works identically for roles that have no other reply-handling\n// at all today (HR, security, procurement, accounts, event_assistant,\n// supervisor, facility_manager, general staff), not just customer/PM/\n// lawyer. Real content that couldn't be delivered (outside the 24h window)\n// sits in queued_messages (see schema.sql) until the sender's own next\n// message affirms with any of ok/okay/yh/yeah/yes -- same affirmative\n// vocabulary already used elsewhere in this codebase (e.g. contract/invoice\n// approval checks), not just the literal word \"okay\".\nconst helpers = this.helpers;\nconst SUPABASE_URL = $env.SUPABASE_URL;\nconst SUPABASE_KEY = $env.SUPABASE_SERVICE_KEY;\nconst META_TOKEN = $env.META_ACCESS_TOKEN;\nconst META_PHONE_ID = $env.META_PHONE_NUMBER_ID;\nconst sbHeaders = { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' };\n\nconst isAffirmative = text && /^(y(es)?|yeah|yh|yep|yup|sure|ok(ay)?)\\b/i.test(text.trim());\n\nif (isAffirmative) {\n  const queued = await helpers.httpRequest({\n    method: 'GET',\n    url: `${SUPABASE_URL}/rest/v1/queued_messages?phone_number=eq.${encodeURIComponent(fromNumber)}&order=created_at.asc&select=*`,\n    headers: sbHeaders,\n    json: true,\n    timeout: 15000,\n  });\n  if (Array.isArray(queued) && queued.length > 0) {\n    for (const row of queued) {\n      if (META_TOKEN) {\n        try {\n          await helpers.httpRequest({\n            method: 'POST',\n            url: `https://graph.facebook.com/v20.0/${META_PHONE_ID}/messages`,\n            headers: { Authorization: `Bearer ${META_TOKEN}`, 'Content-Type': 'application/json' },\n            body: { messaging_product: 'whatsapp', to: fromNumber, type: 'text', text: { body: row.message_text } },\n            json: true,\n            timeout: 20000,\n          });\n        } catch (e) {\n          // Best-effort -- if this particular send fails, still clear the\n          // row (matches every other flush-on-reply implementation this\n          // session) rather than risk resending it forever on every future\n          // affirmative reply.\n        }\n      } else {\n        // Sandbox: no real Meta token configured -- log the same way every\n        // other sandboxLog() in this codebase does, so the sandbox test\n        // webpage displays it.\n        try {\n          await helpers.httpRequest({\n            method: 'POST',\n            url: `${SUPABASE_URL}/rest/v1/sandbox_outbound`,\n            headers: sbHeaders,\n            body: {\n              to_number: fromNumber,\n              kind: 'text',\n              message_text: row.message_text,\n              message_id: `sandbox-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,\n            },\n            json: true,\n            timeout: 15000,\n          });\n        } catch (e) {}\n      }\n      try {\n        await helpers.httpRequest({\n          method: 'DELETE',\n          url: `${SUPABASE_URL}/rest/v1/queued_messages?id=eq.${row.id}`,\n          headers: sbHeaders,\n          json: true,\n          timeout: 15000,\n        });\n      } catch (e) {}\n    }\n    // Deliberately does NOT stop here (no early return) -- this same \"yes\"/\n    // \"okay\" might ALSO be a genuine answer to something else entirely\n    // (e.g. \"have you hosted an event before?\"), not purely an unlock\n    // keyword. Flushing is a side effect; the message still continues to\n    // normal role-based routing below so a real answer is never silently\n    // swallowed just because something happened to be queued at the same\n    // moment.\n  }\n}\n\nreturn [{\n  json: {\n    skip: false,\n    from_number: fromNumber,\n    text,\n    media_id: mediaId,\n    media_type: mediaType,\n    reply_to_message_id: contextMessageId,\n    whatsapp_message_id: message.id,\n    received_at: message.timestamp\n  }\n}];\n"
+      },
+      "name": "Parse Inbound Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        20,
+        220
+      ],
+      "id": "46701623-7e62-458a-b380-78367ef65c72"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.skip}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "name": "Has Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        240,
+        220
+      ],
+      "id": "480b28ca-6faa-404d-9101-28aa5ca9f93d"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{$env.SUPABASE_URL}}/rest/v1/contacts",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "phone_number",
+              "value": "=eq.{{$('Parse Inbound Message').item.json.from_number}}"
+            },
+            {
+              "name": "select",
+              "value": "*"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.SUPABASE_SERVICE_KEY}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "name": "Lookup Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        160
+      ],
+      "id": "f35a6f03-8194-4d42-a6a3-914d2be00e10",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Section 9a: unrecognized number falls back to 'customer' and the sales flow.\n// Lookup Contact (an HTTP Request node) already returns one item per matched\n// row -- NOT a wrapped array -- or a bare {} via alwaysOutputData when there\n// is no match. Checking Array.isArray() here was always wrong: it made this\n// return 'customer' for EVERY sender regardless of their real role, since\n// launch (confirmed live -- a real PM contact was never once routed as pm).\nconst inbound = $('Parse Inbound Message').first().json;\nconst contactItem = $input.first().json;\nconst contact = contactItem && contactItem.id ? contactItem : null;\n\nconst role = contact ? contact.role : 'customer';\n\nreturn [{\n  json: {\n    ...inbound,\n    contact_id: contact ? contact.id : null,\n    role\n  }\n}];"
+      },
+      "name": "Determine Role",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        160
+      ],
+      "id": "6ba9a62f-e994-4ed5-923b-5bb65b5341e0"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.role}}",
+                    "rightValue": "customer",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "customer"
+            },
+            {
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.role}}",
+                    "rightValue": "pm",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "pm"
+            },
+            {
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.role}}",
+                    "rightValue": "lawyer",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "lawyer"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "name": "Route by Role",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        900,
+        160
+      ],
+      "id": "69b24f51-8871-41d2-9096-808ddfa6d260"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.N8N_BASE_URL}}/webhook/stage1-sales-flow",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify($json)}}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "name": "Forward to Stage 1 Sales Flow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        60
+      ],
+      "id": "ff3f30cc-927e-497d-8772-7f43f8a0980d"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.N8N_BASE_URL}}/webhook/pm-toggle",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify($json)}}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "name": "Forward to PM Toggle",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        220
+      ],
+      "id": "41f3c035-bc2f-4063-92df-a6a118ef6d15"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.N8N_BASE_URL}}/webhook/stage3-4",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify($json)}}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "name": "Forward to Stage 3-4",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        300
+      ],
+      "id": "9eb66757-bbde-4a9e-8ae6-a8967762fdab"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Other staff roles (HR, procurement, security, etc.): no inbound flow yet --\n// they're only ever messaged (Stage 5 fan-out), not expected to message the bot back.\nconsole.log('Unrouted role, logging only:', $input.first().json.role);\nreturn $input.all();"
+      },
+      "name": "Log Only (unrouted role)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        440
+      ],
+      "id": "3752491b-e86e-4811-8e8b-867db2fd0675"
+    }
+  ],
+  "connections": {
+    "Meta Verify (GET)": {
+      "main": [
+        [
+          {
+            "node": "Verify Challenge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Challenge": {
+      "main": [
+        [
+          {
+            "node": "Respond Verify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta Inbound (POST)": {
+      "main": [
+        [
+          {
+            "node": "Parse Inbound Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Inbound Message": {
+      "main": [
+        [
+          {
+            "node": "Has Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Message?": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Lookup Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Contact": {
+      "main": [
+        [
+          {
+            "node": "Determine Role",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Role": {
+      "main": [
+        [
+          {
+            "node": "Route by Role",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Role": {
+      "main": [
+        [
+          {
+            "node": "Forward to Stage 1 Sales Flow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Forward to PM Toggle",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Forward to Stage 3-4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Only (unrouted role)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
