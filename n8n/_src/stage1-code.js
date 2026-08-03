@@ -529,32 +529,43 @@ function returningGreeting(firstName) {
 // reply-generation prompt below.
 const FIELD_LABELS = {
   event_date: 'the date',
+  customer_name: 'their own name (the person messaging, not the event)',
   event_type: 'the event type',
   event_name: 'a short name to call the event (e.g. for scheduling, not a person\'s name)',
   is_existing_client: 'whether they have hosted an event before, anywhere at all (not specifically with us) -- just gauging their general experience level',
   client_reference: 'their IG, TikTok, or website',
 };
 
-// Intake order, one step at a time: date -> event type + name (asked
-// together, one natural question) -> whether they've hosted with us before
-// -> IG/TikTok/website, but ONLY for clients who said yes to the previous
-// step (owner's call -- brand-new clients aren't asked for a social handle
-// at all). fieldOrder() is conditional on the current booking's
-// is_existing_client so client_reference only becomes "needed" once that's
-// true; STEP_GROUPS mirrors the same order/grouping for deciding what to
-// ask about on any given turn.
+// Intake order, one step at a time: date -> the client's own name -> event
+// name -> event type -> whether they've hosted with us before -> IG/TikTok/
+// website, but ONLY for clients who said yes to the previous step (owner's
+// call -- brand-new clients aren't asked for a social handle at all).
+// fieldOrder() is conditional on the current booking's is_existing_client so
+// client_reference only becomes "needed" once that's true; STEP_GROUPS
+// mirrors the same order/grouping for deciding what to ask about on any
+// given turn.
+//
+// customer_name isn't a booking column (see contact.name / the customer_name
+// extraction rule below) -- callers must merge {customer_name: contact.name}
+// into whatever object they check missing-ness against, fieldOrder itself
+// doesn't care where the value lives.
+//
 // Owner's explicit call (2026-08-03): event_name and event_type are asked
 // as two separate steps, name first then type -- previously combined into
 // one question ("What's the name of the event, and what type of event is
 // it?"), now split. See the event_details_confirmed_at gate further down
 // for the structured confirm/correct step that follows once both are known.
+// Also 2026-08-03: customer_name added as its own required step -- the
+// GREETING already invites date+name together in one message, but nothing
+// previously guaranteed a follow-up ask if the client only answered the
+// date and skipped their name; now it's asked for explicitly if missing.
 function fieldOrder(booking) {
-  const order = ['event_date', 'event_name', 'event_type', 'is_existing_client'];
+  const order = ['event_date', 'customer_name', 'event_name', 'event_type', 'is_existing_client'];
   if (booking.is_existing_client === true) order.push('client_reference');
   return order;
 }
 
-const STEP_GROUPS = [['event_date'], ['event_name'], ['event_type'], ['is_existing_client'], ['client_reference']];
+const STEP_GROUPS = [['event_date'], ['customer_name'], ['event_name'], ['event_type'], ['is_existing_client'], ['client_reference']];
 
 // Owner's call: keep this professional, not casual -- no "Good news!" /
 // "works!" style phrasing.
@@ -564,6 +575,7 @@ const DATE_CONFIRMED_LEAD_INS = ["That date is available.", "That date is availa
 // wanted -- locked down the same way TYPE_NAME_QUESTION/datePast are,
 // rather than left to the model's own paraphrasing.
 const EVENT_NAME_QUESTION = "Could you share the name of your event?";
+const CUSTOMER_NAME_QUESTION = "Could you also share your name?";
 
 function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -975,6 +987,7 @@ Decide: does this clearly confirm both are accurate (a plain yes/confirm, nothin
 
   const known = {
     event_date: booking.event_date,
+    customer_name: contact.name,
     event_type: booking.event_type,
     event_name: booking.event_name,
     is_existing_client: booking.is_existing_client,
@@ -1162,6 +1175,13 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
     Object.assign(booking, patch);
   }
 
+  // customer_name isn't a real booking column -- mirror contact.name onto
+  // this in-memory object (never written to the bookings table) purely so
+  // fieldOrder's generic booking[f] check resolves it like any other field.
+  // contact.name may have just been updated a few lines above, from this
+  // same turn's customer_name extraction.
+  booking.customer_name = contact.name;
+
   const missingAfter = fieldOrder(booking).filter(
     (f) => booking[f] === null || booking[f] === undefined
   );
@@ -1205,6 +1225,7 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
   // this is a safety net, not the primary path).
   const needsEventDetailsConfirm = !!(booking.event_name && booking.event_type && !booking.event_details_confirmed_at);
   const isEventNameStep = stepFields.length === 1 && stepFields[0] === 'event_name';
+  const isCustomerNameStep = stepFields.length === 1 && stepFields[0] === 'customer_name';
 
   if (datePast) {
     // Fixed reply, no LLM call -- exact wording matters here, and this
@@ -1222,6 +1243,13 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
     // Fixed question, no LLM call -- see the comment on EVENT_NAME_QUESTION.
     const leadIn = dateConfirmed ? pick(DATE_CONFIRMED_LEAD_INS) : (kbPending ? "Let me check on that for you." : null);
     replyText = leadIn ? `${leadIn} ${EVENT_NAME_QUESTION}` : EVENT_NAME_QUESTION;
+  } else if (isCustomerNameStep) {
+    // Fixed question, no LLM call -- see the comment on CUSTOMER_NAME_QUESTION.
+    // Owner's explicit call (2026-08-03): the GREETING already invites the
+    // client's name alongside the date, but nothing previously guaranteed a
+    // follow-up if they only answered the date -- this is that guarantee.
+    const leadIn = dateConfirmed ? pick(DATE_CONFIRMED_LEAD_INS) : (kbPending ? "Let me check on that for you." : null);
+    replyText = leadIn ? `${leadIn} ${CUSTOMER_NAME_QUESTION}` : CUSTOMER_NAME_QUESTION;
   } else {
     const replyResult = await askOpenAIJson(
       `You're Bali, an event venue's WhatsApp assistant, texting a client during booking intake. Warm, professional, brief and human -- never sound like an AI, no "Awesome!", no repeating earlier phrasing. Keep it SHORT -- one short sentence, no lists, no line breaks, this is WhatsApp not email.
