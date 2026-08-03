@@ -46,6 +46,12 @@ create table bookings (
   event_name text,
   event_date date,
   event_type text,
+  -- Owner's explicit call (2026-08-03): event_name and event_type are asked
+  -- SEPARATELY (not combined into one question), then shown back together
+  -- once both are known for the client to confirm or correct -- set once
+  -- they say yes, cleared back to null (both this and the columns above)
+  -- if they correct instead, same redo-loop shape as contracts.details_confirmed_at.
+  event_details_confirmed_at timestamptz,
   status text not null default 'inquiry'
     check (status in ('inquiry', 'negotiating', 'invoiced', 'awaiting_contract',
                        'contract_drafted', 'awaiting_pm_approval', 'sent_to_client',

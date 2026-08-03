@@ -543,22 +543,19 @@ const FIELD_LABELS = {
 // is_existing_client so client_reference only becomes "needed" once that's
 // true; STEP_GROUPS mirrors the same order/grouping for deciding what to
 // ask about on any given turn.
+// Owner's explicit call (2026-08-03): event_name and event_type are asked
+// as two separate steps, name first then type -- previously combined into
+// one question ("What's the name of the event, and what type of event is
+// it?"), now split. See the event_details_confirmed_at gate further down
+// for the structured confirm/correct step that follows once both are known.
 function fieldOrder(booking) {
-  const order = ['event_date', 'event_type', 'event_name', 'is_existing_client'];
+  const order = ['event_date', 'event_name', 'event_type', 'is_existing_client'];
   if (booking.is_existing_client === true) order.push('client_reference');
   return order;
 }
 
-const STEP_GROUPS = [['event_date'], ['event_type', 'event_name'], ['is_existing_client'], ['client_reference']];
+const STEP_GROUPS = [['event_date'], ['event_name'], ['event_type'], ['is_existing_client'], ['client_reference']];
 
-// Owner asked for this exact phrasing twice after the model paraphrased it
-// differently each time -- lock it down instead of leaving it to the LLM.
-// This combined step can only ever occur with date_confirmed_available
-// either true (same turn the date was just resolved) or false (a later
-// turn, e.g. the client asked something else without answering this yet);
-// dateRejected can't co-occur with it since event_date re-enters the
-// missing list and takes priority again before this step is ever reached.
-const TYPE_NAME_QUESTION = "What's the name of the event, and what type of event is it?";
 // Owner's call: keep this professional, not casual -- no "Good news!" /
 // "works!" style phrasing.
 const DATE_CONFIRMED_LEAD_INS = ["That date is available.", "That date is available for booking."];
@@ -905,6 +902,53 @@ Write one brief, warm, professional reassurance letting them know you're still o
   // DB-checked date result, what's still missing) -- never a fixed canned
   // string, so two visits to the same field never sound identical.
 
+  // Owner's explicit call (2026-08-03): once both event_name and event_type
+  // are known, show them back together and require an explicit yes before
+  // moving on -- catches this client's reply to that confirm prompt (asked
+  // at the bottom of this same branch, on whichever earlier turn type just
+  // became known). Checked against booking state as fetched fresh at the
+  // top of this file, so this only fires on a LATER turn answering the
+  // confirm, never the same turn the prompt was first shown.
+  if (booking.event_name && booking.event_type && !booking.event_details_confirmed_at) {
+    const extraction = await askOpenAIJson(
+      `The venue showed a client their event's name and type and asked them to confirm or correct it. Currently on file: Name: "${booking.event_name}", Type: "${booking.event_type}". They just replied: "${effectiveText}".
+
+Decide: does this clearly confirm both are accurate (a plain yes/confirm, nothing corrected)? Or does it correct the name and/or the type? A correction might restate only one of them, or both -- only fill in whichever one(s) they actually changed, leave the other null so it isn't touched. Reply ONLY with JSON: {"confirmed": true, false, or null, "corrected_name": "..." or null, "corrected_type": "..." or null}. Use confirmed:true ONLY when nothing is being corrected.`,
+      effectiveText || ''
+    );
+    if (extraction?.confirmed === true) {
+      await sbPatch(`bookings?id=eq.${booking.id}`, { event_details_confirmed_at: new Date().toISOString() });
+      booking.event_details_confirmed_at = new Date().toISOString();
+      // Deliberately does NOT return here -- falls through to the normal
+      // mid-intake flow below so the SAME reply naturally asks whatever's
+      // actually next (is_existing_client, client_reference, or completes
+      // intake), instead of a separate "thanks" round-trip. The general
+      // extraction below runs on this same "yes" text too, but with the
+      // full transcript as context (showing the confirm question was the
+      // very last thing asked) it correctly extracts nothing new from a
+      // bare "yes" rather than misreading it as an answer to a different
+      // field that hasn't been asked yet.
+    } else {
+      let replyText;
+      if (extraction?.corrected_name || extraction?.corrected_type) {
+        const correctionPatch = {};
+        if (extraction.corrected_name) correctionPatch.event_name = extraction.corrected_name;
+        if (extraction.corrected_type) correctionPatch.event_type = extraction.corrected_type;
+        await sbPatch(`bookings?id=eq.${booking.id}`, correctionPatch);
+        Object.assign(booking, correctionPatch);
+        replyText = `Please confirm -- reply YES if accurate, or tell me what's still wrong.\nName: ${booking.event_name}\nType: ${booking.event_type}`;
+      } else {
+        replyText = `Please confirm -- reply YES if accurate, or tell me what to correct.\nName: ${booking.event_name}\nType: ${booking.event_type}`;
+      }
+      await sendWhatsApp(from_number, replyText);
+      await sbRequest('POST', 'conversations', [
+        { booking_id: booking.id, sender_contact_id: contact.id, direction: 'inbound', message_text: effectiveText, stage: 'stage1_intake' },
+        { booking_id: booking.id, sender_contact_id: null, direction: 'outbound', message_text: replyText, stage: 'stage1_intake' },
+      ]);
+      return [{ json: { action: 'event_details_confirm_handled', booking_id: booking.id } }];
+    }
+  }
+
   // A real past Bali booking is sufficient proof they've hosted an event
   // before (it's a subset of "anywhere at all") -- don't bother asking in
   // that case. A self-report is only needed when we genuinely don't know.
@@ -1102,7 +1146,11 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
   const missingAfter = fieldOrder(booking).filter(
     (f) => booking[f] === null || booking[f] === undefined
   );
-  const justCompleted = missingAfter.length === 0 && booking.status === 'inquiry';
+  // Also requires the event_name/event_type confirm step (see the gate at
+  // the top of this branch) -- without this, intake could complete (and
+  // notify the PM) the instant both fields are merely SET, before the
+  // client ever actually confirmed them.
+  const justCompleted = missingAfter.length === 0 && !!booking.event_details_confirmed_at && booking.status === 'inquiry';
   if (justCompleted) {
     await sbPatch(`bookings?id=eq.${booking.id}`, { status: 'negotiating' });
     booking.status = 'negotiating';
@@ -1130,7 +1178,13 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
   // decide on its own.
   const stepFields = currentStepFields(missingAfter);
   const stepLabels = stepFields.map((f) => FIELD_LABELS[f]);
-  const isTypeNameStep = stepFields.length === 2 && stepFields.includes('event_type') && stepFields.includes('event_name');
+  // True the instant both fields are known but not yet confirmed -- either
+  // just-completed this same turn (the second of the two was just
+  // extracted above) or already known from an earlier turn but somehow
+  // reached here unconfirmed (shouldn't normally happen, the gate at the
+  // top of this branch catches replies to this prompt on the next turn --
+  // this is a safety net, not the primary path).
+  const needsEventDetailsConfirm = !!(booking.event_name && booking.event_type && !booking.event_details_confirmed_at);
 
   if (datePast) {
     // Fixed reply, no LLM call -- exact wording matters here, and this
@@ -1138,10 +1192,12 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
     replyText = datePastSuggestion
       ? `That date has passed. Did you mean ${formatDateForCustomer(datePastSuggestion)}?`
       : "That date has already passed. Could you give me a different date?";
-  } else if (isTypeNameStep) {
-    // Fixed question, no LLM call -- see the comment on TYPE_NAME_QUESTION.
+  } else if (needsEventDetailsConfirm) {
+    // Fixed confirm prompt, no LLM call -- just formats the two known
+    // values back, same shape as the contract name/address confirm.
     const leadIn = dateConfirmed ? pick(DATE_CONFIRMED_LEAD_INS) : (kbPending ? "Let me check on that for you." : null);
-    replyText = leadIn ? `${leadIn} ${TYPE_NAME_QUESTION}` : TYPE_NAME_QUESTION;
+    const confirmText = `Please confirm -- reply YES if accurate, or tell me what to correct.\nName: ${booking.event_name}\nType: ${booking.event_type}`;
+    replyText = leadIn ? `${leadIn} ${confirmText}` : confirmText;
   } else {
     const replyResult = await askOpenAIJson(
       `You're Bali, an event venue's WhatsApp assistant, texting a client during booking intake. Warm, professional, brief and human -- never sound like an AI, no "Awesome!", no repeating earlier phrasing. Keep it SHORT -- one short sentence, no lists, no line breaks, this is WhatsApp not email.

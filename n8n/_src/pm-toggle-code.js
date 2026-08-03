@@ -232,11 +232,6 @@ const FIELD_PROMPTS = {
   security_notes: 'The PM is answering a question about special security/"vigilante" needs for the event. Reply ONLY with JSON: {"understood": true/false, "value": "..."}.',
 };
 
-async function findContactByPhone(phone) {
-  const rows = await sbRequest('GET', `contacts?phone_number=eq.${encodeURIComponent(phone)}&select=*`);
-  return rows[0] || null;
-}
-
 // Whichever booking this fallback exchange is actually about, when the PM
 // didn't swipe-reply or use an "[event]: " prefix -- there's no single
 // "currently open" booking any more (every connected booking stays
