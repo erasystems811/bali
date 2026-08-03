@@ -599,8 +599,22 @@ async function draftInvoice(bookingId, pmDetails) {
 
   const extraction = await extractInvoiceLineItems(transcript);
   if (!extraction || !Array.isArray(extraction.line_items) || extraction.line_items.length === 0) {
-    const pm = await findPm();
-    if (pm) await sendWhatsApp(pm.phone_number, `Couldn't figure out the invoice line items for ${booking.event_name} from the conversation, can you send me the agreed items and amounts directly?`, booking.event_name);
+    // Owner's explicit ask (2026-08-03): this booking IS on the system, but
+    // there's no real negotiation logged for it to extract from (e.g. it
+    // never went through a live client conversation) -- give the PM the
+    // exact same structured "send me: Items / Price / Payment agreement"
+    // ask already used for a booking that isn't on the system at all
+    // (see the "invoice [name]" command in pm-toggle-code.js), instead of
+    // a vague "send me the agreed items and amounts directly" line. Tracked
+    // as a real pending question (not just a bare send) so the PM's plain
+    // reply actually re-runs this same draft, rather than a dead end that
+    // silently requires retyping the whole "generate invoice for X" command.
+    await askPmDirectly(
+      bookingId,
+      'invoice_details_needed',
+      `Couldn't figure out the invoice details for ${booking.event_name} from the conversation -- send me:\n\n- Items\n- Price\n- Payment agreement\n\nand I'll draft it and send you the PDF.`,
+      booking.event_name
+    );
     return { ok: false, reason: 'extraction_failed' };
   }
 
@@ -878,6 +892,16 @@ async function resolvePaymentTermsConfirm(pendingId, answerText) {
   // anything and asks again -- confirmed live as an actual retry loop.
   // Restating the question inline gives it that context in one line.
   return draftInvoice(pq.booking_id, `(re: "${pq.question_text}") ${answerText}`);
+}
+
+// Resolves the structured "send me: Items / Price / Payment agreement" ask
+// from draftInvoice's extraction-failure branch above -- the PM's reply IS
+// the missing details, so just re-run draftInvoice with it fed in as
+// pmDetails, same re-entrant pattern as resolvePaymentTermsConfirm.
+async function resolveInvoiceDetailsNeeded(pendingId, answerText) {
+  const pq = (await sbRequest('GET', `pending_questions?id=eq.${pendingId}&select=*`))[0];
+  await sbPatch(`pending_questions?id=eq.${pendingId}`, { resolved_at: new Date().toISOString() });
+  return draftInvoice(pq.booking_id, answerText);
 }
 
 // Resolves the staffing_type gate at the top of draftInvoice -- see the
@@ -1211,6 +1235,7 @@ else if (action === 'resolve_standalone_invoice_confirm') {
 else if (action === 'resolve_invoice_draft_confirm') result = await resolveInvoiceDraftConfirm(input.pending_question_id, input.answer_text);
 else if (action === 'correct_invoice_from_fallback') result = await correctInvoiceFromFallbackChat(input.booking_id, input.answer_text);
 else if (action === 'resolve_payment_terms_confirm') result = await resolvePaymentTermsConfirm(input.pending_question_id, input.answer_text);
+else if (action === 'resolve_invoice_details_needed') result = await resolveInvoiceDetailsNeeded(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_staffing_type') result = await resolveStaffingType(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_invoice_approval') result = await resolveInvoiceApproval(input.pending_question_id, input.answer_text);
 else if (action === 'resolve_payment_confirmed') result = await resolvePaymentConfirmed(input.pending_question_id, input.answer_text);

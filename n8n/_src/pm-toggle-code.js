@@ -952,6 +952,11 @@ const STAGE3_4_DELEGATED_FIELDS = {
   // resolving it now needs to resume draftInvoice, not just patch a column
   // -- see resolveStaffingType in stage3-4-action-code.js.
   staffing_type: 'resolve_staffing_type',
+  // A booking that IS on the system but has nothing to extract from (no
+  // real negotiation logged) -- the PM's reply is the missing items/price/
+  // payment, same re-entrant resume as payment_terms_confirm above. See
+  // resolveInvoiceDetailsNeeded in stage3-4-action-code.js.
+  invoice_details_needed: 'resolve_invoice_details_needed',
 };
 if (STAGE3_4_DELEGATED_FIELDS[target.field_name]) {
   // Fire-and-forget: the stage3-4 webhook responds immediately on receipt
