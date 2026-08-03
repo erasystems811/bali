@@ -113,6 +113,20 @@ async function sendWhatsAppTemplate(toNumber, text) {
 // Check the window proactively instead, from the contact's own last inbound
 // message, and go straight to the template when it's closed.
 async function isWithinMessagingWindow(toNumber) {
+  // Confirmed live 2026-08-03: a brand-new customer's very first-ever message
+  // triggered this on their own greeting reply, sending them a raw
+  // "This is an automated notification..." template instead of the real
+  // GREETING text. Root cause: this function looks up the contact's most
+  // recent INBOUND conversations row, but that row (their current message,
+  // the one we're replying to right now) hasn't been inserted into the DB
+  // yet -- logs.push() batches it into one insert that only happens AFTER
+  // this reply is sent, at the very bottom of this file. With zero rows
+  // found, this always returned false for anyone's first-ever message,
+  // regardless of how obviously "in window" they actually are (they just
+  // texted us, this same execution). Short-circuit true whenever toNumber
+  // is the live sender of the message currently being processed -- no DB
+  // round trip needed, this is always correct.
+  if (toNumber === from_number) return true;
   const contacts = await sbRequest('GET', `contacts?phone_number=eq.${encodeURIComponent(toNumber)}&select=id`);
   const contactId = contacts[0]?.id;
   if (!contactId) return false;
@@ -362,9 +376,36 @@ const todayStr = today.toISOString().slice(0, 10);
 const todayWeekday = today.toLocaleDateString('en-US', { weekday: 'long' });
 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 
 function formatDateForCustomer(isoDate) {
   return new Date(`${isoDate}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+}
+
+// Deterministically finds a month name/abbreviation in free text -- same
+// "don't trust the model, match a small closed vocabulary in code" approach
+// already used for weekday names in resolveRelativeDate. Matches "august",
+// "aug", "Aug." etc; requires the abbreviation to be a real word boundary
+// match (not a substring of something else).
+function findMonthNumber(rawText) {
+  const text = (rawText || '').toLowerCase();
+  for (let i = 0; i < MONTHS.length; i++) {
+    const name = MONTHS[i];
+    const abbr = name.slice(0, 3);
+    if (new RegExp(`\\b${name}\\b`).test(text) || new RegExp(`\\b${abbr}\\b`).test(text)) {
+      return i + 1; // 1-indexed, matches ISO month numbering
+    }
+  }
+  return null;
+}
+
+// Deterministically pulls a day-of-month number out of the "day_of_month_given"
+// text the extraction prompt produces (e.g. "23rd", "the 5th", "3") -- always
+// a small integer with an optional ordinal suffix, safe to regex rather than
+// re-asking the model.
+function findDayNumber(rawText) {
+  const match = (rawText || '').match(/\b(\d{1,2})(?:st|nd|rd|th)?\b/);
+  return match ? parseInt(match[1], 10) : null;
 }
 
 function resolveRelativeDate(rawText) {
@@ -851,7 +892,7 @@ ${transcript}
 
 Client's latest message: "${effectiveText || ''}"
 
-Extract EVERY still-needed field this message provides, not just the one you were "expecting" next -- e.g. "birthday party for my sister" gives you both event_type ("birthday party") AND enough for event_name ("Sister's Birthday Party"), extract both in the same pass rather than leaving event_type blank because event_name came first in priority order. Resolve relative dates ("next Friday", "this weekend", a bare day name) against today's date; if an event_date is extracted from a bare day/month with no year (e.g. "24th july"), resolve it against the CURRENT year regardless of anything discussed earlier in the conversation -- never carry a year over from an earlier message or an earlier "did you mean [year]?" question. A bare day-of-month with NO month stated (e.g. "23rd", "the 5th") is NOT enough to extract a full event_date -- never guess or default a month for this; leave event_date unextracted and instead set day_of_month_given to the day as they wrote it (e.g. "23rd"), so the reply can ask specifically which month. If the message is instead (or also) a genuine question or comment not covered by the fields above (pricing, parking, capacity, "what dates are open", small talk, etc.), note it as off_topic -- something the venue needs to actually answer, not guess at. Separately, if the client is stating or correcting their own name (e.g. "I'm Chidera", "my name is X", "it's actually X not Y"), extract it as customer_name -- never guess a name from anything else they say.
+Extract EVERY still-needed field this message provides, not just the one you were "expecting" next -- e.g. "birthday party for my sister" gives you both event_type ("birthday party") AND enough for event_name ("Sister's Birthday Party"), extract both in the same pass rather than leaving event_type blank because event_name came first in priority order. Resolve relative dates ("next Friday", "this weekend", a bare day name) against today's date; if an event_date is extracted from a bare day/month with no year (e.g. "24th july"), resolve it against the CURRENT year regardless of anything discussed earlier in the conversation -- never carry a year over from an earlier message or an earlier "did you mean [year]?" question. A bare day-of-month with NO month stated (e.g. "23rd", "the 5th") is NOT enough to extract a full event_date -- never guess or default a month for this; leave event_date unextracted and instead set day_of_month_given to the day as they wrote it (e.g. "23rd"), so the reply can ask specifically which month. If the message is instead (or also) a genuine question or comment not covered by the fields above (pricing, parking, capacity, "what dates are open", small talk, etc.), note it as off_topic -- something the venue needs to actually answer, not guess at. Separately, if the client is stating or correcting their own name (e.g. "I'm Chidera", "my name is X", "it's actually X not Y"), extract it as customer_name -- never guess a name from anything else they say. Also extract customer_name if the venue's own message in the transcript just directly asked for their name (the very first greeting always does) and this message is a short direct answer to that -- a real name, a business/brand name, or a social handle they gave in reply all count, exactly as they wrote it (don't require "I'm"/"my name is" phrasing in this specific case, since it's a direct answer to being asked).
 
 Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?: "...", "event_name"?: "...", "is_existing_client"?: true/false, "client_reference"?: "..."}, "day_of_month_given": "..." or null, "off_topic": "..." or null, "customer_name": "..." or null}`,
     effectiveText || ''
@@ -912,6 +953,52 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
     if (/^(y(es)?|yeah|yep|yup|sure|ok(ay)?|correct)\b/i.test((effectiveText || '').trim())) {
       patch.event_date = openDateConfirm.question_text;
     }
+  }
+
+  // Confirmed live 2026-08-03: a client who gave a bare day-of-month ("3rd")
+  // got asked "which month?" (see day_of_month_given handling below), but
+  // that day was only ever held in this one turn's extraction result --
+  // never saved anywhere. The NEXT turn's extraction runs fresh, with no
+  // memory of it beyond re-reading the raw transcript text, and a bare
+  // month-only reply ("August") doesn't match any case the extraction
+  // prompt actually describes, so it went unacknowledged. Persist the day
+  // the same way event_date_year_confirm already persists a suggested year
+  // (a pending_questions row), and on the turn it's answered, combine the
+  // saved day with a month found deterministically in this message (small
+  // closed vocabulary, same reasoning as resolveRelativeDate not trusting
+  // the model for date arithmetic) rather than asking the model to
+  // reconstruct both halves from the transcript.
+  const openMonthNeeded = (await sbRequest(
+    'GET',
+    `pending_questions?booking_id=eq.${booking.id}&field_name=eq.event_date_month_needed&resolved_at=is.null&select=*`
+  ))[0];
+  if (openMonthNeeded) {
+    if (patch.event_date) {
+      // A full date arrived this turn some other way (e.g. the client just
+      // restated the whole date instead of answering "which month") -- their
+      // answer wins outright, just clean up the now-stale pending row so it
+      // doesn't sit open forever.
+      await sbPatch(`pending_questions?id=eq.${openMonthNeeded.id}`, { resolved_at: new Date().toISOString() });
+    } else {
+      const day = findDayNumber(openMonthNeeded.question_text);
+      const month = findMonthNumber(effectiveText);
+      if (day && month) {
+        await sbPatch(`pending_questions?id=eq.${openMonthNeeded.id}`, { resolved_at: new Date().toISOString() });
+        patch.event_date = `${today.getUTCFullYear()}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      }
+      // No month recognized this turn -- leave the pending row open rather
+      // than resolving it against nothing; normal extraction/off-topic
+      // handling still runs below for whatever they actually said.
+    }
+  } else if (!patch.event_date && extraction?.day_of_month_given) {
+    // A fresh bare day-of-month with no pending month-question already open
+    // for it -- persist it now so the combination above can find it on
+    // whichever future turn actually supplies the month.
+    await sbRequest('POST', 'pending_questions', {
+      booking_id: booking.id,
+      field_name: 'event_date_month_needed',
+      question_text: extraction.day_of_month_given,
+    });
   }
 
   // A date given without an explicit year can resolve to something already

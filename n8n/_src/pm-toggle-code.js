@@ -85,6 +85,12 @@ async function sendWhatsAppTemplate(toNumber, text) {
 // Check the window proactively instead, from the contact's own last inbound
 // message, and go straight to the template when it's closed.
 async function isWithinMessagingWindow(toNumber) {
+  // Same fix as stage1-code.js's version -- see that file for the full
+  // explanation. Whoever just messaged us this exact execution (from_number)
+  // is trivially within-window right now regardless of what's in the DB yet,
+  // since their inbound row for THIS message isn't inserted until after the
+  // reply is sent.
+  if (toNumber === from_number) return true;
   const contacts = await sbRequest('GET', `contacts?phone_number=eq.${encodeURIComponent(toNumber)}&select=id`);
   const contactId = contacts[0]?.id;
   if (!contactId) return false;

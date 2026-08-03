@@ -90,7 +90,19 @@ async function sendWhatsAppTemplate(toNumber, text) {
 // listen for). Catching 131047 reactively therefore doesn't reliably work.
 // Check the window proactively instead, from the contact's own last inbound
 // message, and go straight to the template when it's closed.
+// Set right before the action dispatcher at the bottom of this file, before
+// any of these functions are actually called -- see the fix note inside
+// isWithinMessagingWindow itself.
+let CURRENT_INBOUND_SENDER = null;
+
 async function isWithinMessagingWindow(toNumber) {
+  // Same fix as stage1-code.js's version -- see that file for the full
+  // explanation. Whoever just messaged us this exact execution is trivially
+  // within-window right now regardless of what's in the DB yet, since their
+  // inbound row for THIS message isn't logged until after the reply is
+  // sent. handleLawyerInbound's from_number is a function parameter, not
+  // visible here, hence the module-level CURRENT_INBOUND_SENDER instead.
+  if (toNumber === CURRENT_INBOUND_SENDER) return true;
   const contacts = await sbRequest('GET', `contacts?phone_number=eq.${encodeURIComponent(toNumber)}&select=id`);
   const contactId = contacts[0]?.id;
   if (!contactId) return false;
@@ -1136,6 +1148,7 @@ async function resolveContractApproval(pendingId, answerText) {
 
 const input = $input.first().json.body || $input.first().json;
 const action = input.action;
+CURRENT_INBOUND_SENDER = input.from_number || null;
 
 let result;
 if (action === 'draft_invoice') result = await draftInvoice(input.booking_id, input.pm_details);

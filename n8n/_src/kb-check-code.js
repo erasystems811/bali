@@ -88,7 +88,18 @@ async function sendWhatsAppTemplate(toNumber, text) {
 // listen for). Catching 131047 reactively therefore doesn't reliably work.
 // Check the window proactively instead, from the contact's own last inbound
 // message, and go straight to the template when it's closed.
+// Set right after `input` is parsed below, before this function is ever
+// called -- see the fix note inside the function itself.
+let CURRENT_INBOUND_SENDER = null;
+
 async function isWithinMessagingWindow(toNumber) {
+  // Same fix as stage1-code.js's version -- see that file for the full
+  // explanation. Whoever just messaged us this exact execution is trivially
+  // within-window right now regardless of what's in the DB yet, since their
+  // inbound row for THIS message isn't logged until after the reply is sent.
+  // from_number itself is block-scoped to the 'check' action branch below,
+  // not visible here, hence the module-level CURRENT_INBOUND_SENDER instead.
+  if (toNumber === CURRENT_INBOUND_SENDER) return true;
   const contacts = await sbRequest('GET', `contacts?phone_number=eq.${encodeURIComponent(toNumber)}&select=id`);
   const contactId = contacts[0]?.id;
   if (!contactId) return false;
@@ -163,6 +174,7 @@ async function logConversation(bookingId, senderContactId, direction, text, stag
 
 const input = $input.first().json.body || $input.first().json;
 const action = input.action || 'check';
+CURRENT_INBOUND_SENDER = input.from_number || null;
 
 if (action === 'check') {
   const { from_number, text, contact_id, booking_id } = input;
