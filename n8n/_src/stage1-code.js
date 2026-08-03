@@ -559,6 +559,11 @@ const STEP_GROUPS = [['event_date'], ['event_name'], ['event_type'], ['is_existi
 // Owner's call: keep this professional, not casual -- no "Good news!" /
 // "works!" style phrasing.
 const DATE_CONFIRMED_LEAD_INS = ["That date is available.", "That date is available for booking."];
+// Owner asked for this exact phrasing after the model's own version
+// ("could you share a short name for your event") didn't match what was
+// wanted -- locked down the same way TYPE_NAME_QUESTION/datePast are,
+// rather than left to the model's own paraphrasing.
+const EVENT_NAME_QUESTION = "Could you share the name of your event?";
 
 function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -978,12 +983,26 @@ Decide: does this clearly confirm both are accurate (a plain yes/confirm, nothin
   const missingBefore = fieldOrder(booking).filter(
     (f) => known[f] === null || known[f] === undefined
   );
+  // What the bot's own last message actually asked about, computed the same
+  // deterministic way the reply itself picks what to ask -- fed to
+  // extraction below so a short, direct answer to ONE specific question
+  // isn't over-eagerly read as also answering a DIFFERENT still-missing
+  // field. Confirmed live 2026-08-03: asked "what's the name of your
+  // event?", client replied "Mad party" (answering ONLY the name) --
+  // extraction also read the word "party" in that reply as satisfying
+  // event_type, setting both fields from an answer that only ever
+  // addressed one, since it had no signal which single field was actually
+  // just asked.
+  const justAskedAbout = currentStepFields(missingBefore);
 
   const extraction = await askOpenAIJson(
     `You're reading a WhatsApp conversation between a client and Bali, an event venue, during the booking intake stage. Today is ${todayWeekday}, ${todayStr}.
 
 Already confirmed about this booking: ${JSON.stringify(known)}
 Still needed (in priority order, but the client may answer out of order or give several at once): ${JSON.stringify(missingBefore)}
+Your own last message to the client was asking specifically about: ${JSON.stringify(justAskedAbout)}
+
+If the client's latest message reads as a short, direct answer to ONLY what you just asked about (e.g. a single word or short phrase with no other content), extract ONLY those field(s) from it -- do not also extract a DIFFERENT still-needed field just because a word in the reply could loosely fit it (e.g. if you asked for the event's NAME and they reply "Mad party", that's the whole name, not also a statement that the event TYPE is "party" -- an event name very often contains a word that also looks like a type, that alone is never enough to extract event_type too). Only extract multiple fields from one message when the client is CLEARLY volunteering more than what you asked (e.g. "birthday party for my sister" unprompted genuinely states both a type and enough for a name).
 
 Conversation so far:
 ${transcript}
@@ -1185,6 +1204,7 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
   // top of this branch catches replies to this prompt on the next turn --
   // this is a safety net, not the primary path).
   const needsEventDetailsConfirm = !!(booking.event_name && booking.event_type && !booking.event_details_confirmed_at);
+  const isEventNameStep = stepFields.length === 1 && stepFields[0] === 'event_name';
 
   if (datePast) {
     // Fixed reply, no LLM call -- exact wording matters here, and this
@@ -1198,6 +1218,10 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
     const leadIn = dateConfirmed ? pick(DATE_CONFIRMED_LEAD_INS) : (kbPending ? "Let me check on that for you." : null);
     const confirmText = `Please confirm -- reply YES if accurate, or tell me what to correct.\nName: ${booking.event_name}\nType: ${booking.event_type}`;
     replyText = leadIn ? `${leadIn} ${confirmText}` : confirmText;
+  } else if (isEventNameStep) {
+    // Fixed question, no LLM call -- see the comment on EVENT_NAME_QUESTION.
+    const leadIn = dateConfirmed ? pick(DATE_CONFIRMED_LEAD_INS) : (kbPending ? "Let me check on that for you." : null);
+    replyText = leadIn ? `${leadIn} ${EVENT_NAME_QUESTION}` : EVENT_NAME_QUESTION;
   } else {
     const replyResult = await askOpenAIJson(
       `You're Bali, an event venue's WhatsApp assistant, texting a client during booking intake. Warm, professional, brief and human -- never sound like an AI, no "Awesome!", no repeating earlier phrasing. Keep it SHORT -- one short sentence, no lists, no line breaks, this is WhatsApp not email.
