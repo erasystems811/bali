@@ -186,6 +186,33 @@ async function sendRawText(toNumber, text) {
   return res?.messages?.[0]?.id || null;
 }
 
+// Owner's explicit correction (2026-08-03): don't even attempt the real
+// content right behind the template anymore -- Meta doesn't grant a fresh
+// window just because WE sent a template, only the recipient actually
+// replying does, so that immediate follow-up attempt was itself unreliable.
+// Instead, park the real content here and wait for real proof the window's
+// open (their next inbound message) before sending it for real -- see
+// flushQueuedMessages below, called at the top of this file's, pm-toggle-
+// code.js's, and stage3-4-action-code.js's handleLawyerInbound's normal
+// message handling, the three places a reply can actually come back
+// through. See queued_messages in schema.sql.
+async function queueMessage(toNumber, text) {
+  await sbRequest('POST', 'queued_messages', { phone_number: toNumber, message_text: text });
+}
+
+// Sends every message queued for this number, oldest first, then clears
+// them -- called once at the very top of handling a real inbound message
+// from toNumber, before anything else, so a person who's been quiet for a
+// while gets caught up on what they missed as soon as they say anything at
+// all, before the bot responds to what they actually just said.
+async function flushQueuedMessages(toNumber) {
+  const queued = await sbRequest('GET', `queued_messages?phone_number=eq.${encodeURIComponent(toNumber)}&order=created_at.asc&select=*`);
+  for (const row of queued) {
+    await sendRawText(toNumber, row.message_text).catch(() => null);
+    await sbRequest('DELETE', `queued_messages?id=eq.${row.id}`);
+  }
+}
+
 // shortLabel: what to put in the template's body variable if this lands
 // outside the messaging window -- an event name, or any short description
 // of what this message is about. Falls back to a generic phrase if omitted.
@@ -195,15 +222,8 @@ async function sendWhatsApp(toNumber, text, shortLabel) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
     await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
-    // Known, accepted risk (owner's explicit call, 2026-08-03): Meta doesn't
-    // actually grant a fresh messaging window just because WE sent a
-    // template -- only the recipient replying does -- so this real-content
-    // follow-up can still silently fail exactly like the original bug this
-    // template system exists to catch, if they never open/react to the
-    // template nudge. Preferred over burying the real content inside the
-    // template's own fixed wrapper sentence, which mangled every message's
-    // intended format regardless of whether it delivered.
-    return sendRawText(toNumber, text).catch(() => null);
+    await queueMessage(toNumber, text);
+    return null;
   }
   try {
     return await sendRawText(toNumber, text);
@@ -213,7 +233,8 @@ async function sendWhatsApp(toNumber, text, shortLabel) {
     errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
     if (errStr.includes('131047')) {
       await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
-      return sendRawText(toNumber, text).catch(() => null);
+      await queueMessage(toNumber, text);
+      return null;
     }
     throw err;
   }
@@ -578,6 +599,11 @@ function currentStepFields(missingAfter) {
 
 const input = $input.first().json.body;
 const { from_number, text, contact_id: routerContactId, media_type, media_id } = input;
+
+// Catch this client up on anything that was queued for them while outside
+// the messaging window, before doing anything else this turn -- see
+// flushQueuedMessages above.
+await flushQueuedMessages(from_number);
 
 // 1. Look up the contact by phone; only create one (as 'customer') if none
 // exists yet. Must NEVER touch an existing contact's role -- that's

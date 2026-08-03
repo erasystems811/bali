@@ -170,6 +170,31 @@ create table pending_questions (
 create index pending_questions_open_idx on pending_questions (booking_id) where resolved_at is null;
 
 -- ---------------------------------------------------------------------------
+-- queued_messages
+-- Owner's explicit call (2026-08-03): when a send lands outside WhatsApp's
+-- 24h window, the fallback template only ever carries a short heads-up
+-- (see stage1-code.js's sendWhatsApp) -- the REAL message content is never
+-- attempted right behind it anymore, since Meta doesn't actually grant a
+-- fresh window just because we sent a template, only the recipient replying
+-- does. Instead, the real content is parked here and only released once
+-- that person's next real inbound message arrives (see flushQueuedMessages,
+-- called at the top of stage1-code.js/pm-toggle-code.js/handleLawyerInbound
+-- in stage3-4-action-code.js -- the three role-specific handlers a reply
+-- can actually come back through). Keyed by phone_number, not a contact id,
+-- since a template can go out to a number before any contact row exists.
+-- FIFO per number: several queued notifications for the same person all
+-- flush in order the moment they next reply, never just the latest one.
+-- ---------------------------------------------------------------------------
+create table if not exists queued_messages (
+  id uuid primary key default gen_random_uuid(),
+  phone_number text not null,
+  message_text text not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists queued_messages_phone_idx on queued_messages (phone_number, created_at);
+
+-- ---------------------------------------------------------------------------
 -- invoices
 -- Stage 3. Line items are a variable list (whatever was actually agreed in
 -- negotiation), so they're stored as jsonb rather than a fixed-column set.

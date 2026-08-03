@@ -117,14 +117,22 @@ async function sendRawText(toNumber, text) {
   return res?.messages?.[0]?.id || null;
 }
 
+// Owner's explicit correction (2026-08-03): don't attempt the real content
+// right behind the template anymore -- see stage1-code.js's version for the
+// full explanation. Park it and wait for real proof the window's open. This
+// file only ever sends to the lawyer, who flushes their queue via
+// stage3-4-action-code.js's handleLawyerInbound the next time they message.
+async function queueMessage(toNumber, text) {
+  await sbRequest('POST', 'queued_messages', { phone_number: toNumber, message_text: text });
+}
+
 // shortLabel: see sendWhatsAppTemplate above.
 async function sendWhatsApp(toNumber, text, shortLabel) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
     await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
-    // Known, accepted risk (owner's explicit call, 2026-08-03) -- see
-    // stage1-code.js's version of this function for the full explanation.
-    return sendRawText(toNumber, text).catch(() => null);
+    await queueMessage(toNumber, text);
+    return null;
   }
   try {
     return await sendRawText(toNumber, text);
@@ -134,7 +142,8 @@ async function sendWhatsApp(toNumber, text, shortLabel) {
     errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
     if (errStr.includes('131047')) {
       await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
-      return sendRawText(toNumber, text).catch(() => null);
+      await queueMessage(toNumber, text);
+      return null;
     }
     throw err;
   }

@@ -120,14 +120,26 @@ async function sendRawText(toNumber, text) {
   return res?.messages?.[0]?.id || null;
 }
 
+// Owner's explicit correction (2026-08-03): don't attempt the real content
+// right behind the template anymore -- see stage1-code.js's version for the
+// full explanation. Park it and wait for real proof the window's open.
+// KNOWN GAP: this file sends to HR/procurement/accounts/event_assistant/
+// security/supervisor/facility_manager/general staff -- none of those roles
+// have a live inbound-reply handler anywhere in this codebase today (only
+// customer/PM/lawyer do), so a queued message to one of them has no path
+// that ever flushes it. It sits in queued_messages until a human clears it
+// directly, or until one of those roles gets a real reply flow built.
+async function queueMessage(toNumber, text) {
+  await sbInsert('queued_messages', { phone_number: toNumber, message_text: text });
+}
+
 // shortLabel: see sendWhatsAppTemplate above.
 async function sendWhatsApp(toNumber, text, shortLabel) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
     await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
-    // Known, accepted risk (owner's explicit call, 2026-08-03) -- see
-    // stage1-code.js's version of this function for the full explanation.
-    return sendRawText(toNumber, text).catch(() => null);
+    await queueMessage(toNumber, text);
+    return null;
   }
   try {
     return await sendRawText(toNumber, text);
@@ -137,7 +149,8 @@ async function sendWhatsApp(toNumber, text, shortLabel) {
     errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
     if (errStr.includes('131047')) {
       await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
-      return sendRawText(toNumber, text).catch(() => null);
+      await queueMessage(toNumber, text);
+      return null;
     }
     throw err;
   }

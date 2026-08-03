@@ -153,18 +153,31 @@ async function sendRawText(toNumber, text) {
 // `whatsapp_message_id` (e.g. the standalone-invoice-request swipe-reply
 // tracking below) was silently saving the wrong value, breaking that
 // swipe-reply match without ever throwing an error anywhere.
+// Owner's explicit correction (2026-08-03): don't attempt the real content
+// right behind the template anymore -- Meta doesn't grant a fresh window
+// just because WE sent a template, only the recipient actually replying
+// does. Park it instead and wait for real proof the window's open (their
+// next inbound message) -- see flushQueuedMessages below, called at the top
+// of this file's, stage1-code.js's, and stage3-4-action-code.js's
+// handleLawyerInbound's normal message handling.
+async function queueMessage(toNumber, text) {
+  await sbRequest('POST', 'queued_messages', { phone_number: toNumber, message_text: text });
+}
+
+async function flushQueuedMessages(toNumber) {
+  const queued = await sbRequest('GET', `queued_messages?phone_number=eq.${encodeURIComponent(toNumber)}&order=created_at.asc&select=*`);
+  for (const row of queued) {
+    await sendRawText(toNumber, row.message_text).catch(() => null);
+    await sbRequest('DELETE', `queued_messages?id=eq.${row.id}`);
+  }
+}
+
 async function sendWhatsApp(toNumber, text, shortLabel) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
     await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
-    // Known, accepted risk (owner's explicit call, 2026-08-03): Meta doesn't
-    // grant a fresh messaging window just because WE sent a template -- only
-    // the recipient replying does -- so this real-content follow-up can
-    // still silently fail if they never open/react to the template nudge.
-    // Preferred over burying the real content inside the template's own
-    // fixed wrapper sentence, which mangled every message's intended format
-    // regardless of whether it delivered.
-    return sendRawText(toNumber, text).catch(() => null);
+    await queueMessage(toNumber, text);
+    return null;
   }
   try {
     return await sendRawText(toNumber, text);
@@ -174,7 +187,8 @@ async function sendWhatsApp(toNumber, text, shortLabel) {
     errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
     if (errStr.includes('131047')) {
       await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
-      return sendRawText(toNumber, text).catch(() => null);
+      await queueMessage(toNumber, text);
+      return null;
     }
     throw err;
   }
@@ -369,6 +383,11 @@ function roleLabel(role) {
 const input = $input.first().json.body;
 const { from_number, text, reply_to_message_id, contact_id } = input;
 const trimmed = (text || '').trim();
+
+// Catch the PM up on anything that was queued for them while outside the
+// messaging window, before doing anything else this turn -- see
+// flushQueuedMessages above.
+await flushQueuedMessages(from_number);
 
 // --- Command: "role: message" (optionally "role(FirstName): message" when
 // more than one contact shares that role) -- explicit, deliberate way for

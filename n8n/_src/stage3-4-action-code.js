@@ -149,14 +149,29 @@ async function sendRawText(toNumber, text) {
   return res?.messages?.[0]?.id || null;
 }
 
+// Owner's explicit correction (2026-08-03): don't attempt the real content
+// right behind the template anymore -- see stage1-code.js's version for the
+// full explanation. Park it and wait for real proof the window's open
+// (their next inbound message) instead.
+async function queueMessage(toNumber, text) {
+  await sbInsert('queued_messages', { phone_number: toNumber, message_text: text });
+}
+
+async function flushQueuedMessages(toNumber) {
+  const queued = await sbRequest('GET', `queued_messages?phone_number=eq.${encodeURIComponent(toNumber)}&order=created_at.asc&select=*`);
+  for (const row of queued) {
+    await sendRawText(toNumber, row.message_text).catch(() => null);
+    await sbRequest('DELETE', `queued_messages?id=eq.${row.id}`);
+  }
+}
+
 // shortLabel: see sendWhatsAppTemplate above.
 async function sendWhatsApp(toNumber, text, shortLabel) {
   if (SANDBOX) return sandboxLog(toNumber, text, 'text');
   if (!(await isWithinMessagingWindow(toNumber))) {
     await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
-    // Known, accepted risk (owner's explicit call, 2026-08-03) -- see
-    // stage1-code.js's version of this function for the full explanation.
-    return sendRawText(toNumber, text).catch(() => null);
+    await queueMessage(toNumber, text);
+    return null;
   }
   try {
     return await sendRawText(toNumber, text);
@@ -166,7 +181,8 @@ async function sendWhatsApp(toNumber, text, shortLabel) {
     errStr += JSON.stringify(err?.response?.data || err?.response?.body || '');
     if (errStr.includes('131047')) {
       await sendWhatsAppTemplate(toNumber, shortLabel || 'an update');
-      return sendRawText(toNumber, text).catch(() => null);
+      await queueMessage(toNumber, text);
+      return null;
     }
     throw err;
   }
@@ -1027,6 +1043,10 @@ async function labelForContact(contactId) {
 
 async function handleLawyerInbound(input) {
   const { media_id, media_type, text, from_number, contact_id } = input;
+  // Catch the lawyer up on anything that was queued for them while outside
+  // the messaging window, before doing anything else this turn -- see
+  // flushQueuedMessages above.
+  await flushQueuedMessages(from_number);
   // The bot's job is to deliver -- it has no business deciding a message
   // isn't "expected" and dropping it. Every previous version of this
   // function gated delivery on finding an exact contract match (first
