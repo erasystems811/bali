@@ -190,27 +190,16 @@ async function sendRawText(toNumber, text) {
 // content right behind the template anymore -- Meta doesn't grant a fresh
 // window just because WE sent a template, only the recipient actually
 // replying does, so that immediate follow-up attempt was itself unreliable.
-// Instead, park the real content here and wait for real proof the window's
-// open (their next inbound message) before sending it for real -- see
-// flushQueuedMessages below, called at the top of this file's, pm-toggle-
-// code.js's, and stage3-4-action-code.js's handleLawyerInbound's normal
-// message handling, the three places a reply can actually come back
-// through. See queued_messages in schema.sql.
+// Instead, park the real content here. It's released by a single universal
+// mechanism in 01-inbound-router.json (not per-file/per-role) -- ANY
+// inbound message whose text contains "okay" flushes everything queued for
+// that sender, before role-based routing even happens, so this works
+// identically for every role (including ones with no other reply-handling
+// logic at all: HR, security, procurement, accounts, event_assistant,
+// supervisor, facility_manager, general staff). See queued_messages in
+// schema.sql and 01-inbound-router.json's "Parse Inbound Message" node.
 async function queueMessage(toNumber, text) {
   await sbRequest('POST', 'queued_messages', { phone_number: toNumber, message_text: text });
-}
-
-// Sends every message queued for this number, oldest first, then clears
-// them -- called once at the very top of handling a real inbound message
-// from toNumber, before anything else, so a person who's been quiet for a
-// while gets caught up on what they missed as soon as they say anything at
-// all, before the bot responds to what they actually just said.
-async function flushQueuedMessages(toNumber) {
-  const queued = await sbRequest('GET', `queued_messages?phone_number=eq.${encodeURIComponent(toNumber)}&order=created_at.asc&select=*`);
-  for (const row of queued) {
-    await sendRawText(toNumber, row.message_text).catch(() => null);
-    await sbRequest('DELETE', `queued_messages?id=eq.${row.id}`);
-  }
 }
 
 // shortLabel: what to put in the template's body variable if this lands
@@ -381,8 +370,6 @@ async function notifyPmOfCompletedIntake(booking) {
     'Note:',
     `- Swipe-reply to this message (or to anything from them) to answer them directly, no need to type the event name. Only start with "${booking.event_name}: " if you're messaging them first since there's nothing to swipe-reply to, otherwise it stays between just us and won't reach them.`,
     `- Once you've agreed a price, say something like generate invoice for ${booking.event_name} and I'll send it out.`,
-    `- ${booking.event_name}: close ends that conversation and hands the customer back to me.`,
-    `- ${booking.event_name}: open reconnects it.`,
   ].join('\n');
   const msgId = await sendWhatsApp(pm.phone_number, notifyText, booking.event_name);
   // Logged with the same stage/whatsapp_message_id pattern as every other
@@ -599,11 +586,6 @@ function currentStepFields(missingAfter) {
 
 const input = $input.first().json.body;
 const { from_number, text, contact_id: routerContactId, media_type, media_id } = input;
-
-// Catch this client up on anything that was queued for them while outside
-// the messaging window, before doing anything else this turn -- see
-// flushQueuedMessages above.
-await flushQueuedMessages(from_number);
 
 // 1. Look up the contact by phone; only create one (as 'customer') if none
 // exists yet. Must NEVER touch an existing contact's role -- that's

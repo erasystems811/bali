@@ -151,18 +151,10 @@ async function sendRawText(toNumber, text) {
 
 // Owner's explicit correction (2026-08-03): don't attempt the real content
 // right behind the template anymore -- see stage1-code.js's version for the
-// full explanation. Park it and wait for real proof the window's open
-// (their next inbound message) instead.
+// full explanation. Park it -- released by a single universal mechanism in
+// 01-inbound-router.json, not per-file.
 async function queueMessage(toNumber, text) {
   await sbInsert('queued_messages', { phone_number: toNumber, message_text: text });
-}
-
-async function flushQueuedMessages(toNumber) {
-  const queued = await sbRequest('GET', `queued_messages?phone_number=eq.${encodeURIComponent(toNumber)}&order=created_at.asc&select=*`);
-  for (const row of queued) {
-    await sendRawText(toNumber, row.message_text).catch(() => null);
-    await sbRequest('DELETE', `queued_messages?id=eq.${row.id}`);
-  }
 }
 
 // shortLabel: see sendWhatsAppTemplate above.
@@ -1067,10 +1059,6 @@ async function labelForContact(contactId) {
 
 async function handleLawyerInbound(input) {
   const { media_id, media_type, text, from_number, contact_id } = input;
-  // Catch the lawyer up on anything that was queued for them while outside
-  // the messaging window, before doing anything else this turn -- see
-  // flushQueuedMessages above.
-  await flushQueuedMessages(from_number);
   // The bot's job is to deliver -- it has no business deciding a message
   // isn't "expected" and dropping it. Every previous version of this
   // function gated delivery on finding an exact contract match (first

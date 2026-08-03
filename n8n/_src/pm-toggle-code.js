@@ -156,20 +156,11 @@ async function sendRawText(toNumber, text) {
 // Owner's explicit correction (2026-08-03): don't attempt the real content
 // right behind the template anymore -- Meta doesn't grant a fresh window
 // just because WE sent a template, only the recipient actually replying
-// does. Park it instead and wait for real proof the window's open (their
-// next inbound message) -- see flushQueuedMessages below, called at the top
-// of this file's, stage1-code.js's, and stage3-4-action-code.js's
-// handleLawyerInbound's normal message handling.
+// does. Park it instead -- released by a single universal mechanism in
+// 01-inbound-router.json (see stage1-code.js's version of this comment for
+// the full explanation), not per-file.
 async function queueMessage(toNumber, text) {
   await sbRequest('POST', 'queued_messages', { phone_number: toNumber, message_text: text });
-}
-
-async function flushQueuedMessages(toNumber) {
-  const queued = await sbRequest('GET', `queued_messages?phone_number=eq.${encodeURIComponent(toNumber)}&order=created_at.asc&select=*`);
-  for (const row of queued) {
-    await sendRawText(toNumber, row.message_text).catch(() => null);
-    await sbRequest('DELETE', `queued_messages?id=eq.${row.id}`);
-  }
 }
 
 async function sendWhatsApp(toNumber, text, shortLabel) {
@@ -383,11 +374,6 @@ function roleLabel(role) {
 const input = $input.first().json.body;
 const { from_number, text, reply_to_message_id, contact_id } = input;
 const trimmed = (text || '').trim();
-
-// Catch the PM up on anything that was queued for them while outside the
-// messaging window, before doing anything else this turn -- see
-// flushQueuedMessages above.
-await flushQueuedMessages(from_number);
 
 // --- Command: "role: message" (optionally "role(FirstName): message" when
 // more than one contact shares that role) -- explicit, deliberate way for
