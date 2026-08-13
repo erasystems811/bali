@@ -466,6 +466,22 @@ function findDayNumber(rawText) {
   return match ? parseInt(match[1], 10) : null;
 }
 
+// Confirmed live (2026-08-13): a client wrote "39th of August" and the
+// model dutifully formatted that as event_date "2026-08-39" -- a
+// YYYY-MM-DD string, but not a real calendar date. Nothing downstream
+// checks that before using it in a PostgREST query (the collision check
+// below), so Postgres rejected the literal with an HTTP 400 that was never
+// caught -- the whole Code node threw, the client's message got logged as
+// received but NO reply was ever sent, and the conversation just stopped.
+// Never trust the model's format compliance as proof of validity -- verify
+// it round-trips through an actual Date the same way a calendar would.
+function isValidCalendarDate(isoDate) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate || '')) return false;
+  const [y, m, d] = isoDate.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
 function resolveRelativeDate(rawText) {
   const text = (rawText || '').toLowerCase();
 
@@ -1135,6 +1151,16 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
     });
   }
 
+  // Catch a nonexistent calendar date (e.g. "39th of August") before it
+  // ever reaches the past-date or collision checks below, both of which
+  // assume a real date and will otherwise crash the whole execution against
+  // Postgres with no reply sent -- see isValidCalendarDate's comment.
+  let invalidDate = false;
+  if (patch.event_date && !isValidCalendarDate(patch.event_date)) {
+    invalidDate = true;
+    delete patch.event_date;
+  }
+
   // A date given without an explicit year can resolve to something already
   // in the past (e.g. "24th july" read literally once that day's already
   // gone by this year) -- never save that silently. Ask instead of guessing
@@ -1231,7 +1257,11 @@ Reply ONLY with JSON: {"extracted": {"event_date"?: "YYYY-MM-DD", "event_type"?:
   const isEventNameStep = stepFields.length === 1 && stepFields[0] === 'event_name';
   const isCustomerNameStep = stepFields.length === 1 && stepFields[0] === 'customer_name';
 
-  if (datePast) {
+  if (invalidDate) {
+    // Fixed reply, no LLM call -- same reasoning as datePast below: don't
+    // spend a model call telling the client their date isn't real.
+    replyText = "That doesn't look like a real date, could you send it again?";
+  } else if (datePast) {
     // Fixed reply, no LLM call -- exact wording matters here, and this
     // shouldn't wait on a model call to tell the client their date's gone.
     replyText = datePastSuggestion
