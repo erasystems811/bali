@@ -311,6 +311,79 @@
         440
       ],
       "id": "3752491b-e86e-4811-8e8b-867db2fd0675"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Chidera also messages Bali (and any EBOS business) as herself to test\n// them normally -- this must only intercept a message that's actually\n// meant for the fix-bot, never every message from her number. See\n// project_whatsapp_fix_bot memory for the full design.\nconst CHIDERA_NUMBER = '2349032637607'; // E.164 without '+', matches from_number's format\nconst FIXBOT_URL = $env.FIXBOT_URL || 'http://172.18.0.1:4200';\nconst FIXBOT_TOKEN = $env.FIXBOT_WEBHOOK_TOKEN;\n\nconst fromNumber = $json.from_number;\nconst text = ($json.text || '').trim();\n\nif (fromNumber !== CHIDERA_NUMBER) {\n  return [{ json: { ...$json, isOpsMessage: false } }];\n}\n\nconst startsWithFix = /^fix\\b/i.test(text);\nlet fixbotActive = false;\nif (!startsWithFix) {\n  try {\n    const status = await this.helpers.httpRequest({\n      method: 'GET',\n      url: `${FIXBOT_URL}/status`,\n      headers: { 'x-fixbot-token': FIXBOT_TOKEN },\n      json: true,\n      timeout: 5000,\n    });\n    fixbotActive = Boolean(status.active);\n  } catch (e) {\n    // fixbot unreachable -- fall through to normal Bali routing rather\n    // than silently swallowing a real message from Chidera\n    fixbotActive = false;\n  }\n}\n\nreturn [{ json: { ...$json, isOpsMessage: startsWithFix || fixbotActive } }];\n"
+      },
+      "name": "Check If Ops Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        420
+      ],
+      "id": "a1e5c7a0-1a1f-4b1a-9c3d-4d6f9a1b2c30"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.isOpsMessage}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "name": "Is Ops Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        680,
+        420
+      ],
+      "id": "b2f6d8b1-2b2f-4c2b-ad4e-5e7f0b2c3d41"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.FIXBOT_URL || \"http://172.18.0.1:4200\"}}/webhook/ops",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-fixbot-token",
+              "value": "={{$env.FIXBOT_WEBHOOK_TOKEN}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify({ text: $json.text })}}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "name": "Forward to Ops Assistant",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        340
+      ],
+      "id": "c3a7e9c2-3c3a-4d3c-be5f-6f801c3d4e52"
     }
   ],
   "connections": {
@@ -363,7 +436,7 @@
         [],
         [
           {
-            "node": "Lookup Contact",
+            "node": "Check If Ops Message",
             "type": "main",
             "index": 0
           }
@@ -418,6 +491,35 @@
         [
           {
             "node": "Log Only (unrouted role)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check If Ops Message": {
+      "main": [
+        [
+          {
+            "node": "Is Ops Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Ops Message?": {
+      "main": [
+        [
+          {
+            "node": "Forward to Ops Assistant",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Lookup Contact",
             "type": "main",
             "index": 0
           }
