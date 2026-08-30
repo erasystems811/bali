@@ -33,6 +33,20 @@ payment confirmation. Full spec: `docs/bali-sales-onboarding-spec.md`.
       blocks. Migrate one isolated piece at a time (e.g. swipe-reply
       routing first), never the whole file at once — see
       `../era-dash-os/FIX-PROTOCOL.md`.
+- [x] **`01-inbound-router.json` now also routes Chidera's own number to
+      ERA's WhatsApp fix-bot** (`../era-dash-os/fixbot/`) when her message
+      starts with "fix" or a fix-bot conversation is already active — new
+      "Check If Ops Message" → "Is Ops Message?" → "Forward to Ops
+      Assistant" branch, inserted before "Lookup Contact". Every other
+      sender, and every other message from her own number, is completely
+      unaffected (verified by reading the deployed workflow's node/
+      connection JSON, not live-tested against real traffic — see
+      project_whatsapp_fix_bot memory for why). Needs `FIXBOT_WEBHOOK_TOKEN`
+      and `FIXBOT_URL` env vars on the `n8n` container (added to
+      `docker-compose.yml` + `.env` 2026-08-30) to actually reach fixbot at
+      `http://172.18.0.1:4200` (the docker bridge gateway — n8n has no
+      `host.docker.internal` entry configured). ufw rule added: port 4200
+      allowed from `172.18.0.0/16` only.
 
 ## Stack
 
@@ -42,8 +56,10 @@ Caddy. See `README.md` for the full setup.
 
 ## Last updated
 
-2026-08-04 — fixed the client_reference intake bug; this CLAUDE.md created
-for the first time (Bali predates the convention of auto-generating one).
+2026-08-30 — added the fix-bot inbound routing branch to
+`01-inbound-router.json` (see above), deployed live via
+`scripts/production-sync-now.mjs`, confirmed active with 16 nodes via the
+n8n API. Not yet verified against a real WhatsApp message.
 
 ## Standing instruction for every session
 
