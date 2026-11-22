@@ -1,0 +1,16 @@
+
+# BEGIN bali (added 2026-11-22; not managed by create-client.mjs)
+n8n.erasystems.com.ng {
+    encode gzip zstd
+    reverse_proxy 127.0.0.1:21100
+}
+bali.erasystems.com.ng {
+    encode gzip zstd
+    handle_path /rest/v1/* {
+        reverse_proxy 127.0.0.1:21101
+    }
+    handle {
+        reverse_proxy 127.0.0.1:21102
+    }
+}
+# END bali

@@ -50,16 +50,11 @@ payment confirmation. Full spec: `docs/bali-sales-onboarding-spec.md`.
 
 ## Stack
 
-Self-hosted on Hetzner (`167.233.242.179`, `bali.erasystems.com.ng`):
-n8n (bot logic), Postgres (own database), PostgREST, Gotenberg (PDFs),
-Caddy. See `README.md` for the full setup.
+Self-hosted on the shared Hetzner host `77.42.122.241` in `/opt/bali` (rebuilt 2026-11-22 after the old box 167.233.242.179 became unreachable; old data lost, fresh DB). n8n + Postgres + PostgREST + Gotenberg + dashboard in docker compose, routed by the shared Caddy. Full rebuild recipe: `ops/README.md`. Domains: n8n.erasystems.com.ng, bali.erasystems.com.ng (need DNS A records -> 77.42.122.241; the DirectAdmin API key is locked to the old server IP so DNS is manual).
 
 ## Last updated
 
-2026-08-30 — added the fix-bot inbound routing branch to
-`01-inbound-router.json` (see above), deployed live via
-`scripts/production-sync-now.mjs`, confirmed active with 16 nodes via the
-n8n API. Not yet verified against a real WhatsApp message.
+2026-11-22 - rebuilt the whole stack on the new host, imported workflows 01-06 + 99, verified webhook GET handshake and PostgREST/dashboard locally. NOT yet done: DNS, switching the WhatsApp number webhook (currently overridden to the EBOS/era-demo endpoint), seeding contacts/knowledge base.
 
 ## Standing instruction for every session
 

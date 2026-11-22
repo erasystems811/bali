@@ -27,7 +27,7 @@ const env = Object.fromEntries(
 
 const sql = readFileSync(path.join(dir, "schema.sql"), "utf8");
 
-const SSH_HOST = "root@167.233.242.179"; // Hetzner (bali-production)
+const SSH_HOST = "root@77.42.122.241"; // Hetzner (bali (shared Hetzner))
 
 function openTunnel() {
   const proc = spawn("ssh", [

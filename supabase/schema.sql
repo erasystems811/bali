@@ -332,3 +332,7 @@ drop event trigger if exists pgrst_watch;
 create event trigger pgrst_watch on ddl_command_end execute procedure public.pgrst_watch();
 
 create index if not exists sandbox_snapshots_created_at_idx on sandbox_snapshots (created_at);
+
+-- dashboard (added 2026-11-22; previously hand-created on the server, never in git)
+alter table sops add column if not exists file_name text, add column if not exists file_path text, add column if not exists file_mime text;
+create table if not exists dashboard_users (id serial primary key, username text unique not null, password_hash text not null, created_at timestamptz not null default now());
