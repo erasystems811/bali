@@ -219,10 +219,13 @@ async function http(method, url, { body } = {}) {
   console.log('\n7c. "Reserve a table" buttons on the web open the WhatsApp form');
   await pool.query("update reservation_settings set flow_id='FLOW1' where id=1");
   const goTok = await tokenOf(F); const gb = sent.length;
+  await pool.query("update web_sessions set welcomed_at = now() - interval '5 hours' where phone_number=$1", [F]);
   const g1 = await fetch(`${base}/go/${goTok}/reserve`, { redirect: 'manual' });
   ok(g1.status === 302 && g1.headers.get('location') === 'https://wa.me/2348140490247', 'window open: redirects into the WhatsApp chat');
   const pushed = sent.slice(gb).find((x) => x.to === F && x.interactive?.type === 'flow');
   ok(pushed && /Tap TAP HERE TO RESERVE below/.test(pushed.text) && !pushed.interactive.header, 'and pushes the native form into that chat first, as a short message with the button');
+  const gbRecent = sent.length; const gRecent = await fetch(`${base}/go/${goTok}/reserve`, { redirect: 'manual' });
+  ok(gRecent.status === 302 && gRecent.headers.get('location') === 'https://wa.me/2348140490247' && sent.length === gbRecent, 'a form button sent in the last 3 hours: no extra message, just opens the chat');
   await pool.query("delete from reservation_log where phone_number=$1 and direction='inbound'", [F]);
   const gb2 = sent.length;
   const g2 = await fetch(`${base}/go/${goTok}/reserve`, { redirect: 'manual' });

@@ -184,9 +184,13 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
     const chat = `https://wa.me/${waDigits()}`;
     try {
       if (await wa.withinWindow(s.phone_number, false)) {
-        const { rows: c } = await pool.query('select name from contacts where phone_number=$1', [s.phone_number]);
-        await pool.query('update web_sessions set welcomed_at = now() where token=$1', [req.params.token]);
-        await sendForm(S, s.phone_number, req.params.token, { nameInit: c[0]?.name || '', short: true });
+        // they already have the form button in the chat from the last 3 hours: don't add another message, just open the chat
+        const recentForm = s.welcomed_at && Date.now() - new Date(s.welcomed_at).getTime() < 3 * 3600000;
+        if (!recentForm) {
+          const { rows: c } = await pool.query('select name from contacts where phone_number=$1', [s.phone_number]);
+          await pool.query('update web_sessions set welcomed_at = now() where token=$1', [req.params.token]);
+          await sendForm(S, s.phone_number, req.params.token, { nameInit: c[0]?.name || '', short: true });
+        }
         return res.redirect(chat);
       }
     } catch (e) { console.error('go/reserve push failed', e.message); }
