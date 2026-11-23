@@ -60,11 +60,12 @@ function buildApp(ctx) {
     res.sendStatus(403);
   });
 
-  async function sendForm(S, phone, token, { intro, nameInit } = {}) {
+  async function sendForm(S, phone, token, { intro, nameInit, short } = {}) {
     const askUrl = `${base()}/ask/${token}`;
     return wa.sendFlow(phone, {
-      image: S.welcome_image_url || `${base()}/assets/welcome.png`,
-      body: `${intro ? intro + '\n\n' : ''}${S.welcome_text}\n\nHave a question instead? Tap here to chat: ${askUrl}`,
+      // short = the guest tapped "Reserve a table" on the web chat and is about to land in WhatsApp: a compact message with the button right there
+      image: short ? null : (S.welcome_image_url || `${base()}/assets/welcome.png`),
+      body: short ? 'Your reservation form is ready. Tap TAP HERE TO RESERVE below to open it.' : `${intro ? intro + '\n\n' : ''}${S.welcome_text}\n\nHave a question instead? Tap here to chat: ${askUrl}`,
       cta: 'TAP HERE TO RESERVE', flowId: S.flow_id, token: `bali-${token}`,
       data: flow.flowData(S, { intro: intro || '', nameInit, phoneInit: `+${phone}` }),
     });
@@ -148,9 +149,11 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
   const privateKey = () => { if (!flowKey) flowKey = env.FLOW_PRIVATE_KEY || (env.FLOW_PRIVATE_KEY_FILE ? require('fs').readFileSync(env.FLOW_PRIVATE_KEY_FILE, 'utf8') : null); return flowKey; };
   app.post('/flow/endpoint', async (req, res) => {
     let dec;
-    try { dec = decryptRequest(req.body, privateKey()); } catch (e) { return res.sendStatus(421); }
+    try { dec = decryptRequest(req.body, privateKey()); } catch (e) { console.log(`[flow] 421 cannot decrypt (${e.message}); body keys: ${Object.keys(req.body || {}).join(',')}`); return res.sendStatus(421); }
+    const d = dec.decrypted || {};
+    console.log(`[flow] action=${d.action} screen=${d.screen || '-'} step=${(d.data && d.data.action) || '-'} version=${d.version || '-'} keys=${Object.keys(d.data || {}).join(',')}`);
     let out;
-    try { out = await flowEndpoint.handle(dec.decrypted); } catch (e) {
+    try { out = await flowEndpoint.handle(dec.decrypted); console.log(`[flow] -> ${out.screen || 'data'}${out.data && out.data.error && out.data.error.trim() ? ' error: ' + out.data.error : ''}`); } catch (e) {
       console.error('flow endpoint error', e);
       out = { screen: 'RESERVE', data: { ...flow.flowData(await loadSettings(ctx), {}), has_error: true, error: 'Something went wrong on our side. Please try again.' } };
     }
@@ -181,7 +184,7 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
       if (await wa.withinWindow(s.phone_number, false)) {
         const { rows: c } = await pool.query('select name from contacts where phone_number=$1', [s.phone_number]);
         await pool.query('update web_sessions set welcomed_at = now() where token=$1', [req.params.token]);
-        await sendForm(S, s.phone_number, req.params.token, { nameInit: c[0]?.name || '' });
+        await sendForm(S, s.phone_number, req.params.token, { nameInit: c[0]?.name || '', short: true });
         return res.redirect(chat);
       }
     } catch (e) { console.error('go/reserve push failed', e.message); }
@@ -376,7 +379,7 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
     venue_name: 'text', open_time: 'time', close_time: 'time', slot_minutes: 'int', max_guests_per_slot: 'int', max_guests_per_booking: 'int',
     min_notice_minutes: 'int', max_days_ahead: 'int', closed_weekdays: 'intarr', reservation_fee_kobo: 'int', service_fee_kobo: 'int',
     hold_minutes: 'int', refund_hours: 'int', order_link: 'text', welcome_image_url: 'text', welcome_text: 'text', handover_number: 'phone',
-    payments_enabled: 'bool', enquiry_intro: 'text', venue_notes: 'text', flow_id: 'text',
+    payments_enabled: 'bool', open_24_7: 'bool', enquiry_intro: 'text', venue_notes: 'text', flow_id: 'text',
   };
   api.get('/settings', wrap(async (req, res) => { const S = await loadSettings(ctx); res.json({ settings: S, paystackConfigured: ps.configured, whatsappConfigured: !!env.META_ACCESS_TOKEN }); }));
   api.put('/settings', wrap(async (req, res) => {

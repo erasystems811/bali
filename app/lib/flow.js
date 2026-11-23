@@ -23,10 +23,9 @@ function flowJson(logoBase64) {
           intro: str('Tell us when you are coming and we will hold your table.'),
           has_error: { type: 'boolean', __example__: false },
           error: str(' '),
-          name_init: str('Ada Okafor'), phone_init: str('+2348012345678'), date_init: str('2026-12-05'), time_init: str('19:00'), guests_init: str('2'),
+          name_init: str('Ada Okafor'), phone_init: str('+2348012345678'), date_init: str('2026-12-05'), time_init: str('7:00 PM'), guests_init: str('2'),
           min_date: str('2026-12-01'), max_date: str('2027-01-30'),
           unavailable: { type: 'array', items: { type: 'string' }, __example__: ['2026-12-07'] },
-          times: { ...opt, __example__: [{ id: '19:15', title: '7:15 PM' }] },
           guests_hint: str('Up to 12 guests online'),
         },
         layout: {
@@ -43,9 +42,9 @@ function flowJson(logoBase64) {
                 { type: 'TextInput', name: 'name', label: 'Full name', 'input-type': 'text', required: true },
                 { type: 'TextInput', name: 'phone', label: 'Phone number', 'input-type': 'phone', required: true },
                 { type: 'DatePicker', name: 'date', label: 'Date', required: true, 'min-date': '${data.min_date}', 'max-date': '${data.max_date}', 'unavailable-dates': '${data.unavailable}' },
-                { type: 'Dropdown', name: 'time', label: 'Arrival time', required: true, 'data-source': '${data.times}' },
+                { type: 'TextInput', name: 'time', label: 'Arrival time', 'input-type': 'text', required: true, 'helper-text': 'Type the time you want to come, e.g. 7:30 PM or 19:30' },
                 { type: 'TextInput', name: 'guests', label: 'Number of guests', 'input-type': 'number', required: true, 'helper-text': '${data.guests_hint}' },
-                { type: 'TextCaption', text: 'Managed by ERA Systems' },
+                { type: 'TextCaption', text: 'Powered by ERA Systems' },
                 { type: 'Footer', label: 'Continue', 'on-click-action': { name: 'data_exchange', payload: { action: 'reserve', name: '${form.name}', phone: '${form.phone}', date: '${form.date}', time: '${form.time}', guests: '${form.guests}' } } },
               ],
             },
@@ -81,8 +80,7 @@ function flowJson(logoBase64) {
         id: 'DONE', title: 'Table confirmed', terminal: true, success: true,
         data: {
           summary: str('Ada Okafor\nFriday 5 Dec at 7pm for 4 guests\nRef R-1234'),
-          credit: str('Your ₦20,000 is credited to your order on the day.'),
-          order_url: str('https://baliabuja.mylo.africa'),
+          credit: str('Your ₦20,000 is credited to your order on the day. Your confirmation and order link are in this chat.'),
           ref: str('R-1234'),
         },
         layout: {
@@ -92,8 +90,7 @@ function flowJson(logoBase64) {
             { type: 'TextHeading', text: 'Your table is confirmed ✅' },
             { type: 'TextBody', text: '${data.summary}', 'font-weight': 'bold' },
             { type: 'TextBody', text: '${data.credit}' },
-            { type: 'EmbeddedLink', text: 'Place your order', 'on-click-action': { name: 'open_url', url: '${data.order_url}' } },
-            { type: 'Footer', label: 'Done', 'on-click-action': { name: 'complete', payload: { ref: '${data.ref}' } } },
+            { type: 'Footer', label: 'Back to chat', 'on-click-action': { name: 'complete', payload: { ref: '${data.ref}' } } },
           ],
         },
       },
@@ -113,19 +110,18 @@ function flowData(S, { intro, nameInit, phoneInit, now } = {}) {
   const closed = S.closed_weekdays || [];
   const unavailable = [];
   if (closed.length) for (let d = today; d <= max; d = T.addDaysISO(d, 1)) if (closed.includes(T.dowOf(d))) unavailable.push(d);
-  const times = [];
-  for (let m = T.toMin(S.open_time); m <= T.lastSeatingMin(); m += 15) times.push({ id: T.fromMin(m), title: `${Math.floor(m / 60) % 12 || 12}:${String(m % 60).padStart(2, '0')} ${m >= 720 ? 'PM' : 'AM'}` });
+  const label = (m) => `${Math.floor(m / 60) % 12 || 12}:${String(m % 60).padStart(2, '0')} ${m >= 720 && m < 1440 ? 'PM' : 'AM'}`;
+  const evening = Math.min(Math.max(19 * 60, T.toMin(S.open_time)), T.lastSeatingMin());
   // sensible, VALID defaults so the form starts filled: the next open day, 7pm (or the first slot), 2 guests
   let first = T.addDaysISO(today, 1);
   while (first <= max && closed.includes(T.dowOf(first))) first = T.addDaysISO(first, 1);
-  const prefer = times.find((t) => t.id === '19:00') || times[0];
   return {
     intro: intro || 'Tell us when you are coming and we will hold your table.',
     has_error: false, error: ' ',
     name_init: nameInit || '', phone_init: phoneInit || '',
-    date_init: first <= max ? first : today, time_init: prefer ? prefer.id : '', guests_init: '2',
+    date_init: first <= max ? first : today, time_init: label(evening), guests_init: '2',
     min_date: today, max_date: max, unavailable: unavailable.length ? unavailable : ['2000-01-01'], // an empty list is rejected by WhatsApp
-    times, guests_hint: `Up to ${S.max_guests_per_booking} guests online`,
+    guests_hint: S.max_guests_per_booking > 0 ? `Up to ${S.max_guests_per_booking} guests online` : 'Any number of guests',
   };
 }
 
@@ -137,13 +133,32 @@ function normalizeDate(v, S) {
   return s;
 }
 
-// accepts 19:00, 7:15, 19:00:00 or 7:15 PM and returns HH:MM
-function normalizeTime(v) {
-  const m = String(v || '').trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*([ap]m)?$/i);
-  if (!m) return String(v || '');
-  let h = Number(m[1]); const mer = (m[3] || '').toLowerCase();
-  if (mer === 'pm' && h < 12) h += 12; if (mer === 'am' && h === 12) h = 0;
-  return `${String(h).padStart(2, '0')}:${m[2]}`;
+// What a guest types: 7pm, 7:30 PM, 7.30pm, 19:30, 0030, noon, midnight. Returns HH:MM, or null when it is ambiguous
+// (a bare 7:30 could be morning or evening, so we ask rather than guess: Bali is open 24 hours).
+function parseArrival(raw) {
+  const t = String(raw || '').toLowerCase().replace(/\./g, ':').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  if (/^noon$|^midday$/.test(t)) return '12:00';
+  if (/^midnight$/.test(t)) return '00:00';
+  const m = t.match(/^(\d{1,2})(?::?(\d{2}))?\s*(a|p)\s*m?:?$/) || t.match(/^(\d{1,2})(?::?(\d{2}))?\s*()$/);
+  if (!m) return null;
+  let h = Number(m[1]); const min = m[2] ? Number(m[2]) : 0; const mer = m[3];
+  if (min > 59) return null;
+  if (mer) { if (h < 1 || h > 12) return null; if (mer === 'p' && h < 12) h += 12; if (mer === 'a' && h === 12) h = 0; }
+  else {
+    // no AM/PM: only unambiguous 24 hour writing is accepted (19:30, 07:30, 0030, 1930, 13:00). 7:30 or 730 could be either half of the day.
+    const compact = /^\d{4}$/.test(t);
+    const written24 = h >= 13 || h === 0 || /^0\d/.test(t) || compact;
+    if (!written24 || h > 23) return null;
+  }
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
 }
 
-module.exports = { SCREEN, flowJson, logoBase64, flowData, normalizeDate, normalizeTime };
+// What the form/webhook hands us as the time -> HH:MM, or the original text unchanged when it is ambiguous so validation asks again.
+function normalizeTime(v) {
+  const raw = String(v || '').trim();
+  const noSeconds = raw.replace(/^(d{1,2}:d{2}):d{2}(?=s*[ap]?m?$|$)/i, '$1');
+  return parseArrival(noSeconds) || raw;
+}
+
+module.exports = { SCREEN, flowJson, logoBase64, flowData, normalizeDate, normalizeTime, parseArrival };

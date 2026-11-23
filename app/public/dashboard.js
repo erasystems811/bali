@@ -39,7 +39,7 @@
     root.append(
       h('aside', { class: 'side' },
         h('div', { class: 'brand' }, h('div', { class: 'logo' }), h('div', {}, h('b', {}, 'Bali'), h('span', {}, 'Reservations'))),
-        nav, h('div', { class: 'grow' }), h('div', { class: 'who' }, 'Managed by ERA Systems'),
+        nav, h('div', { class: 'grow' }), h('div', { class: 'who' }, 'Powered by ERA Systems'),
         h('form', { method: 'post', action: '/dashboard/logout' }, h('button', {}, 'Sign out'))),
       h('main', { class: 'main', id: 'main' }));
   }
@@ -210,6 +210,7 @@
     const dayChecks = h('div', { class: 'days' }, ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d, i) => h('label', {}, h('input', { type: 'checkbox', value: i, checked: (S.closed_weekdays || []).includes(i) }), d)));
     F.closed_weekdays = () => [...dayChecks.querySelectorAll('input:checked')].map((x) => Number(x.value));
     const pay = h('input', { type: 'checkbox', checked: !!S.payments_enabled }); F.payments_enabled = () => pay.checked;
+    const open24 = h('input', { type: 'checkbox', checked: !!S.open_24_7 }); F.open_24_7 = () => open24.checked;
     main.append(
       !whatsappConfigured ? h('div', { class: 'warn' }, 'WhatsApp is not connected on this server yet, so messages are only recorded, not sent.') : null,
       h('div', { class: 'card sec' }, h('h3', {}, 'Handover'), h('div', { class: 'sub' }, 'Every completed reservation is sent to this WhatsApp number with the guest\'s name, phone, date, arrival time and guests.'),
@@ -219,8 +220,9 @@
         !paystackConfigured && S.payments_enabled ? h('div', { class: 'warn' }, 'Payments are on but Paystack is not connected, so the form will show "payment not available". Switch payments off below to take free reservations for now.') : null,
         h('div', { class: 'sw', style: 'margin-bottom:16px' }, pay, h('div', {}, h('b', {}, 'Take payment to confirm a reservation'))),
         h('div', { class: 'fg' }, field('reservation_fee_kobo', 'Reservation amount (₦)', 'number', 'Credited to the guest\'s order', { fromNaira: true }), field('service_fee_kobo', 'Service fee (₦)', 'number', 'Not refundable', { fromNaira: true }), field('hold_minutes', 'Table hold while paying (minutes)', 'number'), field('refund_hours', 'Refund if cancelled at least (hours) before', 'number'), field('order_link', 'Order link', 'text', 'Sent to guests after they pay'))),
-      h('div', { class: 'card sec' }, h('h3', {}, 'Opening hours and capacity'), h('div', { class: 'sub' }, 'Arrival times on the form follow these. Capacity is per time slot.'),
-        h('div', { class: 'fg' }, field('open_time', 'First arrival time', 'time'), field('close_time', 'Closing time', 'time', 'Last arrival is one slot before closing'), field('slot_minutes', 'Slot length (minutes)', 'number'), field('max_guests_per_slot', 'Guests we can seat per slot', 'number'), field('max_guests_per_booking', 'Largest party booked online', 'number', 'Bigger groups must contact the venue'), field('min_notice_minutes', 'Minimum notice (minutes)', 'number'), field('max_days_ahead', 'Book up to (days ahead)', 'number')),
+      h('div', { class: 'card sec' }, h('h3', {}, 'Opening hours and capacity'), h('div', { class: 'sub' }, 'Guests type the time they want to arrive. Turn off "open 24 hours" to only accept times within set hours.'),
+        h('div', { class: 'sw', style: 'margin-bottom:16px' }, open24, h('div', {}, h('b', {}, 'Open 24 hours'))),
+        h('div', { class: 'fg' }, field('open_time', 'First arrival time', 'time'), field('close_time', 'Closing time', 'time', 'Last arrival is one slot before closing'), field('slot_minutes', 'Slot length (minutes)', 'number'), field('max_guests_per_slot', 'Guests per time slot (0 = no limit)', 'number', 'Leave at 0 when there are plenty of tables. Set a number only if you want to cap each time slot.'), field('max_guests_per_booking', 'Largest party booked online (0 = any size)', 'number', 'Leave at 0 to accept any number of guests'), field('min_notice_minutes', 'Minimum notice (minutes)', 'number'), field('max_days_ahead', 'Book up to (days ahead)', 'number')),
         h('div', { class: 'fld', style: 'margin-top:16px' }, h('label', {}, 'Closed on'), dayChecks)),
       h('div', { class: 'card sec' }, h('h3', {}, 'Welcome message'), h('div', { class: 'sub' }, 'The first WhatsApp message a guest receives, with the Bali picture and the reservation button.'),
         h('div', { class: 'fg', style: 'grid-template-columns:1fr' }, field('welcome_text', 'Welcome text', 'text', null, { area: true }), field('flow_id', 'WhatsApp form ID', 'text', 'The published reservation form. Leave empty to fall back to the website form.'), field('welcome_image_url', 'Picture link (optional)', 'text', 'Leave empty to use the Bali logo'), field('enquiry_intro', 'Enquiry chat greeting', 'text'))),

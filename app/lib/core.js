@@ -1,11 +1,12 @@
 // Shared helpers: settings, venue-local time (Lagos has no DST so a fixed offset is exact), formatting.
 const DEFAULTS = {
   venue_name: 'Bali',
+  open_24_7: true, // Bali opens 24 hours: any arrival time is accepted
   open_time: '12:00',
   close_time: '22:00',
   slot_minutes: 60,
-  max_guests_per_slot: 40,
-  max_guests_per_booking: 12,
+  max_guests_per_slot: 0, // 0 = no limit (plenty of tables); set a number to cap guests per time slot
+  max_guests_per_booking: 0, // 0 = any number of guests
   min_notice_minutes: 60,
   max_days_ahead: 60,
   closed_weekdays: [],
@@ -28,6 +29,7 @@ async function loadSettings(ctx) {
   const { rows } = await ctx.pool.query('select * from reservation_settings where id = 1');
   const out = { ...DEFAULTS };
   if (rows[0]) for (const [k, v] of Object.entries(rows[0])) if (v !== null && v !== undefined) out[k] = v;
+  if (out.open_24_7) { out.open_time = '00:00'; out.close_time = '24:00'; }
   return out;
 }
 
@@ -57,7 +59,7 @@ function makeTime(S, nowFn = () => Date.now()) {
     return m === 0 ? `${h}${suf}` : `${h}:${pad(m)}${suf}`;
   };
   const fmtDateFull = (iso) => { const d = new Date(`${iso}T00:00:00Z`); return `${WD_TITLE[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`; };
-  const lastSeatingMin = () => toMin(S.close_time) - S.slot_minutes;
+  const lastSeatingMin = () => (S.open_24_7 ? 1439 : toMin(S.close_time) - S.slot_minutes);
   return { nowLocal, todayStr, addDaysISO, dowOf, toMin, fromMin, localToUtcISO, utcToLocalParts, fmtTime, fmtDateFull, lastSeatingMin, isoDate };
 }
 

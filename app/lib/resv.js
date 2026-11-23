@@ -6,6 +6,9 @@ function createResv(ctx, wa, ps) {
   const nowFn = () => (ctx.now ? ctx.now() : Date.now());
   const base = () => (env.APP_BASE_URL || '').replace(/\/$/, '');
 
+  // capacity is optional: 0 (the default) means no limit
+  const over = (S, n) => S.max_guests_per_slot > 0 && n > S.max_guests_per_slot;
+
   const describe = (r, T) => {
     const p = T.utcToLocalParts(r.starts_at);
     return `${T.fmtDateFull(p.date)} at ${T.fmtTime(p.time)} for ${guestWord(r.guests)}`;
@@ -25,7 +28,7 @@ function createResv(ctx, wa, ps) {
     else if (date > T.addDaysISO(today, S.max_days_ahead)) errors.date = `We take bookings up to ${S.max_days_ahead} days ahead.`;
     else if ((S.closed_weekdays || []).includes(T.dowOf(date))) errors.date = `We are closed on that day. Please pick another.`;
     const time = String(f.time || '');
-    if (!/^\d{2}:\d{2}$/.test(time)) errors.time = 'Please choose an arrival time.';
+    if (!/^\d{2}:\d{2}$/.test(time)) errors.time = 'Please type your arrival time with AM or PM, like 7:30 PM, or in 24 hour time, like 19:30.';
     else {
       const m = T.toMin(time);
       if (m < T.toMin(S.open_time) || m > T.lastSeatingMin()) errors.time = `Arrival time must be between ${T.fmtTime(S.open_time)} and ${T.fmtTime(T.fromMin(T.lastSeatingMin()))}.`;
@@ -33,7 +36,8 @@ function createResv(ctx, wa, ps) {
     }
     const guests = Number(f.guests);
     if (!Number.isInteger(guests) || guests < 1) errors.guests = 'Please enter the number of guests.';
-    else if (guests > S.max_guests_per_booking) errors.guests = `For more than ${S.max_guests_per_booking} guests please contact the venue directly.`;
+    else if (S.max_guests_per_booking > 0 && guests > S.max_guests_per_booking) errors.guests = `For more than ${S.max_guests_per_booking} guests please contact the venue directly.`;
+    else if (guests > 2000) errors.guests = 'Please enter a realistic number of guests.';
     return { errors, clean: { name, phone, date, time, guests } };
   }
 
@@ -58,7 +62,7 @@ function createResv(ctx, wa, ps) {
     const nowMin = T.nowLocal().getUTCHours() * 60 + T.nowLocal().getUTCMinutes() + S.min_notice_minutes;
     for (let m = T.toMin(S.open_time); m <= T.lastSeatingMin(); m += S.slot_minutes) {
       if (isToday && m < nowMin) continue;
-      if ((await guestsBooked(S, T, date, T.fromMin(m))) + (guests || 1) <= S.max_guests_per_slot) out.push(T.fromMin(m));
+      if (!over(S, (await guestsBooked(S, T, date, T.fromMin(m))) + (guests || 1))) out.push(T.fromMin(m));
     }
     return out;
   }
@@ -86,7 +90,7 @@ function createResv(ctx, wa, ps) {
     try {
       await client.query('begin');
       await client.query('select pg_advisory_xact_lock(hashtext($1))', [`bali-slot-${clean.date}`]);
-      if ((await guestsBooked(S, T, clean.date, clean.time, null, client)) + clean.guests > S.max_guests_per_slot) {
+      if (over(S, (await guestsBooked(S, T, clean.date, clean.time, null, client)) + clean.guests)) {
         await client.query('rollback');
         const alts = await freeTimes(clean.date, clean.guests);
         return { ok: false, errors: { time: alts.length ? `That time is fully booked. Free times: ${alts.slice(0, 6).map(T.fmtTime).join(', ')}.` : 'That day is fully booked. Please choose another day.' }, alternatives: alts };
@@ -169,7 +173,7 @@ function createResv(ctx, wa, ps) {
     if (holdLost) {
       const p = T.utcToLocalParts(r.starts_at);
       const taken = await guestsBooked(S, T, p.date, p.time, r.ref);
-      if (taken + r.guests > S.max_guests_per_slot) {
+      if (over(S, taken + r.guests)) {
         await pool.query("update reservations set status='expired', paid_amount_kobo=$2, paid_at=now() where ref=$1", [r.ref, v.amount]);
         const ok = await ps.refund(r.paystack_ref, v.amount);
         await pool.query('update reservations set refund_amount_kobo=$2, refund_status=$3 where ref=$1', [r.ref, ok ? v.amount : null, ok ? 'refunded' : 'failed']);

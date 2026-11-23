@@ -43,13 +43,12 @@ function createFlowEndpoint(ctx, resv) {
     };
   }
   function doneScreen(S, T, r) {
-    const link = S.order_link ? `${S.order_link}${S.order_link.includes('?') ? '&' : '?'}ref=${r.ref}` : 'https://wa.me';
     return {
       screen: 'DONE',
       data: {
         summary: `${r.guest_name}\n${resv.describe(r, T)}\nRef ${r.ref}`,
-        credit: r.paid_amount_kobo ? `Your ${naira(S.reservation_fee_kobo)} is credited to your order on the day.` : 'We look forward to seeing you.',
-        order_url: link, ref: r.ref,
+        credit: `${r.paid_amount_kobo ? `Your ${naira(S.reservation_fee_kobo)} is credited to your order on the day. ` : ''}Your confirmation and order link are in this chat.`,
+        ref: r.ref,
       },
     };
   }

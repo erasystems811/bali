@@ -51,10 +51,9 @@ function form({ S, T, token, phone, askUrl, waNumber }) {
   const wa = `https://wa.me/${String(waNumber || '').replace(/D/g, '')}`;
   const today = T.todayStr();
   const max = T.addDaysISO(today, S.max_days_ahead);
-  const times = [];
-  for (let m = T.toMin(S.open_time); m <= T.lastSeatingMin(); m += 30) times.push(T.fromMin(m));
   const total = S.reservation_fee_kobo + S.service_fee_kobo;
-  const cfg = { token, today, max, closed: S.closed_weekdays || [], maxGuests: S.max_guests_per_booking, pay: S.payments_enabled, total: naira(total) };
+  const maxG = S.max_guests_per_booking > 0 ? S.max_guests_per_booking : 2000;
+  const cfg = { token, today, max, closed: S.closed_weekdays || [], maxGuests: maxG, pay: S.payments_enabled, total: naira(total) };
   return `${HEAD('Reserve a table')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"><a href="${esc(wa)}" aria-label="Back to WhatsApp" style="position:absolute;top:14px;left:16px;z-index:2;width:38px;height:38px;border-radius:50%;background:rgba(26,13,7,.65);border:1px solid var(--line);color:var(--cream);font-size:26px;line-height:34px;text-align:center;text-decoration:none">‹</a></div>
 <h1>Reserve a table</h1><p class="sub">Tell us when you are coming and we will hold your table.</p>
 <form id="f" class="card" novalidate>
@@ -62,15 +61,15 @@ function form({ S, T, token, phone, askUrl, waNumber }) {
  <div class="field"><label for="phone">Phone number</label><input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" value="${esc(phone ? '+' + phone : '')}" placeholder="+234 800 000 0000"><div class="err" data-e="phone"></div></div>
  <div class="row2">
   <div class="field"><label for="date">Date</label><input id="date" name="date" type="date" min="${today}" max="${max}"><div class="err" data-e="date"></div></div>
-  <div class="field"><label for="time">Arrival time</label><select id="time" name="time"><option value="">Select</option>${times.map((t) => `<option value="${t}">${esc(T.fmtTime(t))}</option>`).join('')}</select><div class="err" data-e="time"></div></div>
+  <div class="field"><label for="time">Arrival time</label><input id="time" name="time" type="time" value="19:00"><div class="err" data-e="time"></div></div>
  </div>
- <div class="field"><label>Number of guests</label><div class="stepper"><button type="button" id="minus" aria-label="Fewer guests">−</button><input id="guests" name="guests" type="number" inputmode="numeric" min="1" max="${S.max_guests_per_booking}" value="2"><button type="button" id="plus" aria-label="More guests">+</button></div><div class="err" data-e="guests"></div></div>
+ <div class="field"><label>Number of guests</label><div class="stepper"><button type="button" id="minus" aria-label="Fewer guests">−</button><input id="guests" name="guests" type="number" inputmode="numeric" min="1" max="${maxG}" value="2"><button type="button" id="plus" aria-label="More guests">+</button></div><div class="err" data-e="guests"></div></div>
  ${S.payments_enabled ? `<div class="price"><div>💳</div><div>Pay <b>${esc(naira(total))}</b> to confirm: <b>${esc(naira(S.reservation_fee_kobo))}</b> is credited to your food and drinks order on the day, plus a ${esc(naira(S.service_fee_kobo))} service fee.</div></div>` : ''}
  <div class="err" data-e="_" style="margin-bottom:10px"></div>
  <button class="btn" id="go" type="submit">${S.payments_enabled ? 'Continue to payment' : 'Confirm reservation'}</button>
 </form>
 <p class="foot">Have a question first? <a href="${esc(askUrl)}" style="color:var(--cream)">Chat with us</a></p>
-<p class="foot">Managed by ERA Systems</p></div>
+<p class="foot">Powered by ERA Systems</p></div>
 <script>
 const C=${JSON.stringify(cfg)};
 const $=(s)=>document.querySelector(s);
@@ -109,7 +108,7 @@ function done({ S, T, r, state, token, describe }) {
   } else {
     inner = `<div class="tick wait">!</div><h1 class="center">This reservation is ${esc(state.replace('_', ' '))}</h1><p class="sub center">If you paid and see this, message us on WhatsApp and we will sort it out.</p><a class="btn" href="/reserve/${esc(token)}">Make a new reservation</a>`;
   }
-  return `${HEAD('Reservation')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"></div>${inner}<p class="foot">Managed by ERA Systems</p></div></body></html>`;
+  return `${HEAD('Reservation')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"></div>${inner}<p class="foot">Powered by ERA Systems</p></div></body></html>`;
 }
 
 function manage({ S, T, token, list, formUrl }) {
@@ -124,7 +123,7 @@ function manage({ S, T, token, list, formUrl }) {
   }).join('');
   return `${HEAD('My reservation')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"></div><h1>My reservation</h1><p class="sub">Your upcoming tables at ${esc(S.venue_name)}.</p>
   ${items || `<div class="card center"><p class="note">You have no upcoming reservations.</p></div>`}
-  <a class="btn" style="margin-top:18px" href="${esc(formUrl)}">Book a table</a><p class="foot">Managed by ERA Systems</p></div>
+  <a class="btn" style="margin-top:18px" href="${esc(formUrl)}">Book a table</a><p class="foot">Powered by ERA Systems</p></div>
   <div class="modal" id="m"><div class="sheet"><h1 style="font-size:20px">Cancel this reservation?</h1><p class="note" id="mn"></p><button class="btn danger" id="yes">Yes, cancel it</button><button class="btn ghost" id="no" style="margin-top:10px">Keep it</button></div></div>
   <script>let cur=null;const m=document.getElementById('m');
   document.querySelectorAll('[data-ref]').forEach(b=>b.onclick=()=>{cur=b.dataset.ref;document.getElementById('mn').textContent=b.dataset.note||'';m.classList.add('open')});
@@ -177,7 +176,7 @@ document.getElementById('f').onsubmit=e=>{e.preventDefault();send(document.getEl
 
 function login(msg) {
   return `${HEAD('Bali dashboard')}${GUEST_CSS}</head><body><div class="wrap" style="padding-top:12vh"><div class="center"><div style="width:84px;height:84px;margin:0 auto 18px;border-radius:22px;background:#3a1a0d url(/assets/welcome.png) center/cover;border:1px solid var(--line)"></div><h1>Bali dashboard</h1><p class="sub">Sign in to manage reservations.</p></div>
-<form class="card" method="post" action="/dashboard/login"><div class="field"><label>Username</label><input name="username" autocomplete="username" autofocus></div><div class="field"><label>Password</label><input name="password" type="password" autocomplete="current-password"></div>${msg ? `<div class="err" style="margin-bottom:10px">${esc(msg)}</div>` : ''}<button class="btn">Sign in</button></form><p class="foot">Managed by ERA Systems</p></div></body></html>`;
+<form class="card" method="post" action="/dashboard/login"><div class="field"><label>Username</label><input name="username" autocomplete="username" autofocus></div><div class="field"><label>Password</label><input name="password" type="password" autocomplete="current-password"></div>${msg ? `<div class="err" style="margin-bottom:10px">${esc(msg)}</div>` : ''}<button class="btn">Sign in</button></form><p class="foot">Powered by ERA Systems</p></div></body></html>`;
 }
 
 function dashboard() {

@@ -37,7 +37,7 @@ async function http(method, url, { body } = {}) {
     ('Can I get a refund if I cancel?', 'Yes, if at least 24 hours before.', 'refund money back', 3),
     ('Do you have parking?', 'Yes, free parking on site.', 'park car', 4)`);
   await pool.query(`update reservation_settings set open_time='12:00', close_time='22:00', slot_minutes=60, max_guests_per_slot=10, max_guests_per_booking=8,
-    min_notice_minutes=60, max_days_ahead=60, closed_weekdays='{}', payments_enabled=false, handover_number='08031112222', welcome_image_url=null where id=1`);
+    min_notice_minutes=60, max_days_ahead=60, closed_weekdays='{}', open_24_7=false, payments_enabled=false, handover_number='08031112222', welcome_image_url=null where id=1`);
   await pool.query("insert into dashboard_users (username, password_hash) values ('admin', $1)", [await bcrypt.hash('pw', 4)]);
 
   const app = buildApp({ pool, env, http, noRateLimit: true });
@@ -180,7 +180,7 @@ async function http(method, url, { body } = {}) {
   ok(fm.interactive.header?.image?.link === 'https://app.test/assets/welcome.png' && /WELCOME TO BALI/.test(fm.text) && /\/ask\//.test(fm.text), 'has the Bali picture, welcome text and enquiries link');
   ok(fp.flow_token.startsWith('bali-') && fp.flow_action_payload.screen === 'RESERVE', 'flow token and first screen set');
   const fd = fp.flow_action_payload.data;
-  ok(fd.times.some((t) => t.id === '19:15' && t.title === '7:15 PM') && fd.times.some((t) => t.id === '19:00') && fd.times[0].id === '12:00' && fd.times.at(-1).id === '21:00' && fd.times.length === 37, 'arrival times run every 15 minutes across the opening hours');
+  ok(fd.times === undefined && fd.time_init === '7:00 PM', 'arrival time is typed, starting from a 7:00 PM suggestion');
   ok(fd.guests_hint === 'Up to 8 guests online' && fd.guests === undefined, 'guests is typed, with the online limit as a hint');
   ok(!('footer' in fm.interactive), 'no footer on the main welcome message');
   ok(fd.min_date === day(0) && fd.max_date === day(60) && fd.unavailable.length >= 8 && fd.unavailable.every((d) => new Date(d + 'T00:00:00Z').getUTCDay() === 1), 'date range is live and Mondays (closed) are unavailable');
@@ -216,7 +216,8 @@ async function http(method, url, { body } = {}) {
   const goTok = await tokenOf(F); const gb = sent.length;
   const g1 = await fetch(`${base}/go/${goTok}/reserve`, { redirect: 'manual' });
   ok(g1.status === 302 && g1.headers.get('location') === 'https://wa.me/2348140490247', 'window open: redirects into the WhatsApp chat');
-  ok(sent.slice(gb).some((x) => x.to === F && x.interactive?.type === 'flow'), 'and pushes the native form into that chat first');
+  const pushed = sent.slice(gb).find((x) => x.to === F && x.interactive?.type === 'flow');
+  ok(pushed && /Tap TAP HERE TO RESERVE below/.test(pushed.text) && !pushed.interactive.header, 'and pushes the native form into that chat first, as a short message with the button');
   await pool.query("delete from reservation_log where phone_number=$1 and direction='inbound'", [F]);
   const gb2 = sent.length;
   const g2 = await fetch(`${base}/go/${goTok}/reserve`, { redirect: 'manual' });
@@ -241,8 +242,8 @@ async function http(method, url, { body } = {}) {
   ok((await flowCall(null, {})).status === 421, 'empty request gets 421');
   const H = '2348012345201'; await inbound(H, 'h1'); const hTok = await tokenOf(H); const FT = 'bali-' + hTok;
   const init = await flowCall({ action: 'INIT', flow_token: FT, version: '3.0' });
-  ok(init.json.screen === 'RESERVE' && init.json.data.times.length === 37 && init.json.data.has_error === false, 'INIT returns the live form');
-  ok(init.json.data.time_init === '19:00' && init.json.data.guests_init === '2' && /^\d{4}-\d{2}-\d{2}$/.test(init.json.data.date_init), 'form starts with valid defaults');
+  ok(init.json.screen === 'RESERVE' && init.json.data.has_error === false, 'INIT returns the live form');
+  ok(init.json.data.time_init === '7:00 PM' && init.json.data.guests_init === '2' && /^\d{4}-\d{2}-\d{2}$/.test(init.json.data.date_init), 'form starts with valid defaults');
   const ex = (data, token) => flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: token || FT, version: '3.0', data });
   const bad7 = await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '03:00', guests: '2' });
   ok(bad7.json.screen === 'RESERVE' && bad7.json.data.has_error && /between/.test(bad7.json.data.error) && bad7.json.data.name_init === 'Kunle Ade' && bad7.json.data.date_init === day(20), 'a bad time sends the guest back with the reason and their entries kept');
@@ -260,7 +261,7 @@ async function http(method, url, { body } = {}) {
   ok(stolen.screen === 'PAY' && stolen.data.amount_label === 'Start again' && !stolen.data.pay_url.includes('paystack'), "another guest's token cannot touch this reservation");
   const kr = (await pool.query('select paystack_ref from reservations where ref=$1', [kref])).rows[0].paystack_ref; paid.add(kr);
   const done7 = await ex({ action: 'check', ref: kref }); await settle();
-  ok(done7.json.screen === 'DONE' && done7.json.data.credit.includes('credited') && /baliabuja\.mylo\.africa/.test(done7.json.data.order_url), 'after paying, the confirmation screen with the order link');
+  ok(done7.json.screen === 'DONE' && done7.json.data.credit.includes('credited') && /order link are in this chat/.test(done7.json.data.credit) && done7.json.data.order_url === undefined, 'after paying, the confirmation screen sends them back to the chat for the order link');
   ok(sent.slice(hb).some((x) => x.to === HANDOVER && /Kunle Ade/.test(x.text) && /2348031234567/.test(x.text) && /Guests: 4/.test(x.text) && /Arrival: 7:15pm/.test(x.text)), 'details handed over to the venue after payment');
   ok(sent.slice(hb).some((x) => x.to === H && /confirmed/.test(x.text) && /baliabuja/.test(x.text)), 'guest also gets the WhatsApp confirmation with the order link');
   const nb = sent.length; await submit(H, 'fin1', { ref: kref, flow_token: FT }); ok(sent.length === nb, 'finishing the form (Done) triggers nothing extra');
@@ -268,11 +269,39 @@ async function http(method, url, { body } = {}) {
   ok(full7.json.screen === 'RESERVE' && /fully booked/.test(full7.json.data.error), 'a full time is reported inside the form');
   await pool.query("update reservation_settings set payments_enabled=false where id=1");
   const free7 = await ex({ action: 'reserve', name: 'Free Guest', phone: '0803 777 0000', date: day(21), time: '18:00', guests: '2' }); await settle();
-  ok(free7.json.screen === 'DONE' && !free7.json.data.credit.includes('credited'), 'payments off: straight to the confirmation screen');
+  ok(free7.json.screen === 'DONE' && !free7.json.data.credit.includes('credited') && /order link are in this chat/.test(free7.json.data.credit), 'payments off: straight to the confirmation screen');
   await pool.query("update reservation_settings set payments_enabled=true where id=1");
   const fj = require('../lib/flow').flowJson('AAAA');
   ok(fj.screens.map((s) => s.id).join() === 'RESERVE,PAY,DONE' && fj.data_api_version === '3.0' && fj.screens[2].terminal, 'form definition has the three screens and an endpoint');
 
+  console.log('\n7e. capacity is optional (0 = unlimited)');
+  await pool.query("update reservation_settings set max_guests_per_slot=0 where id=1");
+  const U = []; for (let i = 0; i < 4; i++) { const ph = '23480123453' + (10 + i); await inbound(ph, 'u' + i); U.push(await call('POST', `/api/reserve/${await tokenOf(ph)}`, form({ date: day(25), time: '19:00', guests: 8, name: 'Many ' + i }))); }
+  ok(U.every((x) => x.json.ok), 'with no limit, many large parties at the same time are all accepted');
+  ok((await pool.query("select count(*)::int n from reservations where guest_name like 'Many %'")).rows[0].n === 4, 'all four stored');
+  await pool.query("update reservation_settings set max_guests_per_booking=0 where id=1");
+  const BIG = '2348012345320'; await inbound(BIG, 'big1');
+  const bigRes = await call('POST', `/api/reserve/${await tokenOf(BIG)}`, form({ date: day(26), time: '20:00', guests: 60, name: 'Big Party' }));
+  ok(bigRes.json.ok, 'any number of guests is accepted (60 here)');
+  ok(require('../lib/flow').flowData(await require('../lib/core').loadSettings({ pool })).guests_hint === 'Any number of guests', 'the form says any number of guests');
+  ok(!(await call('POST', `/api/reserve/${await tokenOf(BIG)}`, form({ date: day(26), time: '20:00', guests: 5000, name: 'Silly' }))).json.ok, 'an absurd number is still rejected');
+  await pool.query("update reservation_settings set max_guests_per_slot=10, max_guests_per_booking=8 where id=1");
+  console.log('\n7f. Bali is open 24 hours: guests type the time');
+  const pa = require('../lib/flow').parseArrival;
+  const cases = { '7pm': '19:00', '7:30 PM': '19:30', '7.30pm': '19:30', '19:30': '19:30', '0030': '00:30', '12am': '00:00', '12 pm': '12:00', 'noon': '12:00', 'midnight': '00:00', '1:15 am': '01:15', '07:30': '07:30', '23:59': '23:59', '19': '19:00' };
+  ok(Object.entries(cases).every(([k, v]) => pa(k) === v), 'typed times understood: ' + Object.keys(cases).join(', '));
+  ok(['7', '7:30', '25:00', '13pm', '7:75pm', 'later', ''].every((k) => pa(k) === null), 'ambiguous or invalid times are rejected, never guessed: 7, 7:30, 25:00, 13pm, later');
+  await pool.query("update reservation_settings set open_24_7=true, max_guests_per_slot=0, max_guests_per_booking=0 where id=1");
+  const N24 = '2348012345330'; await inbound(N24, 'n1'); const t24 = await tokenOf(N24);
+  const night = await call('POST', `/api/reserve/${t24}`, form({ date: day(27), time: '03:00', guests: 3, name: 'Night Owl' }));
+  ok(night.json.ok, 'a 3am arrival is fine when open 24 hours');
+  const ft24 = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + t24, version: '3.0', data: { action: 'reserve', name: 'Typed Time', phone: '0803 222 3333', date: day(27), time: '11:45 pm', guests: '2' } });
+  ok(ft24.json.screen === 'PAY' || ft24.json.screen === 'DONE', 'typing "11:45 pm" in the form works');
+  const amb = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + t24, version: '3.0', data: { action: 'reserve', name: 'Typed Time', phone: '0803 222 3333', date: day(27), time: '7:30', guests: '2' } });
+  ok(amb.json.screen === 'RESERVE' && /AM or PM/.test(amb.json.data.error) && amb.json.data.time_init === '7:30', 'an ambiguous time is sent back asking for AM or PM, entry kept');
+  const lo = await require('../lib/core').loadSettings({ pool });
+  ok(lo.open_time === '00:00' && lo.close_time === '24:00', 'settings expose 24 hour hours');
+  await pool.query("update reservation_settings set open_24_7=false, max_guests_per_slot=10, max_guests_per_booking=8 where id=1");
   console.log('\n8. dashboard');
   ok((await call('GET', '/api/overview')).status === 401, 'API needs login');
   ok((await call('GET', '/dashboard/')).status === 302, 'dashboard redirects to login');
