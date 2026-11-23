@@ -12,25 +12,26 @@ then fix this file.
 
 ## What this business needs
 
-Bali is a venue with many vendors on site. Guests book TABLES over WhatsApp (scope changed from event booking on 2026-11-23). The bot (`n8n/_src/reservation-code.js`, workflow "02 Table Reservations") asks for day, time, number of guests and name, confirms instantly if there is room (capacity per time slot is configurable), and tells staff. Guests can change, cancel (YES to confirm) and ask their booking status; questions are answered from the knowledge_base + opening hours, otherwise escalated to staff. Staff (roles pm, floor_manager, staff, supervisor, facility_manager) use plain commands: today, tomorrow, list <day>, cancel R-xxxx [reason], move R-xxxx to <when>, guests R-xxxx n, tell <number> <message>, lookup <number>. Staff free text is NEVER relayed to guests. Settings live in table reservation_settings (hours, slot size, capacity, max party, closed weekdays). No payment/deposit.
+Bali is a venue with many vendors. Guests reserve TABLES. Standalone Node app in `app/` (no n8n); see `ops/README.md` for the full picture. Flow: WhatsApp card (picture + TABLE RESERVATION button + enquiries link) -> form (name, phone, date, arrival time, guests) -> Paystack N20,500 (N20,000 credited to the order + N500 fee, refund of N20,000 if cancelled 24h+ ahead) -> details sent to the HANDOVER number + stored -> order link baliabuja.mylo.africa. Enquiry chat answers only from the knowledge_base table. Dashboard tabs: Reservations (graphs), Chats, Knowledge base, Settings.
 
 ## What is built (2026-11-23)
 
-- [x] Reservation flow + staff commands, tested: `node tests/reservation.test.mjs` (fake DB/WhatsApp, real OpenAI if the key works, rule based fallback reader if not)
-- [x] Deployed to the live n8n; router (01) forwards customer AND all staff-like roles to /webhook/reservations
-- [x] Old event/contract/invoice workflows (02 stage1, 03, 04, 05, 99) deactivated in n8n and removed from the repo (see git history). Their _src files remain for reference; rebuild only with BUILD_LEGACY=1.
-- [ ] Dashboard has NO reservations/settings tabs yet (edit reservation_settings via SQL for now)
-- [ ] OpenAI key in .env is INVALID (401) as of 2026-11-23: the bot runs on the rule based reader until a working key is set in /opt/bali/.env and docker compose up -d n8n
-- [ ] No staff contacts yet in the new DB: add role pm / floor_manager contacts or nobody gets notified
-- [ ] DNS for n8n./bali.erasystems.com.ng; the live webhook currently uses n8n.77-42-122-241.sslip.io (compose rewritten on the server; real-domain version kept as docker-compose.yml.real-domains)
+- [x] App deployed, 70+ end to end checks pass (app/test/app.test.js)
+- [x] Bali number webhook -> https://bali.77-42-122-241.sslip.io/webhook/whatsapp?k=<BALI_FORWARD_SECRET>
+- [ ] PAYSTACK_SECRET_KEY not set; payments_enabled is OFF in reservation_settings until it is (then switch it on in Settings and add the key to /opt/bali/.env, docker compose up -d app)
+- [ ] Handover number not set yet (Settings tab); needs one WhatsApp reply of "okay" to the bot number to release queued messages outside 24h
+- [ ] DNS A records bali. (and set APP_BASE_URL + number webhook to the real domain)
+- [ ] Real WhatsApp end to end test not done yet
+- [ ] OpenAI not used (old key invalid); enquiry matching is deterministic over the KB. Optional: OPENAI_API_KEY_WORKING in .env enables a KB-only LLM fallback.
+- Retired: n8n workflows, PostgREST, Gotenberg, old event/contract/invoice flow (see git history).
 
 ## Stack
 
-Self-hosted on the shared Hetzner host `77.42.122.241` in `/opt/bali` (rebuilt 2026-11-22 after the old box 167.233.242.179 became unreachable; old data lost, fresh DB). n8n + Postgres + PostgREST + Gotenberg + dashboard in docker compose, routed by the shared Caddy. Full rebuild recipe: `ops/README.md`. Domains: n8n.erasystems.com.ng, bali.erasystems.com.ng (need DNS A records -> 77.42.122.241; the DirectAdmin API key is locked to the old server IP so DNS is manual).
+Self-hosted on the shared Hetzner host 77.42.122.241 (/opt/bali), 2 containers. Rebuilt 2026-11-22 after the old box died; fresh DB.
 
 ## Last updated
 
-2026-11-23 - pivoted Bali to table reservations, deployed live, synthetic end to end check passed (booking created, reply logged, test rows removed). Bali number +234 814 049 0247 webhook points at n8n.77-42-122-241.sslip.io/webhook/whatsapp-inbound?k=<BALI_FORWARD_SECRET>. Not yet confirmed with a real WhatsApp message after the pivot.
+2026-11-23 - standalone reservations app live; see list above.
 
 ## Standing instruction for every session
 

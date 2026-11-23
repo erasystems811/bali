@@ -1,17 +1,21 @@
-# Bali server setup (rebuilt 2026-11-22 after the old Hetzner box became unreachable)
+# Bali: how it runs (rebuilt 2026-11-23, standalone app, no n8n)
 
-Lives on the shared Hetzner host `77.42.122.241` in `/opt/bali`. Secrets are in `/opt/bali/.env` ON THE SERVER ONLY (never in git):
-DB_PASSWORD, JWT_SECRET, SERVICE_KEY (HS256 JWT, role bali_service, signed with JWT_SECRET), N8N_ENCRYPTION_KEY, SESSION_SECRET,
-plus OPENAI_API_KEY, META_ACCESS_TOKEN, META_PHONE_NUMBER_ID, META_WEBHOOK_VERIFY_TOKEN, BALI_FORWARD_SECRET (copy from local .env).
+Host: shared Hetzner server 77.42.122.241, folder /opt/bali. Two containers: `postgres` + `app` (this repo's `app/`).
+Caddy (shared, /opt/shared-caddy) routes bali.erasystems.com.ng + bali.77-42-122-241.sslip.io to 127.0.0.1:21102.
 
-Rebuild from scratch:
-1. Copy `ops/docker-compose.yml`, `dashboard/`, `supabase/schema.sql`, `ops/post-schema.sql` to `/opt/bali`; create `.env`.
-2. `docker compose up -d postgres`; `CREATE DATABASE bali;`; apply `schema.sql` to `bali`; apply `post-schema.sql` with `-v dbpass=$DB_PASSWORD`.
-3. `docker compose up -d --build`; add `ops/caddy-block.txt` to the shared Caddyfile; validate + reload.
-4. n8n: create owner (`POST /rest/owner/setup`), create an API key, import `n8n/0[1-6]*.json` and `99*.json`, activate each.
-5. DNS: A records `n8n` and `bali` (erasystems.com.ng) -> server IP. Then set the WhatsApp number's webhook override to
-   `https://n8n.erasystems.com.ng/webhook/whatsapp-inbound` (verify token = META_WEBHOOK_VERIFY_TOKEN).
-6. Add a dashboard login: insert into `dashboard_users` (bcryptjs hash).
+What the app does
+- WhatsApp webhook `/webhook/whatsapp?k=<BALI_FORWARD_SECRET>`: any guest text gets ONE card (Bali picture, TABLE RESERVATION button -> /reserve/<token>, enquiries link in the text).
+- /reserve/<token>: form (name, phone, date, arrival time, guests) -> Paystack (N20,500: N20,000 credited to the order + N500 fee) -> confirmation + order link -> details WhatsApp'd to the handover number and stored.
+- /ask/<token>: enquiry chat, answers ONLY from the knowledge_base table (edited on the dashboard); unknown questions are stored + sent to the handover number.
+- /my/<token>: guest change/cancel (refund of N20,000 if cancelled 24h+ ahead).
+- /dashboard: Reservations (KPIs + graphs + list), Chats, Knowledge base, Settings (handover number, payments, hours, capacity, welcome).
+- /webhook/paystack: re-verifies every event against Paystack before confirming (the body is never trusted).
 
-NOTE: the old live data (contacts, knowledge base, bookings, conversations) was lost with the old server; this was a fresh start.
-`FIXBOT_URL`/`FIXBOT_WEBHOOK_TOKEN` are NOT set on this n8n (fix-bot branch inactive).
+Secrets: /opt/bali/.env on the server only (DB_PASSWORD, SESSION_SECRET, META_*, BALI_FORWARD_SECRET, PAYSTACK_SECRET_KEY, APP_BASE_URL).
+
+Deploy: tar app/ + ops/docker-compose.yml to the server, `docker compose up -d --build app`.
+Schema: supabase/schema.sql, reservations.sql, reservations-v2.sql, reservations-v3.sql (idempotent, apply in order).
+Tests: app/test/app.test.js runs the real app against a throwaway Postgres DB with fake WhatsApp/Paystack:
+  create DB bali_test, apply the schema files, then
+  docker run --rm --network bali_default -v <dir>/app:/app -w /app -e DB_HOST=postgres -e DB_PASSWORD=... -e DB_NAME=bali_test node:20-alpine sh -c "npm i --omit=dev && node test/app.test.js"
+Number webhook: Graph API POST /<phone_number_id> webhook_configuration.override_callback_uri (verify_token = META_WEBHOOK_VERIFY_TOKEN).
