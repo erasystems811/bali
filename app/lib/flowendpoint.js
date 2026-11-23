@@ -20,13 +20,13 @@ function createFlowEndpoint(ctx, resv) {
     return rows[0] || null;
   }
 
-  function payScreen(S, T, r, url, note) {
+  function payScreen(S, T, r, url, note, chatButton) {
     const total = S.reservation_fee_kobo + S.service_fee_kobo;
     return {
       screen: 'PAY',
       data: {
         summary: `${r.guest_name}\n${resv.describe(r, T)}\nRef ${r.ref}`,
-        detail: `Pay ${naira(total)} to confirm your table. ${naira(S.reservation_fee_kobo)} of it is credited to your food and drinks order on the day.`,
+        detail: `Pay ${naira(total)} to confirm your table. ${naira(S.reservation_fee_kobo)} of it is credited to your food and drinks order on the day.${chatButton ? ' A Pay button is also in your WhatsApp chat.' : ''}`,
         amount_label: `Pay ${naira(total)}`,
         pay_url: url, ref: r.ref,
         has_note: !!note, note: note || ' ',
@@ -80,7 +80,10 @@ function createFlowEndpoint(ctx, resv) {
       }
       const { rows } = await pool.query('select * from reservations where ref=$1', [out.ref]);
       const r = rows[0];
-      if (out.status === 'pending_payment') return payScreen(S, T, r, out.payUrl);
+      if (out.status === 'pending_payment') {
+        const chatButton = await resv.sendPayButton(r, out.payUrl); // the same payment page as a tap button in the chat
+        return payScreen(S, T, r, out.payUrl, null, chatButton);
+      }
       return doneScreen(S, T, r);
     }
 
@@ -90,7 +93,7 @@ function createFlowEndpoint(ctx, resv) {
       if (!r) return startOver(session, 'I could not find that reservation.');
       if (r.status === 'pending_payment') { await resv.confirmPayment(r); r = (await pool.query('select * from reservations where ref=$1', [r.ref])).rows[0]; }
       if (r.status === 'confirmed') return doneScreen(S, T, r);
-      if (r.status === 'pending_payment') return payScreen(S, T, r, r.paystack_url, 'We have not received your payment yet. Finish paying, then tap the button again.');
+      if (r.status === 'pending_payment') return payScreen(S, T, r, r.paystack_url, 'We are waiting for your payment to be confirmed. This takes a few seconds. If you have not paid yet, tap Pay first. Then tap this button again.');
       return startOver(session, 'That reservation is no longer held.');
     }
     return formScreen(S, {});

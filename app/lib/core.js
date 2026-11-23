@@ -1,6 +1,7 @@
 // Shared helpers: settings, venue-local time (Lagos has no DST so a fixed offset is exact), formatting.
 const DEFAULTS = {
   venue_name: 'Bali',
+  confirm_via_webhook: true, // a booking is confirmed (and "confirmed" shown) only once the payment provider's webhook has confirmed the payment
   notify_changes: true, // WhatsApp the handover number when a guest changes or cancels
   change_cutoff_hours: 3, // guests can change their reservation until this many hours before arrival (0 = any time)
   reminder_hours: 6, // reminder before each reservation, 0 = off

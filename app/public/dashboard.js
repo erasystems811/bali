@@ -198,7 +198,7 @@
   async function viewSet() {
     const main = $('#main');
     main.append(h('div', { class: 'head' }, h('div', {}, h('h1', {}, 'Settings'), h('p', {}, 'Handover number, payments, opening hours and capacity.'))));
-    const { settings: S, paymentsConfigured, paymentProvider, whatsappConfigured } = await api('/settings');
+    const { settings: S, paymentsConfigured, paymentProvider, webhookUrl, whatsappConfigured } = await api('/settings');
     const F = {}; const errBox = {};
     const field = (key, label, type, hint, opts = {}) => {
       const val = opts.fromNaira ? S[key] / 100 : (S[key] ?? '');
@@ -211,6 +211,7 @@
     F.closed_weekdays = () => [...dayChecks.querySelectorAll('input:checked')].map((x) => Number(x.value));
     const pay = h('input', { type: 'checkbox', checked: !!S.payments_enabled }); F.payments_enabled = () => pay.checked;
     const open24 = h('input', { type: 'checkbox', checked: !!S.open_24_7 }); F.open_24_7 = () => open24.checked;
+    const viaHook = h('input', { type: 'checkbox', checked: S.confirm_via_webhook !== false }); F.confirm_via_webhook = () => viaHook.checked;
     const notifyCh = h('input', { type: 'checkbox', checked: S.notify_changes !== false }); F.notify_changes = () => notifyCh.checked;
     main.append(
       !whatsappConfigured ? h('div', { class: 'warn' }, 'WhatsApp is not connected on this server yet, so messages are only recorded, not sent.') : null,
@@ -221,6 +222,8 @@
       h('div', { class: 'card sec' }, h('h3', {}, 'Payment'), h('div', { class: 'sub' }, paymentsConfigured ? paymentProvider + ' is connected.' : 'No payment provider is connected yet (Monnify). Add the Monnify keys on the server before taking payments.'),
         !paymentsConfigured && S.payments_enabled ? h('div', { class: 'warn' }, 'Payments are on but no payment provider is connected, so the form will show "payment not available". Switch payments off below to take free reservations for now.') : null,
         h('div', { class: 'sw', style: 'margin-bottom:16px' }, pay, h('div', {}, h('b', {}, 'Take payment to confirm a reservation'))),
+        h('div', { class: 'sw', style: 'margin-bottom:16px' }, viaHook, h('div', {}, h('b', {}, 'Confirm a booking only when the payment webhook confirms it'))),
+        h('div', { class: 'sub', style: 'margin:-6px 0 16px' }, 'Webhook URL to add in your ' + (paymentProvider || 'payment') + ' dashboard: ', h('b', { style: 'color:var(--cream);word-break:break-all' }, webhookUrl || '')),
         h('div', { class: 'fg' }, field('reservation_fee_kobo', 'Reservation amount (₦)', 'number', 'Credited to the guest\'s order', { fromNaira: true }), field('service_fee_kobo', 'Service fee (₦)', 'number', 'Not refundable', { fromNaira: true }), field('refund_hours', 'Refund if cancelled at least (hours) before', 'number'), field('order_link', 'Order link', 'text', 'Sent to guests after they pay'))),
       h('div', { class: 'card sec' }, h('h3', {}, 'Opening hours and capacity'), h('div', { class: 'sub' }, 'Guests type the time they want to arrive. Turn off "open 24 hours" to only accept times within set hours.'),
         h('div', { class: 'sw', style: 'margin-bottom:16px' }, open24, h('div', {}, h('b', {}, 'Open 24 hours'))),

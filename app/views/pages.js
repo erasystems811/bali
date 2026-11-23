@@ -93,15 +93,17 @@ $('#f').addEventListener('submit',async(ev)=>{
 </script></body></html>`;
 }
 
-function done({ S, T, r, state, token, describe }) {
+function done({ S, T, r, state, token, describe, waNumber }) {
+  const wa = `https://wa.me/${String(waNumber || '').replace(/\D/g, '')}`;
+  const inForm = r.source === 'flow'; // paid inside the WhatsApp form: the guest is waiting there, so send them straight back
   const link = S.order_link ? `${S.order_link}${S.order_link.includes('?') ? '&' : '?'}ref=${r.ref}` : '';
   const p = T.utcToLocalParts(r.starts_at);
   const kv = `<dl class="kv"><dt>Reference</dt><dd>${esc(r.ref)}</dd><dt>Name</dt><dd>${esc(r.guest_name)}</dd><dt>Date</dt><dd>${esc(T.fmtDateFull(p.date))}</dd><dt>Arrival</dt><dd>${esc(T.fmtTime(p.time))}</dd><dt>Guests</dt><dd>${r.guests}</dd></dl>`;
   let inner;
   if (state === 'confirmed') {
     inner = `<div class="tick">✓</div><h1 class="center">Your table is confirmed</h1><p class="sub center">We have sent the details to your WhatsApp.${r.paid_amount_kobo ? ` Your ${esc(naira(S.reservation_fee_kobo))} is credited to your order on the day.` : ''}</p><div class="card">${kv}</div>
-    ${link ? `<p class="note center" style="margin-top:18px">You can place your food and drinks order for that day now.</p><a class="btn" href="${esc(link)}">Place your order</a>` : ''}
-    <a class="btn ghost" style="margin-top:12px" href="/my/${esc(token)}">Change or cancel</a>`;
+    <a class="btn" style="margin-top:18px" href="${esc(wa)}">Back to WhatsApp</a>
+    ${inForm ? `<p class="note center" style="margin-top:12px">Taking you back to WhatsApp…</p><script>setTimeout(function(){location.href=${JSON.stringify(wa)}},1500)</script>` : `${link ? `<p class="note center" style="margin-top:18px">You can place your food and drinks order for that day now.</p><a class="btn ghost" href="${esc(link)}">Place your order</a>` : ''}<a class="btn ghost" style="margin-top:12px" href="/my/${esc(token)}">Change or cancel</a>`}`;
   } else if (state === 'pending' || state === 'pending_payment') {
     inner = `<div class="tick wait">…</div><h1 class="center">Waiting for your payment</h1><p class="sub center">If you have just paid, this page updates by itself.</p><div class="card">${kv}</div><a class="btn ghost" style="margin-top:16px" href="">Check again</a>
     <script>setTimeout(()=>location.reload(),4000)</script>`;

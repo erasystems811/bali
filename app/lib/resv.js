@@ -198,11 +198,15 @@ function createResv(ctx, wa, ps) {
     return n;
   }
 
-  async function confirmPayment(refOrRow) {
+  // opts.fromWebhook: the payment provider's webhook called us. When confirm_via_webhook is on (default), ONLY the webhook may confirm
+  // a booking: the return page and the "I have paid" button just wait and look again. (The payment is still re-checked with the provider.)
+  async function confirmPayment(refOrRow, opts = {}) {
     const S = await loadSettings(ctx); const T = makeTime(S, nowFn);
-    const r = typeof refOrRow === 'string' ? (await pool.query('select * from reservations where ref=$1', [refOrRow])).rows[0] : refOrRow;
+    let r = typeof refOrRow === 'string' ? (await pool.query('select * from reservations where ref=$1', [refOrRow])).rows[0] : refOrRow;
     if (!r) return { status: 'unknown' };
+    if (r.status !== 'confirmed') r = (await pool.query('select * from reservations where ref=$1', [r.ref])).rows[0] || r; // look at the latest state
     if (r.status === 'confirmed') return { status: 'confirmed', ref: r.ref };
+    if (S.confirm_via_webhook && !opts.fromWebhook) return { status: 'pending', ref: r.ref, waitingForWebhook: true };
     if (!r.paystack_ref) return { status: 'pending' };
     const v = await ps.verify(r.paystack_ref);
     if (!v || v.status !== 'success') return { status: 'pending', ref: r.ref };
@@ -266,6 +270,21 @@ function createResv(ctx, wa, ps) {
     return wa.send(phone, `${body}\n\nNeed to change or cancel? Manage your reservation here: ${manageUrl}`, 'your reservation');
   }
 
+  // The payment page, as a button in the chat: WhatsApp opens links from chat buttons in its own built-in browser, so the guest never
+  // leaves WhatsApp. Only possible while their 24h window is open (they have just been using the form, so it nearly always is).
+  async function sendPayButton(r, url) {
+    try {
+      const S = await loadSettings(ctx); const T = makeTime(S, nowFn);
+      if (!(await wa.withinWindow(r.phone_number, false))) return false;
+      const total = S.reservation_fee_kobo + S.service_fee_kobo;
+      await wa.sendCta(r.phone_number, {
+        body: `Your reservation ${r.ref}\n${describe(r, T)}\n\nTap the button below to pay ${naira(total)} and confirm it. ${naira(S.reservation_fee_kobo)} of it is credited to your food and drinks order on the day.`,
+        button: `PAY ${naira(total)}`.slice(0, 20), url,
+      });
+      return true;
+    } catch (e) { return false; }
+  }
+
   // A guest changes their own reservation (date, time, guests). Their payment stays with the booking.
   async function change(ref, sessionPhone, input) {
     const S = await loadSettings(ctx); const T = makeTime(S, nowFn);
@@ -316,6 +335,6 @@ function createResv(ctx, wa, ps) {
     return (await pool.query('select short_code from web_sessions where phone_number=$1', [phone])).rows[0].short_code;
   }
 
-  return { sendPendingConfirmation, sendDueConfirmations, handoverNumbers, change, sessionShort, validate, createFromForm, confirmPayment, cancel, freeTimes, forGuest, sessionToken, describe, notifyHandover, guestsBooked };
+  return { sendPayButton, sendPendingConfirmation, sendDueConfirmations, handoverNumbers, change, sessionShort, validate, createFromForm, confirmPayment, cancel, freeTimes, forGuest, sessionToken, describe, notifyHandover, guestsBooked };
 }
 module.exports = { createResv };

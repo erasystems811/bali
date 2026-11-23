@@ -54,7 +54,7 @@ async function http(method, url, { body, headers } = {}) {
     ('Can I get a refund if I cancel?', 'Yes, if at least 24 hours before.', 'refund money back', 3),
     ('Do you have parking?', 'Yes, free parking on site.', 'park car', 4)`);
   await pool.query(`update reservation_settings set open_time='12:00', close_time='22:00', slot_minutes=60, max_guests_per_slot=10, max_guests_per_booking=8,
-    min_notice_minutes=60, max_days_ahead=60, closed_weekdays='{}', open_24_7=false, payments_enabled=false, handover_number='08031112222', welcome_image_url=null where id=1`);
+    min_notice_minutes=60, max_days_ahead=60, closed_weekdays='{}', open_24_7=false, confirm_via_webhook=false, payments_enabled=false, handover_number='08031112222', welcome_image_url=null where id=1`);
   await pool.query("insert into dashboard_users (username, password_hash) values ('admin', $1)", [await bcrypt.hash('pw', 4)]);
 
   const app = buildApp({ pool, env, http, noRateLimit: true, retryDelayMs: 1, flowTimeoutMs: 400 });
@@ -281,9 +281,11 @@ async function http(method, url, { body, headers } = {}) {
   const good = await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '19:15', guests: '4' });
   ok(good.json.screen === 'PAY' && /checkout\.paystack\.com/.test(good.json.data.pay_url) && good.json.data.amount_label === 'Pay ₦20,500' && /20,000/.test(good.json.data.detail) && !/service/i.test(good.json.data.detail) && !/held for|15 minutes/i.test(good.json.data.detail) && good.json.data.has_fee_note === true && /includes a ₦500 service charge.$/.test(good.json.data.fee_note), 'payment screen: the total, no hold time, the service charge only as one small note at the end');
   ok(!sent.slice(hb).some((x) => x.to === HANDOVER), 'nothing handed over before payment');
+  const payBtn = sent.slice(hb).find((x) => x.to === H && x.interactive?.type === 'cta_url');
+  ok(payBtn && payBtn.interactive.action.parameters.display_text === 'PAY ₦20,500' && payBtn.interactive.action.parameters.url === good.json.data.pay_url && /Tap the button below to pay ₦20,500/.test(payBtn.text) && /A Pay button is also in your WhatsApp chat/.test(good.json.data.detail), 'the payment page is ALSO sent as a PAY button in the chat (opens inside WhatsApp)');
   const kref = good.json.data.ref;
   const unpaid = await ex({ action: 'check', ref: kref });
-  ok(unpaid.json.screen === 'PAY' && unpaid.json.data.has_note && /not received/.test(unpaid.json.data.note), 'tapping I have paid before paying shows a gentle note');
+  ok(unpaid.json.screen === 'PAY' && unpaid.json.data.has_note && /waiting for your payment/.test(unpaid.json.data.note), 'tapping I have paid before paying shows a gentle note');
   const stolen = (await ex({ action: 'check', ref: kref }, 'bali-' + (await tokenOf('2348012345001')))).json;
   ok(stolen.screen === 'PAY' && stolen.data.amount_label === 'Start again' && !stolen.data.pay_url.includes('paystack'), "another guest's token cannot touch this reservation");
   const kr = (await pool.query('select paystack_ref from reservations where ref=$1', [kref])).rows[0].paystack_ref; paid.add(kr);
@@ -554,6 +556,39 @@ async function http(method, url, { body, headers } = {}) {
   ok(slw2.json.screen === 'PAY', 'tapping Continue again goes straight through to payment once the provider is back');
   ok((await pool.query("select count(*)::int n from reservations where guest_name='Slow Pay' and status='pending_payment'")).rows[0].n === 1, 'and only one table hold is left (the earlier attempt was replaced)');
   await pool.query("update reservation_settings set payments_enabled=true, open_24_7=false where id=1");
+
+  console.log('\n7q. after paying, back to the WhatsApp chat');
+  await pool.query("update reservation_settings set payments_enabled=true, open_24_7=true where id=1");
+  const BK = '2348012345961'; await inbound(BK, 'bk1'); const bkTok = await tokenOf(BK);
+  const bkRes = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + bkTok, version: '3.0', data: { step: 'reserve', name: 'Back Chat', phone: '0803 666 1212', date: day(36), time: '20:00', guests: '2' } });
+  const bkRef = bkRes.json.data.ref; const bkPay = (await pool.query('select paystack_ref from reservations where ref=$1', [bkRef])).rows[0].paystack_ref; paid.add(bkPay);
+  const bkPage = (await call('GET', `/reserve/${bkTok}/done?ref=${bkRef}`)).text;
+  ok(/Your table is confirmed/.test(bkPage) && /Back to WhatsApp/.test(bkPage) && /https:\/\/wa\.me\/2348140490247/.test(bkPage) && /location\.href="https:\/\/wa\.me\/2348140490247"/.test(bkPage), 'paid inside the form: the return page takes the guest straight back to the WhatsApp chat (button + automatic)');
+  ok(!/Place your order/.test(bkPage), 'and does not send them off to other pages');
+  await pool.query("update reservation_settings set payments_enabled=true, open_24_7=false where id=1");
+
+  console.log('\n7r. confirmed only when the payment webhook says so');
+  await pool.query("update reservation_settings set confirm_via_webhook=true, payments_enabled=true, open_24_7=true where id=1");
+  const WH = '2348012345971'; await inbound(WH, 'wh1'); const whTok = await tokenOf(WH);
+  const whRes = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + whTok, version: '3.0', data: { step: 'reserve', name: 'Web Hook', phone: '0803 444 1212', date: day(37), time: '20:00', guests: '2' } });
+  const whRef = whRes.json.data.ref; const whPay = (await pool.query('select paystack_ref from reservations where ref=$1', [whRef])).rows[0].paystack_ref; paid.add(whPay); // the money has arrived at the provider
+  const hw0 = sent.length;
+  const pg1 = (await call('GET', `/reserve/${whTok}/done?ref=${whRef}`)).text;
+  ok(/Waiting for your payment/.test(pg1) && !/Your table is confirmed/.test(pg1), 'return page: paid but the webhook has not arrived: it still says waiting, never confirmed');
+  const chk1 = await flowCall({ action: 'data_exchange', screen: 'PAY', flow_token: 'bali-' + whTok, version: '3.0', data: { step: 'check', ref: whRef } });
+  ok(chk1.json.screen === 'PAY' && chk1.json.data.has_note && /waiting for your payment to be confirmed/.test(chk1.json.data.note), 'the I-have-paid button: still the payment screen, with a waiting note');
+  ok((await pool.query('select status from reservations where ref=$1', [whRef])).rows[0].status === 'pending_payment' && !sent.slice(hw0).some((x) => x.to === HANDOVER || /confirmed/.test(x.text || '')), 'nothing is confirmed, handed over or messaged yet');
+  await call('POST', '/webhook/paystack', { event: 'charge.success', data: { reference: whPay } }); await settle();
+  ok((await pool.query('select status from reservations where ref=$1', [whRef])).rows[0].status === 'confirmed', 'the webhook confirms it');
+  ok(sent.slice(hw0).some((x) => x.to === HANDOVER && /Web Hook/.test(x.text || '')), 'and only then is it handed over');
+  const chk2 = await flowCall({ action: 'data_exchange', screen: 'PAY', flow_token: 'bali-' + whTok, version: '3.0', data: { step: 'check', ref: whRef } });
+  ok(chk2.json.screen === 'DONE', 'after the webhook, the I-have-paid button moves on to the confirmed screen');
+  ok(/Your table is confirmed/.test((await call('GET', `/reserve/${whTok}/done?ref=${whRef}`)).text), 'and the return page now says confirmed');
+  const WH2 = '2348012345972'; await inbound(WH2, 'wh2'); const wh2Tok = await tokenOf(WH2);
+  const wh2 = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + wh2Tok, version: '3.0', data: { step: 'reserve', name: 'Never Paid', phone: '0803 444 1313', date: day(37), time: '21:00', guests: '2' } });
+  await call('POST', '/webhook/paystack', { event: 'charge.success', data: { reference: (await pool.query('select paystack_ref from reservations where ref=$1', [wh2.json.data.ref])).rows[0].paystack_ref } }); await settle();
+  ok((await pool.query('select status from reservations where ref=$1', [wh2.json.data.ref])).rows[0].status === 'pending_payment', 'a webhook for a payment that never actually happened confirms nothing (it is re-checked with the provider)');
+  await pool.query("update reservation_settings set confirm_via_webhook=false, payments_enabled=true, open_24_7=false where id=1");
 
   console.log('\n8. dashboard');
   ok((await call('GET', '/api/overview')).status === 401, 'API needs login');

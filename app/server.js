@@ -185,7 +185,7 @@ function buildApp(ctx) {
     if (!ref || !/SUCCESS|COMPLETED|PAID/i.test(String((req.body && req.body.eventType) || '') + String(d.paymentStatus || ''))) return;
     (async () => {
       const { rows } = await pool.query('select * from reservations where paystack_ref=$1', [String(ref)]);
-      if (rows[0]) await resv.confirmPayment(rows[0]);
+      if (rows[0]) await resv.confirmPayment(rows[0], { fromWebhook: true });
     })().catch((e) => console.error('monnify webhook error', e));
   });
 
@@ -195,7 +195,7 @@ function buildApp(ctx) {
     if (!ref) return;
     (async () => {
       const { rows } = await pool.query('select * from reservations where paystack_ref=$1', [ref]);
-      if (rows[0]) await resv.confirmPayment(rows[0]); // re-verified against Paystack, the webhook body is never trusted
+      if (rows[0]) await resv.confirmPayment(rows[0], { fromWebhook: true }); // re-verified with the provider, the webhook body is never trusted
     })().catch((e) => console.error('paystack webhook error', e));
   });
 
@@ -258,7 +258,7 @@ function buildApp(ctx) {
     if (!r) return res.status(404).send(pages.notFound());
     let state = r.status;
     if (r.status === 'pending_payment') { const c = await resv.confirmPayment(r); state = c.status; r = (await pool.query('select * from reservations where ref=$1', [r.ref])).rows[0]; }
-    res.send(pages.done({ S, T, r, state, token: req.params.token, describe: resv.describe(r, T) }));
+    res.send(pages.done({ S, T, r, state, token: req.params.token, describe: resv.describe(r, T), waNumber: env.WHATSAPP_NUMBER || '2348140490247' }));
   }));
 
   app.get('/my/:token', wrap(async (req, res) => {
@@ -433,9 +433,9 @@ function buildApp(ctx) {
     venue_name: 'text', open_time: 'time', close_time: 'time', slot_minutes: 'int', max_guests_per_slot: 'int', max_guests_per_booking: 'int',
     min_notice_minutes: 'int', max_days_ahead: 'int', closed_weekdays: 'intarr', reservation_fee_kobo: 'int', service_fee_kobo: 'int',
     hold_minutes: 'int', refund_hours: 'int', order_link: 'text', welcome_image_url: 'text', welcome_text: 'text', handover_number: 'phone', handover_number_2: 'phone',
-    payments_enabled: 'bool', open_24_7: 'bool', reminder_hours: 'int', change_cutoff_hours: 'int', notify_changes: 'bool', enquiry_intro: 'text', venue_notes: 'text', flow_id: 'text',
+    payments_enabled: 'bool', open_24_7: 'bool', confirm_via_webhook: 'bool', reminder_hours: 'int', change_cutoff_hours: 'int', notify_changes: 'bool', enquiry_intro: 'text', venue_notes: 'text', flow_id: 'text',
   };
-  api.get('/settings', wrap(async (req, res) => { const S = await loadSettings(ctx); res.json({ settings: S, paymentsConfigured: ps.configured, paymentProvider: ps.name, whatsappConfigured: !!env.META_ACCESS_TOKEN }); }));
+  api.get('/settings', wrap(async (req, res) => { const S = await loadSettings(ctx); res.json({ settings: S, paymentsConfigured: ps.configured, paymentProvider: ps.name, webhookUrl: `${base()}/webhook/${ps.name.toLowerCase()}`, whatsappConfigured: !!env.META_ACCESS_TOKEN }); }));
   api.put('/settings', wrap(async (req, res) => {
     const sets = []; const vals = []; const errors = {};
     for (const [k, type] of Object.entries(SETTING_FIELDS)) {
