@@ -19,3 +19,5 @@ Tests: app/test/app.test.js runs the real app against a throwaway Postgres DB wi
   create DB bali_test, apply the schema files, then
   docker run --rm --network bali_default -v <dir>/app:/app -w /app -e DB_HOST=postgres -e DB_PASSWORD=... -e DB_NAME=bali_test node:20-alpine sh -c "npm i --omit=dev && node test/app.test.js"
 Number webhook: Graph API POST /<phone_number_id> webhook_configuration.override_callback_uri (verify_token = META_WEBHOOK_VERIFY_TOKEN).
+
+WhatsApp form (Flow): scripts/publish-flow.js creates a new uniquely named version with endpoint_uri https://<host>/flow/endpoint and publishes it; then set reservation_settings.flow_id (published flows are immutable, deprecate the old one). The encryption public key is registered with POST /<phone_number_id>/whatsapp_business_encryption (keys in /opt/bali/keys). Routing is forward-only: RESERVE -> PAY -> DONE.

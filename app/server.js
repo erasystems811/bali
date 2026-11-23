@@ -11,6 +11,8 @@ const { createResv } = require('./lib/resv');
 const { createEnquiry } = require('./lib/enquiry');
 const pages = require('./views/pages');
 const flow = require('./lib/flow');
+const { createFlowEndpoint } = require('./lib/flowendpoint');
+const { decryptRequest, encryptResponse } = require('./lib/flowcrypto');
 
 async function http(method, url, { headers, body } = {}) {
   const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(25000) });
@@ -26,6 +28,7 @@ function buildApp(ctx) {
   const ps = createPaystack(ctx);
   const resv = createResv(ctx, wa, ps);
   const enquiry = createEnquiry(ctx, resv);
+  const flowEndpoint = createFlowEndpoint(ctx, resv);
   const base = () => (env.APP_BASE_URL || '').replace(/\/$/, '');
 
   const app = express();
@@ -62,7 +65,7 @@ function buildApp(ctx) {
     return wa.sendFlow(phone, {
       image: S.welcome_image_url || `${base()}/assets/welcome.png`,
       body: `${intro ? intro + '\n\n' : ''}${S.welcome_text}\n\nHave a question instead? Tap here to chat: ${askUrl}`,
-      footer: 'Powered by ERA Systems', cta: 'TABLE RESERVATION', flowId: S.flow_id, token: `bali-${token}`,
+      cta: 'TAP HERE TO RESERVE', flowId: S.flow_id, token: `bali-${token}`,
       data: flow.flowData(S, { intro: intro || '', nameInit, phoneInit: `+${phone}` }),
     });
   }
@@ -88,7 +91,7 @@ function buildApp(ctx) {
     await wa.sendCta(phone, {
       image: S.welcome_image_url || `${base()}/assets/welcome.png`,
       body: `${S.welcome_text}\n\nHave a question instead? Tap here to chat: ${askUrl}`,
-      button: 'TABLE RESERVATION',
+      button: 'TAP HERE TO RESERVE',
       url: formUrl,
     });
   }
@@ -115,10 +118,11 @@ function buildApp(ctx) {
   // A guest finished the native form inside WhatsApp.
   async function handleFormSubmission(S, from, nfm) {
     let r = {}; try { r = JSON.parse(nfm.response_json || '{}'); } catch (e) {}
+    if (r.ref) return; // the in-form flow finished (tapped Done); everything was already handled by the endpoint
     await wa.log(from, 'inbound', `[form] ${r.name || ''} ${r.date || ''} ${r.time || ''} ${r.guests || ''}`);
     const token = await resv.sessionToken(from);
     const T = makeTime(S);
-    const out = await resv.createFromForm({ name: r.name, phone: r.phone, date: flow.normalizeDate(r.date, S), time: r.time, guests: r.guests }, from);
+    const out = await resv.createFromForm({ name: r.name, phone: r.phone, date: flow.normalizeDate(r.date, S), time: flow.normalizeTime(r.time), guests: r.guests }, from);
     if (!out.ok) {
       const msg = Object.values(out.errors || {})[0] || 'Something went wrong with that booking.';
       await sendForm(S, from, token, { intro: `Sorry: ${msg}`, nameInit: r.name });
@@ -139,6 +143,20 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
     } // free reservations were confirmed (and the guest messaged) inside createFromForm
   }
 
+  // The WhatsApp form talks to this (encrypted). Wrong key / garbage = 421 so Meta refreshes the key.
+  let flowKey = null;
+  const privateKey = () => { if (!flowKey) flowKey = env.FLOW_PRIVATE_KEY || (env.FLOW_PRIVATE_KEY_FILE ? require('fs').readFileSync(env.FLOW_PRIVATE_KEY_FILE, 'utf8') : null); return flowKey; };
+  app.post('/flow/endpoint', async (req, res) => {
+    let dec;
+    try { dec = decryptRequest(req.body, privateKey()); } catch (e) { return res.sendStatus(421); }
+    let out;
+    try { out = await flowEndpoint.handle(dec.decrypted); } catch (e) {
+      console.error('flow endpoint error', e);
+      out = { screen: 'RESERVE', data: { ...flow.flowData(await loadSettings(ctx), {}), has_error: true, error: 'Something went wrong on our side. Please try again.' } };
+    }
+    res.type('text/plain').send(encryptResponse(out, dec.aesKey, dec.iv));
+  });
+
   app.post('/webhook/paystack', (req, res) => {
     res.sendStatus(200);
     const ref = req.body?.event === 'charge.success' && req.body?.data?.reference;
@@ -148,6 +166,27 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
       if (rows[0]) await resv.confirmPayment(rows[0]); // re-verified against Paystack, the webhook body is never trusted
     })().catch((e) => console.error('paystack webhook error', e));
   });
+
+  // "Reserve a table" from anywhere on the web (enquiry chat, manage page): open the native WhatsApp form.
+  // If the guest's 24h window is open we push the form into their WhatsApp chat first, then send them there.
+  // If not, WhatsApp opens with "Table reservation" pre-typed; sending it makes the bot reply with the form.
+  const waDigits = () => String(env.WHATSAPP_NUMBER || '2348140490247').replace(/\D/g, '');
+  app.get('/go/:token/reserve', wrap(async (req, res) => {
+    const s = await sessionFor(req.params.token);
+    if (!s) return res.status(404).send(pages.notFound());
+    const S = await loadSettings(ctx);
+    if (!S.flow_id) return res.redirect(`/reserve/${req.params.token}`);
+    const chat = `https://wa.me/${waDigits()}`;
+    try {
+      if (await wa.withinWindow(s.phone_number, false)) {
+        const { rows: c } = await pool.query('select name from contacts where phone_number=$1', [s.phone_number]);
+        await pool.query('update web_sessions set welcomed_at = now() where token=$1', [req.params.token]);
+        await sendForm(S, s.phone_number, req.params.token, { nameInit: c[0]?.name || '' });
+        return res.redirect(chat);
+      }
+    } catch (e) { console.error('go/reserve push failed', e.message); }
+    res.redirect(`${chat}?text=${encodeURIComponent('Table reservation')}`);
+  }));
 
   // ===================== guest pages =====================
   async function sessionFor(token) {
@@ -184,7 +223,7 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
     if (!s) return res.status(404).send(pages.notFound());
     const S = await loadSettings(ctx); const T = makeTime(S);
     const list = await resv.forGuest(s.phone_number);
-    res.send(pages.manage({ S, T, token: req.params.token, list: list.map((r) => ({ ...r, text: resv.describe(r, T), hoursAway: (new Date(r.starts_at).getTime() - Date.now()) / 3600000 })) , formUrl: `${base()}/reserve/${req.params.token}` }));
+    res.send(pages.manage({ S, T, token: req.params.token, list: list.map((r) => ({ ...r, text: resv.describe(r, T), hoursAway: (new Date(r.starts_at).getTime() - Date.now()) / 3600000 })) , formUrl: `${base()}/go/${req.params.token}/reserve` }));
   }));
   app.post('/api/my/:token/cancel', wrap(async (req, res) => {
     const s = await sessionFor(req.params.token);
@@ -198,7 +237,7 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
     const s = await sessionFor(req.params.token);
     if (!s) return res.status(404).send(pages.notFound());
     const S = await loadSettings(ctx);
-    res.send(pages.ask({ S, token: req.params.token, formUrl: `${base()}/reserve/${req.params.token}`, chips: await enquiry.chips(), waNumber: env.WHATSAPP_NUMBER || '2348140490247' }));
+    res.send(pages.ask({ S, token: req.params.token, formUrl: `${base()}/go/${req.params.token}/reserve`, chips: await enquiry.chips(), waNumber: env.WHATSAPP_NUMBER || '2348140490247' }));
   }));
   app.get('/api/ask/:token/history', wrap(async (req, res) => {
     const s = await sessionFor(req.params.token);

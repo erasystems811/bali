@@ -54,7 +54,7 @@ function createEnquiry(ctx, resv) {
   async function reply(phone, text) {
     const t = String(text || '').trim();
     const token = await resv.sessionToken(phone);
-    const form = `${base()}/reserve/${token}`;
+    const form = `${base()}/go/${token}/reserve`; // hands over to the native WhatsApp form
     const manage = `${base()}/my/${token}`;
     if (!t) return { text: 'Please type your question.' };
 

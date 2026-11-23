@@ -72,6 +72,6 @@ function createWa(ctx) {
     }
     return rows.length;
   }
-  return { send, sendCta, sendFlow, flushQueue, log };
+  return { send, sendCta, sendFlow, flushQueue, log, withinWindow };
 }
 module.exports = { createWa };

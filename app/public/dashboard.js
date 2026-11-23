@@ -39,7 +39,7 @@
     root.append(
       h('aside', { class: 'side' },
         h('div', { class: 'brand' }, h('div', { class: 'logo' }), h('div', {}, h('b', {}, 'Bali'), h('span', {}, 'Reservations'))),
-        nav, h('div', { class: 'grow' }), h('div', { class: 'who' }, 'Powered by ERA Systems'),
+        nav, h('div', { class: 'grow' }), h('div', { class: 'who' }, 'Managed by ERA Systems'),
         h('form', { method: 'post', action: '/dashboard/logout' }, h('button', {}, 'Sign out'))),
       h('main', { class: 'main', id: 'main' }));
   }

@@ -70,7 +70,7 @@ function form({ S, T, token, phone, askUrl, waNumber }) {
  <button class="btn" id="go" type="submit">${S.payments_enabled ? 'Continue to payment' : 'Confirm reservation'}</button>
 </form>
 <p class="foot">Have a question first? <a href="${esc(askUrl)}" style="color:var(--cream)">Chat with us</a></p>
-<p class="foot">Powered by ERA Systems</p></div>
+<p class="foot">Managed by ERA Systems</p></div>
 <script>
 const C=${JSON.stringify(cfg)};
 const $=(s)=>document.querySelector(s);
@@ -109,7 +109,7 @@ function done({ S, T, r, state, token, describe }) {
   } else {
     inner = `<div class="tick wait">!</div><h1 class="center">This reservation is ${esc(state.replace('_', ' '))}</h1><p class="sub center">If you paid and see this, message us on WhatsApp and we will sort it out.</p><a class="btn" href="/reserve/${esc(token)}">Make a new reservation</a>`;
   }
-  return `${HEAD('Reservation')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"></div>${inner}<p class="foot">Powered by ERA Systems</p></div></body></html>`;
+  return `${HEAD('Reservation')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"></div>${inner}<p class="foot">Managed by ERA Systems</p></div></body></html>`;
 }
 
 function manage({ S, T, token, list, formUrl }) {
@@ -124,7 +124,7 @@ function manage({ S, T, token, list, formUrl }) {
   }).join('');
   return `${HEAD('My reservation')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"></div><h1>My reservation</h1><p class="sub">Your upcoming tables at ${esc(S.venue_name)}.</p>
   ${items || `<div class="card center"><p class="note">You have no upcoming reservations.</p></div>`}
-  <a class="btn" style="margin-top:18px" href="${esc(formUrl)}">Book a table</a><p class="foot">Powered by ERA Systems</p></div>
+  <a class="btn" style="margin-top:18px" href="${esc(formUrl)}">Book a table</a><p class="foot">Managed by ERA Systems</p></div>
   <div class="modal" id="m"><div class="sheet"><h1 style="font-size:20px">Cancel this reservation?</h1><p class="note" id="mn"></p><button class="btn danger" id="yes">Yes, cancel it</button><button class="btn ghost" id="no" style="margin-top:10px">Keep it</button></div></div>
   <script>let cur=null;const m=document.getElementById('m');
   document.querySelectorAll('[data-ref]').forEach(b=>b.onclick=()=>{cur=b.dataset.ref;document.getElementById('mn').textContent=b.dataset.note||'';m.classList.add('open')});
@@ -155,7 +155,7 @@ input{flex:1;border:none;border-radius:22px;padding:12px 16px;font:inherit;font-
 button.send{width:46px;height:46px;border-radius:50%;border:none;background:var(--accent);color:#fff;font-size:20px;cursor:pointer}
 .top{display:flex;gap:8px;padding:8px 10px;background:#fff;border-bottom:1px solid rgba(0,0,0,.08)}.top a{flex:1;text-align:center;padding:9px;border-radius:9px;background:#f0f2f5;color:var(--accent);font-weight:700;font-size:13.5px;text-decoration:none}
 </style></head><body><div id="app">
-<header><a class="back" href="${esc(wa)}" aria-label="Back to WhatsApp">‹</a><div class="av"></div><div><div class="n">${esc(S.venue_name)}</div><div class="s">Enquiries</div><div class="by">Powered by ERA Systems</div></div></header>
+<header><a class="back" href="${esc(wa)}" aria-label="Back to WhatsApp">‹</a><div class="av"></div><div><div class="n">${esc(S.venue_name)}</div><div class="s">Enquiries</div></div></header>
 <div class="top"><a href="${esc(formUrl)}">Reserve a table</a></div>
 <div id="scroll"><div id="list"></div><div class="chips" id="chips"></div></div>
 <form id="f" autocomplete="off"><input id="t" placeholder="Type your question" maxlength="500"><button class="send" aria-label="Send">➤</button></form></div>
@@ -177,7 +177,7 @@ document.getElementById('f').onsubmit=e=>{e.preventDefault();send(document.getEl
 
 function login(msg) {
   return `${HEAD('Bali dashboard')}${GUEST_CSS}</head><body><div class="wrap" style="padding-top:12vh"><div class="center"><div style="width:84px;height:84px;margin:0 auto 18px;border-radius:22px;background:#3a1a0d url(/assets/welcome.png) center/cover;border:1px solid var(--line)"></div><h1>Bali dashboard</h1><p class="sub">Sign in to manage reservations.</p></div>
-<form class="card" method="post" action="/dashboard/login"><div class="field"><label>Username</label><input name="username" autocomplete="username" autofocus></div><div class="field"><label>Password</label><input name="password" type="password" autocomplete="current-password"></div>${msg ? `<div class="err" style="margin-bottom:10px">${esc(msg)}</div>` : ''}<button class="btn">Sign in</button></form><p class="foot">Powered by ERA Systems</p></div></body></html>`;
+<form class="card" method="post" action="/dashboard/login"><div class="field"><label>Username</label><input name="username" autocomplete="username" autofocus></div><div class="field"><label>Password</label><input name="password" type="password" autocomplete="current-password"></div>${msg ? `<div class="err" style="margin-bottom:10px">${esc(msg)}</div>` : ''}<button class="btn">Sign in</button></form><p class="foot">Managed by ERA Systems</p></div></body></html>`;
 }
 
 function dashboard() {

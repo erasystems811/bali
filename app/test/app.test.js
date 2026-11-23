@@ -7,7 +7,10 @@ const { buildApp } = require('../server');
 let fails = 0;
 const ok = (c, m) => { if (!c) { fails++; console.log('  FAIL:', m); } else console.log('  ok:', m); };
 
+const crypto = require('crypto');
+const keys = crypto.generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
 const env = {
+  FLOW_PRIVATE_KEY: keys.privateKey,
   APP_BASE_URL: 'https://app.test', META_ACCESS_TOKEN: 'tok', META_PHONE_NUMBER_ID: '1', META_WEBHOOK_VERIFY_TOKEN: 'vt',
   BALI_FORWARD_SECRET: 'fsec', PAYSTACK_SECRET_KEY: 'sk_test', SESSION_SECRET: 's', NODE_ENV: 'test',
 };
@@ -62,7 +65,7 @@ async function http(method, url, { body } = {}) {
   await inbound(G, 'm1', 'hi');
   ok(sent.length === 1 && sent[0].interactive?.type === 'cta_url', 'guest gets ONE rich card');
   const tok = await tokenOf(G);
-  ok(sent[0].interactive.action.parameters.display_text === 'TABLE RESERVATION' && sent[0].interactive.action.parameters.url === `https://app.test/reserve/${tok}`, 'button opens the reservation form');
+  ok(sent[0].interactive.action.parameters.display_text === 'TAP HERE TO RESERVE' && sent[0].interactive.action.parameters.url === `https://app.test/reserve/${tok}`, 'button opens the reservation form');
   ok(/WELCOME TO BALI/.test(sent[0].text) && sent[0].text.includes(`https://app.test/ask/${tok}`), 'card text has the welcome line and the enquiries link');
   ok(sent[0].interactive.header?.image?.link === 'https://app.test/assets/welcome.png', 'Bali picture in the card header');
   await inbound(G, 'm1', 'hi');
@@ -156,13 +159,14 @@ async function http(method, url, { body } = {}) {
   const mg = await ask('can I cancel my booking');
   ok(mg.action?.url === `https://app.test/my/${tok}`, 'cancel/change goes to the manage page');
   const bk = await ask('I want to book a table');
-  ok(bk.action?.url === `https://app.test/reserve/${tok}`, 'booking intent gets the form link');
+  ok(bk.action?.url === `https://app.test/go/${tok}/reserve`, 'booking intent gets the hand-over link');
   const b7 = sent.length;
   const unk = await ask('do you allow pets?');
   await settle();
   ok(/passed it to the team/.test(unk.reply), 'unknown question admits it and escalates');
   ok((await pool.query('select count(*)::int n from kb_unanswered')).rows[0].n === 1 && sent.slice(b7).some((x) => x.to === HANDOVER && /pets/.test(x.text)), 'unanswered question stored and sent to the handover number');
-  ok((await call('GET', `/ask/${tok}`)).text.includes('Powered by ERA Systems'), 'enquiry page renders');
+  const askPage = (await call('GET', `/ask/${tok}`)).text;
+  ok(askPage.includes('Enquiries') && !askPage.includes('ERA Systems'), 'enquiry chat renders with no ERA branding line');
   ok((await call('GET', `/api/ask/${tok}/history`)).json.messages.length >= 8, 'chat history saved');
 
   console.log('\n7b. native WhatsApp form (Flow)');
@@ -172,12 +176,13 @@ async function http(method, url, { body } = {}) {
   await inbound(F, 'f1', 'hi');
   const fm = sent.slice(bf).find((x) => x.to === F);
   const fp = fm?.interactive?.action?.parameters;
-  ok(fm?.interactive?.type === 'flow' && fp.flow_id === 'FLOW1' && fp.flow_cta === 'TABLE RESERVATION' && fp.flow_action === 'navigate', 'welcome is the native form message with a TABLE RESERVATION button');
+  ok(fm?.interactive?.type === 'flow' && fp.flow_id === 'FLOW1' && fp.flow_cta === 'TAP HERE TO RESERVE' && fp.flow_action === 'navigate', 'welcome is the native form message with an obvious TAP HERE TO RESERVE button');
   ok(fm.interactive.header?.image?.link === 'https://app.test/assets/welcome.png' && /WELCOME TO BALI/.test(fm.text) && /\/ask\//.test(fm.text), 'has the Bali picture, welcome text and enquiries link');
   ok(fp.flow_token.startsWith('bali-') && fp.flow_action_payload.screen === 'RESERVE', 'flow token and first screen set');
   const fd = fp.flow_action_payload.data;
-  ok(fd.times.some((t) => t.id === '19:00' && t.title === '7:00 PM') && fd.times[0].id === '12:00' && fd.times.at(-1).id === '21:00', 'arrival times follow the opening hours');
-  ok(fd.guests.length === 8 && fd.guests[0].title === '1 guest', 'guest options follow the party limit');
+  ok(fd.times.some((t) => t.id === '19:15' && t.title === '7:15 PM') && fd.times.some((t) => t.id === '19:00') && fd.times[0].id === '12:00' && fd.times.at(-1).id === '21:00' && fd.times.length === 37, 'arrival times run every 15 minutes across the opening hours');
+  ok(fd.guests_hint === 'Up to 8 guests online' && fd.guests === undefined, 'guests is typed, with the online limit as a hint');
+  ok(!('footer' in fm.interactive), 'no footer on the main welcome message');
   ok(fd.min_date === day(0) && fd.max_date === day(60) && fd.unavailable.length >= 8 && fd.unavailable.every((d) => new Date(d + 'T00:00:00Z').getUTCDay() === 1), 'date range is live and Mondays (closed) are unavailable');
   ok(fd.phone_init === '+' + F, 'phone is pre-filled');
   const b2f = sent.length; await inbound(F, 'f2', 'hello?');
@@ -205,6 +210,68 @@ async function http(method, url, { body } = {}) {
   await pool.query("update reservation_settings set closed_weekdays='{}' where id=1");
   ok(require('../lib/flow').flowData(await require('../lib/core').loadSettings({ pool })).unavailable[0] === '2000-01-01', 'no closed days gives WhatsApp a valid placeholder list');
   await pool.query("update reservation_settings set flow_id=null where id=1");
+
+  console.log('\n7c. "Reserve a table" buttons on the web open the WhatsApp form');
+  await pool.query("update reservation_settings set flow_id='FLOW1' where id=1");
+  const goTok = await tokenOf(F); const gb = sent.length;
+  const g1 = await fetch(`${base}/go/${goTok}/reserve`, { redirect: 'manual' });
+  ok(g1.status === 302 && g1.headers.get('location') === 'https://wa.me/2348140490247', 'window open: redirects into the WhatsApp chat');
+  ok(sent.slice(gb).some((x) => x.to === F && x.interactive?.type === 'flow'), 'and pushes the native form into that chat first');
+  await pool.query("delete from reservation_log where phone_number=$1 and direction='inbound'", [F]);
+  const gb2 = sent.length;
+  const g2 = await fetch(`${base}/go/${goTok}/reserve`, { redirect: 'manual' });
+  ok(g2.headers.get('location') === 'https://wa.me/2348140490247?text=Table%20reservation' && sent.length === gb2, 'window closed: opens WhatsApp with the words pre-typed, nothing sent');
+  await pool.query("update reservation_settings set flow_id=null where id=1");
+  ok((await fetch(`${base}/go/${goTok}/reserve`, { redirect: 'manual' })).headers.get('location') === `/reserve/${goTok}`, 'no form configured: falls back to the website form');
+  ok((await fetch(`${base}/go/nonsense/reserve`, { redirect: 'manual' })).status === 404, 'bad link is a 404');
+  console.log('\n7d. payment INSIDE the WhatsApp form (encrypted endpoint)');
+  const flowCall = async (obj, raw) => {
+    const aes = crypto.randomBytes(16); const iv = crypto.randomBytes(12);
+    const c = crypto.createCipheriv('aes-128-gcm', aes, iv); const enc = Buffer.concat([c.update(JSON.stringify(obj)), c.final(), c.getAuthTag()]);
+    const ek = crypto.publicEncrypt({ key: keys.publicKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, aes);
+    const body = raw || { encrypted_flow_data: enc.toString('base64'), encrypted_aes_key: ek.toString('base64'), initial_vector: iv.toString('base64') };
+    const r = await fetch(base + '/flow/endpoint', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (r.status !== 200) return { status: r.status };
+    const buf = Buffer.from(await r.text(), 'base64'); const flipped = Buffer.from([...iv].map((b) => ~b & 0xff));
+    const d = crypto.createDecipheriv('aes-128-gcm', aes, flipped); d.setAuthTag(buf.subarray(-16));
+    return { status: 200, json: JSON.parse(Buffer.concat([d.update(buf.subarray(0, -16)), d.final()]).toString()) };
+  };
+  ok((await flowCall({ action: 'ping', version: '3.0' })).json.data.status === 'active', 'Meta health check (ping) answered');
+  ok((await flowCall(null, { encrypted_flow_data: 'AAAA', encrypted_aes_key: 'AAAA', initial_vector: 'AAAA' })).status === 421, 'undecryptable request gets 421 so Meta refreshes the key');
+  ok((await flowCall(null, {})).status === 421, 'empty request gets 421');
+  const H = '2348012345201'; await inbound(H, 'h1'); const hTok = await tokenOf(H); const FT = 'bali-' + hTok;
+  const init = await flowCall({ action: 'INIT', flow_token: FT, version: '3.0' });
+  ok(init.json.screen === 'RESERVE' && init.json.data.times.length === 37 && init.json.data.has_error === false, 'INIT returns the live form');
+  ok(init.json.data.time_init === '19:00' && init.json.data.guests_init === '2' && /^\d{4}-\d{2}-\d{2}$/.test(init.json.data.date_init), 'form starts with valid defaults');
+  const ex = (data, token) => flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: token || FT, version: '3.0', data });
+  const bad7 = await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '03:00', guests: '2' });
+  ok(bad7.json.screen === 'RESERVE' && bad7.json.data.has_error && /between/.test(bad7.json.data.error) && bad7.json.data.name_init === 'Kunle Ade' && bad7.json.data.date_init === day(20), 'a bad time sends the guest back with the reason and their entries kept');
+  ok((await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803', date: day(20), time: '19:00', guests: '2' })).json.data.error.includes('valid phone'), 'bad phone caught inside the form');
+  ok((await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '19:00', guests: '9' })).json.data.error.includes('more than 8'), 'too many guests caught inside the form');
+  ok((await ex({ action: 'reserve', name: 'X', phone: '0803 123 4567', date: day(20), time: '19:00', guests: '2' }, 'bali-nope')).json.data.error.includes('expired'), 'a stale or forged form token is refused');
+  const hb = sent.length;
+  const good = await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '19:15', guests: '4' });
+  ok(good.json.screen === 'PAY' && /checkout\.paystack\.com/.test(good.json.data.pay_url) && good.json.data.amount_label === 'Pay ₦20,500' && /20,000/.test(good.json.data.detail) && /500 service fee/.test(good.json.data.detail), 'next screen is the payment screen with the Paystack link and the fee breakdown');
+  ok(!sent.slice(hb).some((x) => x.to === HANDOVER), 'nothing handed over before payment');
+  const kref = good.json.data.ref;
+  const unpaid = await ex({ action: 'check', ref: kref });
+  ok(unpaid.json.screen === 'PAY' && unpaid.json.data.has_note && /not received/.test(unpaid.json.data.note), 'tapping I have paid before paying shows a gentle note');
+  const stolen = (await ex({ action: 'check', ref: kref }, 'bali-' + (await tokenOf('2348012345001')))).json;
+  ok(stolen.screen === 'PAY' && stolen.data.amount_label === 'Start again' && !stolen.data.pay_url.includes('paystack'), "another guest's token cannot touch this reservation");
+  const kr = (await pool.query('select paystack_ref from reservations where ref=$1', [kref])).rows[0].paystack_ref; paid.add(kr);
+  const done7 = await ex({ action: 'check', ref: kref }); await settle();
+  ok(done7.json.screen === 'DONE' && done7.json.data.credit.includes('credited') && /baliabuja\.mylo\.africa/.test(done7.json.data.order_url), 'after paying, the confirmation screen with the order link');
+  ok(sent.slice(hb).some((x) => x.to === HANDOVER && /Kunle Ade/.test(x.text) && /2348031234567/.test(x.text) && /Guests: 4/.test(x.text) && /Arrival: 7:15pm/.test(x.text)), 'details handed over to the venue after payment');
+  ok(sent.slice(hb).some((x) => x.to === H && /confirmed/.test(x.text) && /baliabuja/.test(x.text)), 'guest also gets the WhatsApp confirmation with the order link');
+  const nb = sent.length; await submit(H, 'fin1', { ref: kref, flow_token: FT }); ok(sent.length === nb, 'finishing the form (Done) triggers nothing extra');
+  const full7 = await ex({ action: 'reserve', name: 'Late Guest', phone: '0803 999 0000', date: day(20), time: '19:30', guests: '8' });
+  ok(full7.json.screen === 'RESERVE' && /fully booked/.test(full7.json.data.error), 'a full time is reported inside the form');
+  await pool.query("update reservation_settings set payments_enabled=false where id=1");
+  const free7 = await ex({ action: 'reserve', name: 'Free Guest', phone: '0803 777 0000', date: day(21), time: '18:00', guests: '2' }); await settle();
+  ok(free7.json.screen === 'DONE' && !free7.json.data.credit.includes('credited'), 'payments off: straight to the confirmation screen');
+  await pool.query("update reservation_settings set payments_enabled=true where id=1");
+  const fj = require('../lib/flow').flowJson('AAAA');
+  ok(fj.screens.map((s) => s.id).join() === 'RESERVE,PAY,DONE' && fj.data_api_version === '3.0' && fj.screens[2].terminal, 'form definition has the three screens and an endpoint');
 
   console.log('\n8. dashboard');
   ok((await call('GET', '/api/overview')).status === 401, 'API needs login');
