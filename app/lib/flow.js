@@ -67,6 +67,8 @@ function flowJson(logoBase64) {
           ref: str('R-1234'),
           has_note: { type: 'boolean', __example__: false },
           note: str(' '),
+          has_fee_note: { type: 'boolean', __example__: true },
+          fee_note: str('The total includes a ₦500 service charge.'),
         },
         layout: {
           type: 'SingleColumnLayout',
@@ -78,6 +80,7 @@ function flowJson(logoBase64) {
             { type: 'TextBody', text: '${data.note}', visible: '${data.has_note}' },
             { type: 'EmbeddedLink', text: '${data.amount_label}', 'on-click-action': { name: 'open_url', url: '${data.pay_url}' } },
             { type: 'TextCaption', text: 'After paying, come back here and tap "I have paid".' },
+            { type: 'TextCaption', text: '${data.fee_note}', visible: '${data.has_fee_note}' },
             { type: 'Footer', label: 'I have paid', 'on-click-action': { name: 'data_exchange', payload: { step: 'check', ref: '${data.ref}' } } },
           ],
         },

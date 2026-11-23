@@ -36,7 +36,8 @@ function createMonnify(ctx) {
       });
       const url = res && res.responseBody && res.responseBody.checkoutUrl;
       if (!url) throw new Error('Monnify did not return a checkout link');
-      return url;
+      // Monnify checkout links contain "|". WhatsApp's open_url button can refuse a raw pipe, so send it percent-encoded (the page opens the same).
+      return String(url).replace(/\|/g, '%7C');
     },
     // normalised: { status: 'success' | 'pending' | ..., amount: kobo, transactionReference }
     async verify(reference) {

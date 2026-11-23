@@ -30,7 +30,7 @@ async function http(method, url, { body, headers } = {}) {
   if (u.hostname === 'sandbox.monnify.com') {
     monnifyCalls.push({ path: u.pathname, headers, body });
     if (u.pathname === '/api/v1/auth/login') return { requestSuccessful: true, responseBody: { accessToken: 'mtok', expiresIn: 3000 } };
-    if (u.pathname === '/api/v1/merchant/transactions/init-transaction') return { requestSuccessful: true, responseBody: { checkoutUrl: 'https://sandbox.monnify.com/checkout/' + body.paymentReference, transactionReference: 'MNFY|' + body.paymentReference } };
+    if (u.pathname === '/api/v1/merchant/transactions/init-transaction') return { requestSuccessful: true, responseBody: { checkoutUrl: 'https://sandbox.sdk.monnify.com/checkout/MNFY|90|' + body.paymentReference + '|000006', transactionReference: 'MNFY|' + body.paymentReference } };
     if (u.pathname === '/api/v2/merchant/transactions/query') { const ref = u.searchParams.get('paymentReference'); return { requestSuccessful: true, responseBody: { paymentStatus: paid.has(ref) ? 'PAID' : 'PENDING', amountPaid: paid.has(ref) ? 20500 : 0, transactionReference: 'MNFY|' + ref } }; }
     if (u.pathname === '/api/v1/refunds/initiate-refund') { monnifyRefunds.push(body); return { requestSuccessful: true, responseBody: { refundStatus: 'IN_PROGRESS' } }; }
   }
@@ -279,7 +279,7 @@ async function http(method, url, { body, headers } = {}) {
   ok((await ex({ action: 'reserve', name: 'X', phone: '0803 123 4567', date: day(20), time: '19:00', guests: '2' }, 'bali-nope')).json.data.error.includes('expired'), 'a stale or forged form token is refused');
   const hb = sent.length;
   const good = await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '19:15', guests: '4' });
-  ok(good.json.screen === 'PAY' && /checkout\.paystack\.com/.test(good.json.data.pay_url) && good.json.data.amount_label === 'Pay ₦20,500' && /20,000/.test(good.json.data.detail) && /500 service fee/.test(good.json.data.detail), 'next screen is the payment screen with the Paystack link and the fee breakdown');
+  ok(good.json.screen === 'PAY' && /checkout\.paystack\.com/.test(good.json.data.pay_url) && good.json.data.amount_label === 'Pay ₦20,500' && /20,000/.test(good.json.data.detail) && !/service/i.test(good.json.data.detail) && !/held for|15 minutes/i.test(good.json.data.detail) && good.json.data.has_fee_note === true && /includes a ₦500 service charge.$/.test(good.json.data.fee_note), 'payment screen: the total, no hold time, the service charge only as one small note at the end');
   ok(!sent.slice(hb).some((x) => x.to === HANDOVER), 'nothing handed over before payment');
   const kref = good.json.data.ref;
   const unpaid = await ex({ action: 'check', ref: kref });
@@ -518,7 +518,7 @@ async function http(method, url, { body, headers } = {}) {
   await pool.query("update reservation_settings set payments_enabled=true, open_24_7=true, reminder_hours=0 where id=1");
   const MN = '2348012345901'; await inbound(MN, 'mn1'); const mnTok = await tokenOf(MN);
   const mnRes = await call('POST', `/api/reserve/${mnTok}`, form({ date: day(35), time: '19:00', guests: 2, name: 'Mona Nify' }));
-  ok(mnRes.json.ok && mnRes.json.status === 'pending_payment' && /^https:\/\/sandbox\.monnify\.com\/checkout\/BALI-/.test(mnRes.json.payUrl) && mnRes.json.amountKobo === 2050000, 'with Monnify keys set, the guest gets a Monnify checkout link for N20,500');
+  ok(mnRes.json.ok && mnRes.json.status === 'pending_payment' && /^https:\/\/sandbox\.sdk\.monnify\.com\/checkout\/MNFY%7C90%7CBALI-/.test(mnRes.json.payUrl) && !mnRes.json.payUrl.includes('|') && mnRes.json.amountKobo === 2050000, "Monnify checkout link for N20,500, with the pipe characters percent-encoded so WhatsApp's button accepts it");
   const mnLogin = monnifyCalls.find((c) => c.path === '/api/v1/auth/login'); const mnInit = monnifyCalls.filter((c) => c.path.endsWith('init-transaction')).at(-1);
   ok(mnLogin.headers.Authorization === 'Basic ' + Buffer.from('MK_TEST_X:SECRETY').toString('base64'), 'logs in with the API key and secret (Basic auth)');
   ok(mnInit.headers.Authorization === 'Bearer mtok' && mnInit.body.amount === 20500 && mnInit.body.contractCode === '1234567' && mnInit.body.currencyCode === 'NGN' && mnInit.body.customerName === 'Mona Nify' && /^BALI-/.test(mnInit.body.paymentReference) && /\/reserve\/.+\/done\?ref=/.test(mnInit.body.redirectUrl), 'mnInit request: amount in naira (20500), contract code, guest name, our reference, return link');

@@ -251,7 +251,7 @@ function createResv(ctx, wa, ps) {
       if (!refunded) await notifyHandover(S, `Automatic refund FAILED for ${ref}. Please refund ${naira(refund)} to ${r.phone_number} in ${ps.name}.`, 'a refund needed');
     }
     const tail = refund
-      ? (refunded ? ` We have refunded ${naira(refund)}; it can take a few days to show.${refund < r.paid_amount_kobo ? ' The service fee is not refundable.' : ''}` : ' The team will process your refund shortly.')
+      ? (refunded ? ` We have refunded ${naira(refund)}; it can take a few days to show.` : ' The team will process your refund shortly.')
       : (r.paid_amount_kobo ? ` As it is less than ${S.refund_hours} hours to your booking, the payment is not refunded.` : '');
     // The guest always gets a message about a cancellation (their own, or one made by the venue).
     { const who = by === 'staff' ? `Sorry, we had to cancel your reservation ${r.ref} for ${describe(r, T)}.` : `Your reservation ${r.ref} for ${describe(r, T)} is cancelled.`;

@@ -145,12 +145,7 @@ function buildApp(ctx) {
       const { rows } = await pool.query('select * from reservations where ref=$1', [out.ref]);
       const rr = rows[0];
       await wa.sendCta(from, {
-        body: `Almost done ${rr.guest_name.split(' ')[0]}. Your table is held for ${S.hold_minutes} minutes:
-
-${resv.describe(rr, T)}
-Ref: ${rr.ref}
-
-Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is credited to your food and drinks order on the day, plus a ${naira(S.service_fee_kobo)} service fee.`,
+        body: `Almost done ${rr.guest_name.split(' ')[0]}. Here is your reservation:\n\n${resv.describe(rr, T)}\nRef: ${rr.ref}\n\nPay ${naira(out.amountKobo)} to confirm it. ${naira(S.reservation_fee_kobo)} of it is credited to your food and drinks order on the day.`,
         button: `PAY ${naira(out.amountKobo)}`.slice(0, 20), url: out.payUrl,
       });
     } // free reservations were confirmed (and the guest messaged) inside createFromForm

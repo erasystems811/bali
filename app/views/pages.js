@@ -64,7 +64,7 @@ function form({ S, T, token, phone, askUrl, waNumber }) {
   <div class="field"><label for="time">Arrival time</label><input id="time" name="time" type="time" value="19:00"><div class="err" data-e="time"></div></div>
  </div>
  <div class="field"><label>Number of guests</label><div class="stepper"><button type="button" id="minus" aria-label="Fewer guests">−</button><input id="guests" name="guests" type="number" inputmode="numeric" min="1" max="${maxG}" value="2"><button type="button" id="plus" aria-label="More guests">+</button></div><div class="err" data-e="guests"></div></div>
- ${S.payments_enabled ? `<div class="price"><div>💳</div><div>Pay <b>${esc(naira(total))}</b> to confirm: <b>${esc(naira(S.reservation_fee_kobo))}</b> is credited to your food and drinks order on the day, plus a ${esc(naira(S.service_fee_kobo))} service fee.</div></div>` : ''}
+ ${S.payments_enabled ? `<div class="price"><div>💳</div><div>Pay <b>${esc(naira(total))}</b> to confirm. <b>${esc(naira(S.reservation_fee_kobo))}</b> of it is credited to your food and drinks order on the day.<div style="font-size:12px;color:var(--muted);margin-top:6px">The total includes a ${esc(naira(S.service_fee_kobo))} service charge.</div></div></div>` : ''}
  <div class="err" data-e="_" style="margin-bottom:10px"></div>
  <button class="btn" id="go" type="submit">${S.payments_enabled ? 'Continue to payment' : 'Confirm reservation'}</button>
 </form>
@@ -103,7 +103,7 @@ function done({ S, T, r, state, token, describe }) {
     ${link ? `<p class="note center" style="margin-top:18px">You can place your food and drinks order for that day now.</p><a class="btn" href="${esc(link)}">Place your order</a>` : ''}
     <a class="btn ghost" style="margin-top:12px" href="/my/${esc(token)}">Change or cancel</a>`;
   } else if (state === 'pending' || state === 'pending_payment') {
-    inner = `<div class="tick wait">…</div><h1 class="center">Waiting for your payment</h1><p class="sub center">If you have just paid, this page updates by itself. Your table is held for a few minutes.</p><div class="card">${kv}</div><a class="btn ghost" style="margin-top:16px" href="">Check again</a>
+    inner = `<div class="tick wait">…</div><h1 class="center">Waiting for your payment</h1><p class="sub center">If you have just paid, this page updates by itself.</p><div class="card">${kv}</div><a class="btn ghost" style="margin-top:16px" href="">Check again</a>
     <script>setTimeout(()=>location.reload(),4000)</script>`;
   } else {
     inner = `<div class="tick wait">!</div><h1 class="center">This reservation is ${esc(state.replace('_', ' '))}</h1><p class="sub center">If you paid and see this, message us on WhatsApp and we will sort it out.</p><a class="btn" href="/reserve/${esc(token)}">Make a new reservation</a>`;
@@ -115,7 +115,7 @@ function manage({ S, T, token, list, formUrl }) {
   const items = list.map((r) => {
     const paid = r.paid_amount_kobo;
     const refundNote = !paid ? '' : (r.hoursAway >= S.refund_hours
-      ? `Cancelling now refunds ${naira(S.reservation_fee_kobo)}. The ${naira(S.service_fee_kobo)} service fee is not refundable.`
+      ? `Cancelling now refunds ${naira(S.reservation_fee_kobo)}.`
       : `This is less than ${S.refund_hours} hours away, so the payment will not be refunded.`);
     return `<div class="card res"><div style="display:flex;justify-content:space-between;align-items:center"><b>${esc(r.ref)}</b><span class="pill ${r.status === 'confirmed' ? '' : 'w'}">${r.status === 'confirmed' ? 'Confirmed' : 'Awaiting payment'}</span></div>
       <p style="margin:10px 0 2px;font-size:16px;font-weight:600">${esc(r.text)}</p><p class="note">${esc(r.guest_name)}${refundNote ? '<br>' + esc(refundNote) : ''}</p>

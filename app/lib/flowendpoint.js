@@ -26,10 +26,11 @@ function createFlowEndpoint(ctx, resv) {
       screen: 'PAY',
       data: {
         summary: `${r.guest_name}\n${resv.describe(r, T)}\nRef ${r.ref}`,
-        detail: `Pay ${naira(total)} to confirm your table. ${naira(S.reservation_fee_kobo)} is credited to your food and drinks order on the day, plus a ${naira(S.service_fee_kobo)} service fee. Your table is held for ${S.hold_minutes} minutes.`,
+        detail: `Pay ${naira(total)} to confirm your table. ${naira(S.reservation_fee_kobo)} of it is credited to your food and drinks order on the day.`,
         amount_label: `Pay ${naira(total)}`,
         pay_url: url, ref: r.ref,
         has_note: !!note, note: note || ' ',
+        has_fee_note: true, fee_note: `The total includes a ${naira(S.service_fee_kobo)} service charge.`,
       },
     };
   }
@@ -38,7 +39,7 @@ function createFlowEndpoint(ctx, resv) {
       screen: 'PAY',
       data: {
         summary: 'This reservation is no longer held.', detail: 'Tap the button to start a new reservation.',
-        amount_label: 'Start again', pay_url: `${base()}/go/${session.token}/reserve`, ref: 'none', has_note: true, note: note || 'Your table hold has ended.',
+        amount_label: 'Start again', pay_url: `${base()}/go/${session.token}/reserve`, ref: 'none', has_note: true, note: note || 'Your reservation is no longer held.', has_fee_note: false, fee_note: ' ',
       },
     };
   }
