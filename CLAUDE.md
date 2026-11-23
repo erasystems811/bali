@@ -12,41 +12,17 @@ then fix this file.
 
 ## What this business needs
 
-Bali is an event hospitality venue. The bot (`n8n/_src/stage1-code.js` and
-related files) handles the full sales/onboarding flow: greeting, intake
-(date, name, event type/name, returning-client check, IG/TikTok/website
-reference), PM handoff with a structured summary, contract, invoicing, and
-payment confirmation. Full spec: `docs/bali-sales-onboarding-spec.md`.
+Bali is a venue with many vendors on site. Guests book TABLES over WhatsApp (scope changed from event booking on 2026-11-23). The bot (`n8n/_src/reservation-code.js`, workflow "02 Table Reservations") asks for day, time, number of guests and name, confirms instantly if there is room (capacity per time slot is configurable), and tells staff. Guests can change, cancel (YES to confirm) and ask their booking status; questions are answered from the knowledge_base + opening hours, otherwise escalated to staff. Staff (roles pm, floor_manager, staff, supervisor, facility_manager) use plain commands: today, tomorrow, list <day>, cancel R-xxxx [reason], move R-xxxx to <when>, guests R-xxxx n, tell <number> <message>, lookup <number>. Staff free text is NEVER relayed to guests. Settings live in table reservation_settings (hours, slot size, capacity, max party, closed weekdays). No payment/deposit.
 
-## What's actually built (verify against the code, don't just read this)
+## What is built (2026-11-23)
 
-- [x] Full sales intake flow, live and working (`stage1-code.js`)
-- [x] PM handoff with structured chat summary (`notifyPmOfCompletedIntake`)
-- [x] Contract/invoice/payment flow (`99-stage3-4-invoice-contract.json`)
-- [x] Sandbox environment for safe testing before anything goes live
-- [x] `client_reference` (IG/TikTok/website) now correctly accepts "I don't
-      have one" in any phrasing, instead of blocking intake forever
-      (fixed 2026-08-04, see git log)
-- [ ] **Not yet done**: migrated onto the shared `bot-engine` toolkit (see
-      `../era-dash-os/bot-engine/`) — Bali predates that toolkit, so its
-      code is still hand-rolled rather than built on the shared building
-      blocks. Migrate one isolated piece at a time (e.g. swipe-reply
-      routing first), never the whole file at once — see
-      `../era-dash-os/FIX-PROTOCOL.md`.
-- [x] **`01-inbound-router.json` now also routes Chidera's own number to
-      ERA's WhatsApp fix-bot** (`../era-dash-os/fixbot/`) when her message
-      starts with "fix" or a fix-bot conversation is already active — new
-      "Check If Ops Message" → "Is Ops Message?" → "Forward to Ops
-      Assistant" branch, inserted before "Lookup Contact". Every other
-      sender, and every other message from her own number, is completely
-      unaffected (verified by reading the deployed workflow's node/
-      connection JSON, not live-tested against real traffic — see
-      project_whatsapp_fix_bot memory for why). Needs `FIXBOT_WEBHOOK_TOKEN`
-      and `FIXBOT_URL` env vars on the `n8n` container (added to
-      `docker-compose.yml` + `.env` 2026-08-30) to actually reach fixbot at
-      `http://172.18.0.1:4200` (the docker bridge gateway — n8n has no
-      `host.docker.internal` entry configured). ufw rule added: port 4200
-      allowed from `172.18.0.0/16` only.
+- [x] Reservation flow + staff commands, tested: `node tests/reservation.test.mjs` (fake DB/WhatsApp, real OpenAI if the key works, rule based fallback reader if not)
+- [x] Deployed to the live n8n; router (01) forwards customer AND all staff-like roles to /webhook/reservations
+- [x] Old event/contract/invoice workflows (02 stage1, 03, 04, 05, 99) deactivated in n8n and removed from the repo (see git history). Their _src files remain for reference; rebuild only with BUILD_LEGACY=1.
+- [ ] Dashboard has NO reservations/settings tabs yet (edit reservation_settings via SQL for now)
+- [ ] OpenAI key in .env is INVALID (401) as of 2026-11-23: the bot runs on the rule based reader until a working key is set in /opt/bali/.env and docker compose up -d n8n
+- [ ] No staff contacts yet in the new DB: add role pm / floor_manager contacts or nobody gets notified
+- [ ] DNS for n8n./bali.erasystems.com.ng; the live webhook currently uses n8n.77-42-122-241.sslip.io (compose rewritten on the server; real-domain version kept as docker-compose.yml.real-domains)
 
 ## Stack
 
@@ -54,7 +30,7 @@ Self-hosted on the shared Hetzner host `77.42.122.241` in `/opt/bali` (rebuilt 2
 
 ## Last updated
 
-2026-11-22 - rebuilt the whole stack on the new host, imported workflows 01-06 + 99, verified webhook GET handshake and PostgREST/dashboard locally. NOT yet done: DNS, switching the WhatsApp number webhook (currently overridden to the EBOS/era-demo endpoint), seeding contacts/knowledge base.
+2026-11-23 - pivoted Bali to table reservations, deployed live, synthetic end to end check passed (booking created, reply logged, test rows removed). Bali number +234 814 049 0247 webhook points at n8n.77-42-122-241.sslip.io/webhook/whatsapp-inbound?k=<BALI_FORWARD_SECRET>. Not yet confirmed with a real WhatsApp message after the pivot.
 
 ## Standing instruction for every session
 

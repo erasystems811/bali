@@ -96,12 +96,15 @@ function writeMultiTriggerWorkflow(fileName, workflowName, chains) {
 }
 
 writeWorkflow(
-  "02-stage1-sales-flow.json",
-  "Bali - 02 Stage 1 Sales Flow",
-  webhookNode("Stage1 Trigger", "stage1-sales-flow", "bali-stage1-sales-flow", [-200, 0]),
-  codeNode("Handle Stage 1 Message", "stage1-code.js", [40, 0])
+  "02-reservations.json",
+  "Bali - 02 Table Reservations",
+  webhookNode("Reservations Trigger", "reservations", "bali-reservations", [-200, 0]),
+  codeNode("Handle Reservation Message", "reservation-code.js", [40, 0])
 );
 
+// Legacy event-booking flow (03 PM toggle, 04 KB check, 05 fan-out, 99 invoice/contract) was retired
+// 2026-11-23 when Bali became a table-reservation bot. Rebuild only with BUILD_LEGACY=1.
+if (process.env.BUILD_LEGACY) {
 writeWorkflow(
   "03-pm-toggle.json",
   "Bali - 03 PM Toggle",
@@ -193,6 +196,7 @@ writeMultiTriggerWorkflow(
     ],
   ]
 );
+}
 
 function jsonRespondNode(name, position) {
   return respondToWebhookNode(name, { respondWith: "json", responseBody: "={{ $json }}", options: {} }, position);
