@@ -72,7 +72,7 @@ function createFlowEndpoint(ctx, resv) {
       // the form sends the picked time as HH:MM; hour + minute (a short-lived older version) is still understood
       const picked = data.time || (data.hour !== undefined && data.hour !== '' ? `${String(data.hour).padStart(2, '0')}:${String(data.minute || '0').padStart(2, '0')}` : '');
       const form = { name: data.name, phone: data.phone, date: flow.normalizeDate(data.date, S), time: flow.normalizeTime(picked), guests: data.guests };
-      const out = await resv.createFromForm(form, session.phone_number);
+      const out = await resv.createFromForm(form, session.phone_number, { source: 'flow' });
       if (!out.ok) {
         const msg = Object.values(out.errors || {})[0] || 'Something went wrong with that booking.';
         return formScreen(S, { ...keep(form), has_error: true, error: msg });

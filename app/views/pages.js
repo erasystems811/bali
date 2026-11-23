@@ -121,9 +121,9 @@ function manage({ S, T, token, list, formUrl }) {
       <p style="margin:10px 0 2px;font-size:16px;font-weight:600">${esc(r.text)}</p><p class="note">${esc(r.guest_name)}${refundNote ? '<br>' + esc(refundNote) : ''}</p>
       <div style="display:flex;gap:10px;flex-wrap:wrap">${r.status === 'confirmed' ? `<button class="btn small" data-change="${esc(r.ref)}" data-date="${esc(r.ldate)}" data-time="${esc(r.ltime)}" data-guests="${r.guests}">Change</button>` : ''}<button class="btn danger small" data-ref="${esc(r.ref)}" data-note="${esc(refundNote)}">Cancel reservation</button></div></div>`;
   }).join('');
-  return `${HEAD('My reservation')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"></div><h1>My reservation</h1><p class="sub">Your upcoming tables at ${esc(S.venue_name)}.</p>
+  return `${HEAD('My reservation')}${GUEST_CSS}<style>html,body{height:100%;width:100%;overflow:hidden;overscroll-behavior:none;position:fixed;inset:0}.fixedpage{height:100vh;height:100dvh;display:flex;flex-direction:column;padding-bottom:0}.fixedpage .banner{flex:none;height:96px;margin-bottom:0}.scrollarea{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:16px 0 calc(24px + env(safe-area-inset-bottom))}</style></head><body><div class="wrap fixedpage"><div class="banner"></div><div class="scrollarea"><h1>My reservation</h1><p class="sub">Your upcoming tables at ${esc(S.venue_name)}.</p>
   ${items || `<div class="card center"><p class="note">You have no upcoming reservations.</p></div>`}
-  <a class="btn" style="margin-top:18px" href="${esc(formUrl)}">Book a table</a><p class="foot">Powered by ERA Systems</p></div>
+  <p class="foot">Powered by ERA Systems</p></div></div>
   <div class="modal" id="cm"><div class="sheet"><h1 style="font-size:20px">Change your reservation</h1><p class="note" id="cmref"></p>
    <div class="field"><label for="cd">Date</label><input id="cd" type="date" min="${esc(T.todayStr())}" max="${esc(T.addDaysISO(T.todayStr(), S.max_days_ahead))}"></div>
    <div class="field"><label for="ct">Arrival time</label><input id="ct" type="time"></div>

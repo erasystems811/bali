@@ -104,18 +104,18 @@ function buildApp(ctx) {
     res.sendStatus(200); // Meta needs a fast 200; process after
     (async () => {
       const S = await loadSettings(ctx);
-      const handover = normalizePhone(S.handover_number);
+      const handovers = resv.handoverNumbers(S);
       for (const entry of req.body?.entry || []) for (const ch of entry.changes || []) for (const m of ch.value?.messages || []) {
         const ins = await pool.query('insert into wa_inbound (msg_id) values ($1) on conflict do nothing returning msg_id', [m.id]);
         if (!ins.rows[0]) continue; // duplicate delivery
         const from = m.from;
         await wa.log(from, 'inbound', m.text?.body || `[${m.type}]`);
         await wa.flushQueue(from);
-        if (from === handover) continue; // the venue's own number never gets the guest welcome
+        if (handovers.includes(from)) continue; // the venue's own numbers never get the guest welcome
         if (m.type === 'interactive' && m.interactive?.type === 'nfm_reply') { await handleFormSubmission(S, from, m.interactive.nfm_reply); continue; }
         // "cancel" / "change" / "reschedule" texted to the bot: one tap-to-manage button, not the whole welcome
         if (m.text?.body && /\b(cancel|change|reschedule|re-schedule|move|modify|amend)\b/i.test(m.text.body) && (await resv.forGuest(from)).length) {
-          await wa.sendCta(from, { body: 'You can see, change or cancel your reservation here.', button: 'MANAGE BOOKING', url: `${base()}/m/${await resv.sessionShort(from)}` });
+          await wa.sendCta(from, { body: 'You can see, change or cancel your reservation using the button below.', button: 'TAP TO MANAGE', url: `${base()}/m/${await resv.sessionShort(from)}` });
           continue;
         }
         await welcomeCard(S, from);
@@ -126,7 +126,7 @@ function buildApp(ctx) {
   // A guest finished the native form inside WhatsApp.
   async function handleFormSubmission(S, from, nfm) {
     let r = {}; try { r = JSON.parse(nfm.response_json || '{}'); } catch (e) {}
-    if (r.ref) return; // the in-form flow finished (tapped Done); everything was already handled by the endpoint
+    if (r.ref) { await resv.sendPendingConfirmation(String(r.ref), from); return; } // tapped Done: the guest's response bubble is already in the chat, so our confirmation lands right after it
     await wa.log(from, 'inbound', `[form] ${r.name || ''} ${r.date || ''} ${r.time || ''} ${r.guests || ''}`);
     const token = await resv.sessionToken(from);
     const T = makeTime(S);
@@ -410,7 +410,7 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
   const SETTING_FIELDS = {
     venue_name: 'text', open_time: 'time', close_time: 'time', slot_minutes: 'int', max_guests_per_slot: 'int', max_guests_per_booking: 'int',
     min_notice_minutes: 'int', max_days_ahead: 'int', closed_weekdays: 'intarr', reservation_fee_kobo: 'int', service_fee_kobo: 'int',
-    hold_minutes: 'int', refund_hours: 'int', order_link: 'text', welcome_image_url: 'text', welcome_text: 'text', handover_number: 'phone',
+    hold_minutes: 'int', refund_hours: 'int', order_link: 'text', welcome_image_url: 'text', welcome_text: 'text', handover_number: 'phone', handover_number_2: 'phone',
     payments_enabled: 'bool', open_24_7: 'bool', reminder_hours: 'int', change_cutoff_hours: 'int', notify_changes: 'bool', enquiry_intro: 'text', venue_notes: 'text', flow_id: 'text',
   };
   api.get('/settings', wrap(async (req, res) => { const S = await loadSettings(ctx); res.json({ settings: S, paystackConfigured: ps.configured, whatsappConfigured: !!env.META_ACCESS_TOKEN }); }));
@@ -434,11 +434,12 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
   api.post('/settings/test-handover', wrap(async (req, res) => {
     const S = await loadSettings(ctx);
     const ok = await resv.notifyHandover(S, `Test from the ${S.venue_name} reservations dashboard. If you can read this, new reservations will arrive on this number.`, 'a test message');
-    res.json({ ok, note: ok ? 'Sent. If it does not show up, reply "okay" to the bot number once so WhatsApp releases it.' : 'No valid handover number saved yet.' });
+    res.json({ ok, note: ok ? 'Sent to every handover number. If it does not show up, reply "okay" to the bot number once from that number so WhatsApp releases it.' : 'No valid handover number saved yet.' });
   }));
   app.use('/api', api);
 
   app.reminders = reminders;
+  app.confirmations = { sendDue: resv.sendDueConfirmations };
   return app;
 }
 
@@ -450,6 +451,7 @@ if (require.main === module) {
   const app = buildApp({ pool, env, http });
   const port = Number(env.PORT || 3000);
   // unpaid holds past their time are marked expired so the dashboard never shows stale "pending" rows
+  setInterval(() => app.confirmations.sendDue().catch((e) => console.error('confirmation tick', e.message)), 20000);
   setInterval(() => app.reminders.tick().catch((e) => console.error('reminder tick', e.message)), 60000);
   setInterval(() => pool.query("update reservations set status='expired', updated_at=now() where status='pending_payment' and hold_expires_at < now()").catch(() => {}), 60000);
   app.listen(port, () => console.log(`Bali app listening on ${port}`));

@@ -80,7 +80,7 @@ function createResv(ctx, wa, ps) {
   }
 
   // form: {name, phone, date, time, guests}; sessionPhone = the guest's WhatsApp number (from the form link token)
-  async function createFromForm(form, sessionPhone) {
+  async function createFromForm(form, sessionPhone, opts = {}) {
     const S = await loadSettings(ctx); const T = makeTime(S, nowFn);
     const { errors, clean } = validate(S, T, form);
     if (Object.keys(errors).length) return { ok: false, errors };
@@ -102,8 +102,8 @@ function createResv(ctx, wa, ps) {
       const holdAt = needPay ? new Date(nowFn() + S.hold_minutes * 60000).toISOString() : null;
       const ins = await client.query(
         `insert into reservations (ref, phone_number, contact_phone, guest_name, guests, starts_at, status, hold_expires_at, source)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,'form') returning *`,
-        [ref, sessionPhone, clean.phone, clean.name, clean.guests, T.localToUtcISO(clean.date, clean.time), needPay ? 'pending_payment' : 'confirmed', holdAt]);
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning *`,
+        [ref, sessionPhone, clean.phone, clean.name, clean.guests, T.localToUtcISO(clean.date, clean.time), needPay ? 'pending_payment' : 'confirmed', holdAt, opts.source || 'form']);
       r = ins.rows[0];
       await client.query('commit');
     } catch (e) { try { await client.query('rollback'); } catch (_) {} throw e; } finally { client.release(); }
@@ -134,11 +134,16 @@ function createResv(ctx, wa, ps) {
   }
 
   // ---------- completion + handover ----------
+  // every configured handover number (up to two) gets the message; true if at least one was sent
+  function handoverNumbers(S) {
+    return [...new Set([S.handover_number, S.handover_number_2].map((n) => normalizePhone(n)).filter(Boolean))];
+  }
   async function notifyHandover(S, text, label) {
-    if (!S.handover_number) return false;
-    const to = normalizePhone(S.handover_number);
-    if (!to) return false;
-    try { await wa.send(to, text, label || 'a new reservation'); return true; } catch (e) { return false; }
+    let any = false;
+    for (const to of handoverNumbers(S)) {
+      try { await wa.send(to, text, label || 'a new reservation'); any = true; } catch (e) { /* the other number may still work */ }
+    }
+    return any;
   }
   function handoverText(r, S, T) {
     const p = T.utcToLocalParts(r.starts_at);
@@ -155,16 +160,42 @@ function createResv(ctx, wa, ps) {
   async function complete(r, S, T, { paid }) {
     const ok = await notifyHandover(S, handoverText(r, S, T), 'a new reservation');
     await pool.query('update reservations set handed_over_at = case when $2 then now() else handed_over_at end, updated_at = now() where ref=$1', [r.ref, ok]);
+    // A booking made inside the WhatsApp form: wait until the guest taps Done (their "response sent" bubble then shows FIRST, and our
+    // confirmation arrives after it). A 2 minute safety timer sends it anyway if they never tap Done.
+    if (r.source === 'flow') {
+      await pool.query("update reservations set confirm_msg_status = 'pending', confirm_due_at = now() + interval '2 minutes' where ref = $1", [r.ref]);
+      return;
+    }
+    await sendGuestConfirmation(r, S, T);
+  }
+
+  async function sendGuestConfirmation(r, S, T) {
+    const paid = !!r.paid_amount_kobo;
     const link = S.order_link ? `${S.order_link}${S.order_link.includes('?') ? '&' : '?'}ref=${r.ref}` : '';
     const credit = paid ? ` Your ${naira(S.reservation_fee_kobo)} is credited to your order on the day.` : '';
     const short = await sessionShort(r.phone_number);
     const manageUrl = `${base()}/m/${short}`;
-    const body = `Your table at ${S.venue_name} is confirmed ✅\n\nRef: ${r.ref}\nName: ${r.guest_name}\n${describe(r, T)}.${credit}${link ? `\n\nIf you would like to place an order ahead for that day, you can do that through this link: ${link}` : ''}`;
-    // One message with a real tap button (MANAGE BOOKING). Outside the 24h window only plain text is possible, so the link goes in the text.
+    const body = `Your table at ${S.venue_name} is confirmed ✅\n\nRef: ${r.ref}\nName: ${r.guest_name}\n${describe(r, T)}.${credit}${link ? `\n\nIf you would like to place an order ahead for that day, you can do that through this link: ${link}` : ''}\n\nTo change or cancel your reservation, you can manage it using the button below.`;
+    // One message with a real tap button (TAP TO MANAGE). Outside the 24h window only plain text is possible, so the link goes in the text.
     try {
-      if (await wa.withinWindow(r.phone_number, false)) await wa.sendCta(r.phone_number, { body, button: 'MANAGE BOOKING', url: manageUrl });
+      if (await wa.withinWindow(r.phone_number, false)) await wa.sendCta(r.phone_number, { body, button: 'TAP TO MANAGE', url: manageUrl });
       else await wa.send(r.phone_number, `${body}\n\nNeed to change or cancel? Manage your reservation here: ${manageUrl}`, 'your reservation');
     } catch (e) {}
+  }
+
+  // the guest finished the form (nfm_reply) or the safety timer fired: send the held confirmation, once
+  async function sendPendingConfirmation(ref, phone) {
+    const claim = await pool.query("update reservations set confirm_msg_status = 'sent' where ref = $1 and ($2::text is null or phone_number = $2) and confirm_msg_status = 'pending' returning *", [ref, phone || null]);
+    if (!claim.rows[0]) return false;
+    const S = await loadSettings(ctx); const T = makeTime(S, nowFn);
+    await sendGuestConfirmation(claim.rows[0], S, T);
+    return true;
+  }
+  async function sendDueConfirmations() {
+    const { rows } = await pool.query("select ref from reservations where confirm_msg_status = 'pending' and confirm_due_at <= now() order by confirm_due_at limit 50");
+    let n = 0;
+    for (const x of rows) { try { if (await sendPendingConfirmation(x.ref, null)) n += 1; } catch (e) { console.error('confirmation failed', x.ref, e.message); } }
+    return n;
   }
 
   async function confirmPayment(refOrRow) {
@@ -222,11 +253,17 @@ function createResv(ctx, wa, ps) {
     const tail = refund
       ? (refunded ? ` We have refunded ${naira(refund)}; it can take a few days to show.${refund < r.paid_amount_kobo ? ' The service fee is not refundable.' : ''}` : ' The team will process your refund shortly.')
       : (r.paid_amount_kobo ? ` As it is less than ${S.refund_hours} hours to your booking, the payment is not refunded.` : '');
-    // A guest who cancels on their reservation page sees the confirmation there, so no WhatsApp message (saves a Meta message).
-    // Only a cancellation made by staff must be told to the guest.
-    if (by === 'staff') { try { await wa.send(r.phone_number, `Sorry, we had to cancel your reservation ${r.ref} for ${describe(r, T)}.${tail}`, 'your reservation'); } catch (e) {} }
+    // The guest always gets a message about a cancellation (their own, or one made by the venue).
+    { const who = by === 'staff' ? `Sorry, we had to cancel your reservation ${r.ref} for ${describe(r, T)}.` : `Your reservation ${r.ref} for ${describe(r, T)} is cancelled.`;
+      try { await wa.send(r.phone_number, `${who}${tail}`, 'your reservation'); } catch (e) {} }
     if (by === 'guest' && S.notify_changes) await notifyHandover(S, `Reservation cancelled by guest: ${r.ref} ${r.guest_name} ${describe(r, T)}${refund ? ' (refunded ' + naira(refund) + ')' : ''}`, 'a cancelled reservation');
     return { ok: true, refund, refunded };
+  }
+
+  async function sendWithManage(phone, body) {
+    const manageUrl = `${base()}/m/${await sessionShort(phone)}`;
+    if (await wa.withinWindow(phone, false)) return wa.sendCta(phone, { body, button: 'TAP TO MANAGE', url: manageUrl });
+    return wa.send(phone, `${body}\n\nNeed to change or cancel? Manage your reservation here: ${manageUrl}`, 'your reservation');
   }
 
   // A guest changes their own reservation (date, time, guests). Their payment stays with the booking.
@@ -260,7 +297,7 @@ function createResv(ctx, wa, ps) {
       await client.query('commit');
     } catch (e) { try { await client.query('rollback'); } catch (_) {} throw e; } finally { client.release(); }
     if (S.notify_changes) await notifyHandover(S, `Reservation ${r.ref} was changed by the guest ✏️\nName: ${r.guest_name}\nPhone: ${r.contact_phone || r.phone_number}\nWas: ${describe(r, T)}\nNow: ${describe(upd, T)}`, 'a changed reservation');
-    // no WhatsApp message to the guest: the reservation page shows the new booking (saves a Meta message)
+    try { await sendWithManage(r.phone_number, `Your reservation ${r.ref} is updated ✅\n\nName: ${r.guest_name}\n${describe(upd, T)}\n\nTo change or cancel it again, you can manage it using the button below.`); } catch (e) {}
     return { ok: true, ref: r.ref, text: describe(upd, T) };
   }
 
@@ -279,6 +316,6 @@ function createResv(ctx, wa, ps) {
     return (await pool.query('select short_code from web_sessions where phone_number=$1', [phone])).rows[0].short_code;
   }
 
-  return { change, sessionShort, validate, createFromForm, confirmPayment, cancel, freeTimes, forGuest, sessionToken, describe, notifyHandover, guestsBooked };
+  return { sendPendingConfirmation, sendDueConfirmations, handoverNumbers, change, sessionShort, validate, createFromForm, confirmPayment, cancel, freeTimes, forGuest, sessionToken, describe, notifyHandover, guestsBooked };
 }
 module.exports = { createResv };

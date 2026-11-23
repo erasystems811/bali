@@ -23,6 +23,7 @@ const DEFAULTS = {
   welcome_image_url: null,
   welcome_text: '*Hey, welcome to Bali!* 👋\n\nPlease tap the button below to make your table reservation.',
   handover_number: null,
+  handover_number_2: null, // optional second number that gets the same messages
   flow_id: null,
   payments_enabled: true,
   enquiry_intro: 'Hi, welcome to Bali. Ask me anything about the venue.',

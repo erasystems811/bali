@@ -214,8 +214,8 @@
     const notifyCh = h('input', { type: 'checkbox', checked: S.notify_changes !== false }); F.notify_changes = () => notifyCh.checked;
     main.append(
       !whatsappConfigured ? h('div', { class: 'warn' }, 'WhatsApp is not connected on this server yet, so messages are only recorded, not sent.') : null,
-      h('div', { class: 'card sec' }, h('h3', {}, 'Handover'), h('div', { class: 'sub' }, 'Every completed reservation is sent to this WhatsApp number with the guest\'s name, phone, date, arrival time and guests.'),
-        h('div', { class: 'fg' }, field('handover_number', 'Handover WhatsApp number', 'tel', 'e.g. 0803 000 0000 or +234 803 000 0000')),
+      h('div', { class: 'card sec' }, h('h3', {}, 'Handover'), h('div', { class: 'sub' }, 'Every completed reservation is sent to these WhatsApp numbers with the guest\'s name, phone, date, arrival time and guests.'),
+        h('div', { class: 'fg' }, field('handover_number', 'Handover WhatsApp number', 'tel', 'e.g. 0803 000 0000 or +234 803 000 0000'), field('handover_number_2', 'Second handover number (optional)', 'tel', 'Gets exactly the same messages')),
         h('div', { class: 'sw', style: 'margin-top:14px' }, notifyCh, h('div', {}, h('b', {}, 'Also tell this number when a guest changes or cancels'))),
         h('div', { class: 'row', style: 'margin-top:14px' }, h('button', { class: 'btn', onclick: async (e) => { e.target.disabled = true; try { await save(true); const r = await api('/settings/test-handover', { method: 'POST' }); toast(r.ok ? 'Test message sent' : r.note, !r.ok); if (r.ok) alert(r.note); } catch (er) { toast(er.message, true); } e.target.disabled = false; } }, 'Save and send a test message'))),
       h('div', { class: 'card sec' }, h('h3', {}, 'Payment'), h('div', { class: 'sub' }, paystackConfigured ? 'Paystack is connected.' : 'Paystack is not connected yet. Add the secret key on the server before taking payments.'),
