@@ -43,8 +43,9 @@ input:focus,select:focus{border-color:var(--cream);box-shadow:0 0 0 3px rgba(232
 .sheet{background:#2a140a;border:1px solid var(--line);border-radius:20px 20px 0 0;padding:22px 18px calc(22px + env(safe-area-inset-bottom));width:100%;max-width:520px}
 </style>`;
 
-function notFound() {
-  return `${HEAD('Link not found')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"></div><h1>This link is not valid</h1><p class="sub">Please message Bali on WhatsApp again and tap the button in the reply.</p></div></body></html>`;
+function notFound(waNumber) {
+  const wa = `https://wa.me/${String(waNumber || '2348140490247').replace(/\D/g, '')}`;
+  return `${HEAD('Link not valid')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"></div><h1>This link is not valid</h1><p class="sub">Go back to WhatsApp and tap "I have paid", or message Bali again.</p><a class="btn" href="${esc(wa)}">Back to WhatsApp</a></div></body></html>`;
 }
 
 function form({ S, T, token, phone, askUrl, waNumber }) {

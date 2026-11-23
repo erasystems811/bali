@@ -204,7 +204,7 @@ function buildApp(ctx) {
   const waDigits = () => String(env.WHATSAPP_NUMBER || '2348140490247').replace(/\D/g, '');
   app.get('/go/:token/reserve', wrap(async (req, res) => {
     const s = await sessionFor(req.params.token);
-    if (!s) return res.status(404).send(pages.notFound());
+    if (!s) return res.status(404).send(pages.notFound(env.WHATSAPP_NUMBER));
     const S = await loadSettings(ctx);
     if (!S.flow_id) return res.redirect(`/reserve/${req.params.token}`);
     const chat = `https://wa.me/${waDigits()}`;
@@ -226,7 +226,7 @@ function buildApp(ctx) {
   // short chat link used in WhatsApp messages
   app.get('/c/:code', wrap(async (req, res) => {
     const { rows } = await pool.query('select token from web_sessions where short_code=$1', [String(req.params.code).slice(0, 20)]);
-    if (!rows[0]) return res.status(404).send(pages.notFound());
+    if (!rows[0]) return res.status(404).send(pages.notFound(env.WHATSAPP_NUMBER));
     res.redirect(`/ask/${rows[0].token}`);
   }));
 
@@ -237,7 +237,7 @@ function buildApp(ctx) {
   }
   app.get('/reserve/:token', wrap(async (req, res) => {
     const s = await sessionFor(req.params.token);
-    if (!s) return res.status(404).send(pages.notFound());
+    if (!s) return res.status(404).send(pages.notFound(env.WHATSAPP_NUMBER));
     const S = await loadSettings(ctx); const T = makeTime(S);
     res.send(pages.form({ S, T, token: req.params.token, phone: s.phone_number, askUrl: `${base()}/ask/${req.params.token}`, waNumber: env.WHATSAPP_NUMBER || '2348140490247' }));
   }));
@@ -250,11 +250,19 @@ function buildApp(ctx) {
   }));
   app.get('/reserve/:token/done', wrap(async (req, res) => {
     const s = await sessionFor(req.params.token);
-    if (!s) return res.status(404).send(pages.notFound());
+    if (!s) return res.status(404).send(pages.notFound(env.WHATSAPP_NUMBER));
     const S = await loadSettings(ctx); const T = makeTime(S);
-    const { rows } = await pool.query('select * from reservations where phone_number=$1 and ref=$2', [s.phone_number, String(req.query.ref || '')]);
+    // The payment page sends the guest back here and tacks its own details onto our link (for example "?ref=R-005?paymentReference=BALI-..."),
+    // which used to scramble the reference. Find the reservation from whatever arrives: our R-number, or the provider's payment reference.
+    const rawRef = String(req.query.ref || '');
+    const tail = rawRef.includes('?') ? new URLSearchParams(rawRef.slice(rawRef.indexOf('?') + 1)) : new URLSearchParams('');
+    const myRef = (rawRef.match(/R-\d+/i) || [])[0] || null;
+    const payRefs = [req.query.paymentReference, req.query.reference, req.query.trxref, tail.get('paymentReference'), tail.get('reference'), tail.get('trxref')].filter(Boolean).map(String);
+    const { rows } = await pool.query(
+      'select * from reservations where phone_number=$1 and (ref = $2 or paystack_ref = any($3::text[])) order by created_at desc limit 1',
+      [s.phone_number, myRef ? myRef.toUpperCase() : '', payRefs]);
     let r = rows[0];
-    if (!r) return res.status(404).send(pages.notFound());
+    if (!r) return res.status(404).send(pages.notFound(env.WHATSAPP_NUMBER));
     let state = r.status;
     if (r.status === 'pending_payment') { const c = await resv.confirmPayment(r); state = c.status; r = (await pool.query('select * from reservations where ref=$1', [r.ref])).rows[0]; }
     res.send(pages.done({ S, T, r, state, token: req.params.token, describe: resv.describe(r, T), waNumber: env.WHATSAPP_NUMBER || '2348140490247' }));
@@ -262,7 +270,7 @@ function buildApp(ctx) {
 
   app.get('/my/:token', wrap(async (req, res) => {
     const s = await sessionFor(req.params.token);
-    if (!s) return res.status(404).send(pages.notFound());
+    if (!s) return res.status(404).send(pages.notFound(env.WHATSAPP_NUMBER));
     const S = await loadSettings(ctx); const T = makeTime(S);
     const list = await resv.forGuest(s.phone_number);
     res.send(pages.manage({ S, T, token: req.params.token, list: list.map((r) => { const lp = T.utcToLocalParts(r.starts_at); return { ...r, text: resv.describe(r, T), ldate: lp.date, ltime: lp.time, hoursAway: (new Date(r.starts_at).getTime() - Date.now()) / 3600000 }; }), formUrl: `${base()}/go/${req.params.token}/reserve` }));
@@ -278,7 +286,7 @@ function buildApp(ctx) {
   // short manage link used in the confirmation message
   app.get('/m/:code', wrap(async (req, res) => {
     const { rows } = await pool.query('select token from web_sessions where short_code=$1', [String(req.params.code).slice(0, 20)]);
-    if (!rows[0]) return res.status(404).send(pages.notFound());
+    if (!rows[0]) return res.status(404).send(pages.notFound(env.WHATSAPP_NUMBER));
     res.redirect(`/my/${rows[0].token}`);
   }));
   app.post('/api/my/:token/cancel', wrap(async (req, res) => {
@@ -291,7 +299,7 @@ function buildApp(ctx) {
 
   app.get('/ask/:token', wrap(async (req, res) => {
     const s = await sessionFor(req.params.token);
-    if (!s) return res.status(404).send(pages.notFound());
+    if (!s) return res.status(404).send(pages.notFound(env.WHATSAPP_NUMBER));
     const S = await loadSettings(ctx);
     res.send(pages.ask({ S, token: req.params.token, formUrl: `${base()}/go/${req.params.token}/reserve`, chips: await enquiry.chips(), waNumber: env.WHATSAPP_NUMBER || '2348140490247' }));
   }));

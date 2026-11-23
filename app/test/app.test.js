@@ -644,6 +644,21 @@ async function http(method, url, { body, headers } = {}) {
   ok(/Payment received/.test((await call('GET', `/reserve/${im2Tok}/done?ref=${im2.json.data.ref}`)).text), 'coming back from the payment page after paying: confirmed straight away');
   await pool.query("update reservation_settings set confirm_via_webhook=false, payments_enabled=true, open_24_7=false where id=1");
 
+  console.log('\n7u. the payment return link survives what the payment page adds to it');
+  const rtRef = im2.json.data.ref; const rtPay = (await pool.query('select paystack_ref from reservations where ref=$1', [rtRef])).rows[0].paystack_ref;
+  const okPlain = await call('GET', `/reserve/${im2Tok}/done?ref=${rtRef}`);
+  const okScrambled = await call('GET', `/reserve/${im2Tok}/done?ref=${rtRef}?paymentReference=${encodeURIComponent(rtPay)}&paymentStatus=PAID`);
+  const okAmp = await call('GET', `/reserve/${im2Tok}/done?ref=${rtRef}&paymentReference=${encodeURIComponent(rtPay)}`);
+  const okRefOnly = await call('GET', `/reserve/${im2Tok}/done?paymentReference=${encodeURIComponent(rtPay)}`);
+  const okPaystack = await call('GET', `/reserve/${im2Tok}/done?trxref=${encodeURIComponent(rtPay)}&reference=${encodeURIComponent(rtPay)}`);
+  ok([okPlain, okScrambled, okAmp, okRefOnly, okPaystack].every((x) => x.status === 200 && /Payment received|Your table is confirmed|Confirming your payment/.test(x.text)), 'the return page finds the booking however the payment page tacks its details onto the link (?ref=R-1?paymentReference=..., &paymentReference=..., only the payment reference, Paystack style)');
+  const lost = await call('GET', `/reserve/${im2Tok}/done?ref=R-99999`);
+  ok(lost.status === 404 && lost.text.includes('Go back to WhatsApp and tap "I have paid", or message Bali again.') && /wa\.me\/2348140490247/.test(lost.text), 'when a link really is not valid, the page tells the guest to go back to WhatsApp and tap I have paid, or message Bali again (with a Back to WhatsApp button)');
+  const lost2 = await call('GET', '/reserve/nonsense/done?ref=R-1');
+  ok(lost2.text.includes('Go back to WhatsApp and tap "I have paid", or message Bali again.'), 'same wording for an unknown link');
+  const lost3 = await call('GET', '/ask/nonsense');
+  ok(lost3.status === 404 && lost3.text.includes('or message Bali again.'), 'and on the other pages');
+
   console.log('\n8. dashboard');
   ok((await call('GET', '/api/overview')).status === 401, 'API needs login');
   ok((await call('GET', '/dashboard/')).status === 302, 'dashboard redirects to login');
