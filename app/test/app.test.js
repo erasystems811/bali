@@ -57,7 +57,7 @@ async function http(method, url, { body, headers } = {}) {
     min_notice_minutes=60, max_days_ahead=60, closed_weekdays='{}', open_24_7=false, confirm_via_webhook=false, payments_enabled=false, handover_number='08031112222', welcome_image_url=null where id=1`);
   await pool.query("insert into dashboard_users (username, password_hash) values ('admin', $1)", [await bcrypt.hash('pw', 4)]);
 
-  const app = buildApp({ pool, env, http, noRateLimit: true, retryDelayMs: 1, flowTimeoutMs: 400 });
+  const appCtx = { pool, env, http, noRateLimit: true, retryDelayMs: 1, flowTimeoutMs: 400 }; const app = buildApp(appCtx);
   const server = app.listen(0); const base = `http://127.0.0.1:${server.address().port}`;
   const call = async (method, path, body, cookie) => {
     const r = await fetch(base + path, { method, redirect: 'manual', headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
@@ -273,10 +273,10 @@ async function http(method, url, { body, headers } = {}) {
   const hm = (d) => d;
   const ex = (data, token) => flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: token || FT, version: '3.0', data: hm(data) });
   const bad7 = await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '03:00', guests: '2' });
-  ok(bad7.json.screen === 'RESERVE' && bad7.json.data.has_error && /between/.test(bad7.json.data.error) && bad7.json.data.name_init === 'Kunle Ade' && bad7.json.data.date_init === day(20), 'a bad time sends the guest back with the reason and their entries kept');
-  ok((await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803', date: day(20), time: '19:00', guests: '2' })).json.data.error.includes('valid phone'), 'bad phone caught inside the form');
-  ok((await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '19:00', guests: '9' })).json.data.error.includes('more than 8'), 'too many guests caught inside the form');
-  ok((await ex({ action: 'reserve', name: 'X', phone: '0803 123 4567', date: day(20), time: '19:00', guests: '2' }, 'bali-nope')).json.data.error.includes('expired'), 'a stale or forged form token is refused');
+  ok(bad7.json.screen === 'RESERVE' && /between/.test(bad7.json.data.error_message) && Object.keys(bad7.json.data).join() === 'error_message', 'a bad time: the guest stays on the form with a message, and nothing they typed is cleared (the form is not redrawn)');
+  ok((await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803', date: day(20), time: '19:00', guests: '2' })).json.data.error_message.includes('valid phone'), 'bad phone caught inside the form');
+  ok((await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '19:00', guests: '9' })).json.data.error_message.includes('more than 8'), 'too many guests caught inside the form');
+  ok((await ex({ action: 'reserve', name: 'X', phone: '0803 123 4567', date: day(20), time: '19:00', guests: '2' }, 'bali-nope')).json.data.error_message.includes('expired'), 'a stale or forged form token is refused');
   const hb = sent.length;
   const good = await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '19:15', guests: '4' });
   ok(good.json.screen === 'PAY' && /checkout\.paystack\.com/.test(good.json.data.pay_url) && good.json.data.amount_label === 'Pay ₦20,500' && /20,000/.test(good.json.data.detail) && !/service/i.test(good.json.data.detail) && !/held for|15 minutes/i.test(good.json.data.detail) && good.json.data.has_fee_note === true && /includes a ₦500 service charge.$/.test(good.json.data.fee_note), 'payment screen: the total, no hold time, the service charge only as one small note at the end');
@@ -284,9 +284,9 @@ async function http(method, url, { body, headers } = {}) {
   ok(!sent.slice(hb).some((x) => x.to === H), 'no WhatsApp message is sent when the payment screen appears (the form already shows it, saving a Meta message)');
   const kref = good.json.data.ref;
   const unpaid = await ex({ action: 'check', ref: kref });
-  ok(unpaid.json.screen === 'PAY' && unpaid.json.data.has_note && /waiting for your payment/.test(unpaid.json.data.note), 'tapping I have paid before paying shows a gentle note');
+  ok(unpaid.json.screen === 'WAIT' && unpaid.json.data.has_pay_link === true && /not received your payment/.test(unpaid.json.data.message), 'tapping I have paid before paying: a Confirming your payment screen (with the payment link to go back to)');
   const stolen = (await ex({ action: 'check', ref: kref }, 'bali-' + (await tokenOf('2348012345001')))).json;
-  ok(stolen.screen === 'PAY' && stolen.data.amount_label === 'Start again' && !stolen.data.pay_url.includes('paystack'), "another guest's token cannot touch this reservation");
+  ok(!stolen.data.ref && /could not find/.test(stolen.data.error_message), "another guest's token cannot touch this reservation");
   const kr = (await pool.query('select paystack_ref from reservations where ref=$1', [kref])).rows[0].paystack_ref; paid.add(kr);
   const done7 = await ex({ action: 'check', ref: kref }); await settle();
   ok(done7.json.screen === 'DONE' && done7.json.data.credit.includes('credited') && /link to order ahead are in this chat/.test(done7.json.data.credit) && done7.json.data.order_url === undefined, 'after paying, the confirmation screen sends them back to the chat for the order-ahead link');
@@ -300,13 +300,13 @@ async function http(method, url, { body, headers } = {}) {
   ok(sent.slice(bdone).filter((x) => x.to === H).length === 1, 'the confirmation is only ever sent once');
   // (finishing the form is covered just above)
   const full7 = await ex({ action: 'reserve', name: 'Late Guest', phone: '0803 999 0000', date: day(20), time: '19:30', guests: '8' });
-  ok(full7.json.screen === 'RESERVE' && /fully booked/.test(full7.json.data.error), 'a full time is reported inside the form');
+  ok(full7.json.screen === 'RESERVE' && /fully booked/.test(full7.json.data.error_message), 'a full time is reported inside the form');
   await pool.query("update reservation_settings set payments_enabled=false where id=1");
   const free7 = await ex({ action: 'reserve', name: 'Free Guest', phone: '0803 777 0000', date: day(21), time: '18:00', guests: '2' }); await settle();
   ok(free7.json.screen === 'DONE' && !free7.json.data.credit.includes('credited') && /link to order ahead are in this chat/.test(free7.json.data.credit), 'payments off: straight to the confirmation screen');
   await pool.query("update reservation_settings set payments_enabled=true where id=1");
   const fj = require('../lib/flow').flowJson('AAAA');
-  ok(fj.screens.map((s) => s.id).join() === 'RESERVE,PAY,DONE' && fj.data_api_version === '3.0' && fj.screens[2].terminal, 'form definition has the three screens and an endpoint');
+  ok(fj.screens.map((s) => s.id).join() === 'RESERVE,PAY,WAIT,DONE' && fj.data_api_version === '3.0' && fj.screens[3].terminal && fj.routing_model.PAY.includes('WAIT') && Object.entries(fj.routing_model).every(([k, v]) => !v.includes(k)), 'form definition: four screens, an endpoint, forward-only routing (no screen leads to itself)');
 
   console.log('\n7e. capacity is optional (0 = unlimited)');
   await pool.query("update reservation_settings set max_guests_per_slot=0 where id=1");
@@ -332,7 +332,7 @@ async function http(method, url, { body, headers } = {}) {
   const ft24 = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + t24, version: '3.0', data: { action: 'reserve', name: 'Typed Time', phone: '0803 222 3333', date: day(27), time: '11:45 pm', guests: '2' } });
   ok(ft24.json.screen === 'PAY' || ft24.json.screen === 'DONE', 'typing "11:45 pm" in the form works');
   const amb = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + t24, version: '3.0', data: { action: 'reserve', name: 'Typed Time', phone: '0803 222 3333', date: day(27), time: '7:30', guests: '2' } });
-  ok(amb.json.screen === 'RESERVE' && /AM or PM/.test(amb.json.data.error), 'an ambiguous typed time (older form versions) is sent back asking for AM or PM');
+  ok(amb.json.screen === 'RESERVE' && /AM or PM/.test(amb.json.data.error_message), 'an ambiguous typed time (older form versions) is sent back asking for AM or PM');
   const lo = await require('../lib/core').loadSettings({ pool });
   ok(lo.open_time === '00:00' && lo.close_time === '24:00', 'settings expose 24 hour hours');
   await pool.query("update reservation_settings set open_24_7=false, max_guests_per_slot=10, max_guests_per_booking=8 where id=1");
@@ -373,12 +373,12 @@ async function http(method, url, { body, headers } = {}) {
   ok(!(real.json.screen === 'RESERVE'), 'and never wipe the guest\'s entries by returning an empty form');
   const withStep = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: FT, version: '3.0', data: { ...realBody, step: 'reserve', name: 'Step Payload', date: day(31) } });
   ok(withStep.json.screen === 'PAY' || withStep.json.screen === 'DONE', 'the new step key works too');
-  if (real.json.screen === 'PAY') {
-    const chk = await flowCall({ action: 'data_exchange', screen: 'PAY', flow_token: FT, version: '3.0', data: { ref: real.json.data.ref } });
-    ok(chk.json.screen === 'PAY' && chk.json.data.has_note, 'a payment check with only a ref is understood');
+  if (withStep.json.screen === 'PAY') {
+    const chk = await flowCall({ action: 'data_exchange', screen: 'PAY', flow_token: FT, version: '3.0', data: { ref: withStep.json.data.ref } });
+    ok(chk.json.screen === 'WAIT', 'a payment check with only a ref is understood');
   }
   const errBack = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: FT, version: '3.0', data: { ...realBody, name: 'Typed Name', phone: '0803 444 5555', time: '04:00', date: day(32), guests: 'abc' } });
-  ok(errBack.json.screen === 'RESERVE' && errBack.json.data.name_init === 'Typed Name' && errBack.json.data.phone_init === '0803 444 5555', 'when something is wrong the typed name and phone come straight back');
+  ok(errBack.json.screen === 'RESERVE' && !!errBack.json.data.error_message && !('name_init' in errBack.json.data), 'when something is wrong the guest stays on the form with a message; typed name and phone stay as they are');
   console.log('\n7j. the AI (Claude) answers only from the knowledge base');
   env.ANTHROPIC_API_KEY = 'ak-test';
   await pool.query("update knowledge_base set answer = 'We have a lovely terrace overlooking the garden.' where question = 'Do you have parking?'");
@@ -548,8 +548,8 @@ async function http(method, url, { body, headers } = {}) {
   payHang = true; const slwStart = Date.now();
   const slw = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + slwTok, version: '3.0', data: { step: 'reserve', name: 'Slow Pay', phone: '0803 555 1212', date: day(38), time: '20:00', guests: '2' } });
   const slwMs = Date.now() - slwStart; payHang = false;
-  ok(slw.json.screen === 'RESERVE' && /took too long/.test(slw.json.data.error) && slwMs < 1200, 'a payment provider that takes too long: the form answers within the time limit with a clear message (' + slwMs + 'ms)');
-  ok(slw.json.data.name_init === 'Slow Pay' && slw.json.data.phone_init === '0803 555 1212' && slw.json.data.date_init === day(38) && slw.json.data.time_init === '20:00' && slw.json.data.guests_init === '2', 'and their entries are kept so they only tap Continue again');
+  ok(slw.json.screen === 'RESERVE' && /took too long/.test(slw.json.data.error_message) && slwMs < 1200, 'a payment provider that takes too long: the form answers within the time limit with a clear message (' + slwMs + 'ms)');
+  ok(Object.keys(slw.json.data).join() === 'error_message', 'and the guest stays on the form with their entries untouched');
   await new Promise((r) => setTimeout(r, 1700));
   const slw2 = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + slwTok, version: '3.0', data: { step: 'reserve', name: 'Slow Pay', phone: '0803 555 1212', date: day(38), time: '20:00', guests: '2' } });
   ok(slw2.json.screen === 'PAY', 'tapping Continue again goes straight through to payment once the provider is back');
@@ -577,7 +577,7 @@ async function http(method, url, { body, headers } = {}) {
   const pg1 = (await call('GET', `/reserve/${whTok}/done?ref=${whRef}`)).text;
   ok(/Waiting for your payment/.test(pg1) && !/Your table is confirmed/.test(pg1), 'return page: paid but the webhook has not arrived: it still says waiting, never confirmed');
   const chk1 = await flowCall({ action: 'data_exchange', screen: 'PAY', flow_token: 'bali-' + whTok, version: '3.0', data: { step: 'check', ref: whRef } });
-  ok(chk1.json.screen === 'PAY' && chk1.json.data.has_note && /waiting for your payment to be confirmed/.test(chk1.json.data.note), 'the I-have-paid button: still the payment screen, with a waiting note');
+  ok(chk1.json.screen === 'WAIT' && /received your payment/.test(chk1.json.data.message) && chk1.json.data.has_pay_link === false, 'I have paid, money received but the webhook has not arrived: a Confirming your payment screen');
   ok((await pool.query('select status from reservations where ref=$1', [whRef])).rows[0].status === 'pending_payment' && !sent.slice(hw0).some((x) => x.to === HANDOVER || /confirmed/.test(x.text || '')), 'nothing is confirmed, handed over or messaged yet');
   await call('POST', '/webhook/paystack', { event: 'charge.success', data: { reference: whPay } }); await settle();
   ok((await pool.query('select status from reservations where ref=$1', [whRef])).rows[0].status === 'confirmed', 'the webhook confirms it');
@@ -589,6 +589,41 @@ async function http(method, url, { body, headers } = {}) {
   const wh2 = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + wh2Tok, version: '3.0', data: { step: 'reserve', name: 'Never Paid', phone: '0803 444 1313', date: day(37), time: '21:00', guests: '2' } });
   await call('POST', '/webhook/paystack', { event: 'charge.success', data: { reference: (await pool.query('select paystack_ref from reservations where ref=$1', [wh2.json.data.ref])).rows[0].paystack_ref } }); await settle();
   ok((await pool.query('select status from reservations where ref=$1', [wh2.json.data.ref])).rows[0].status === 'pending_payment', 'a webhook for a payment that never actually happened confirms nothing (it is re-checked with the provider)');
+  await pool.query("update reservation_settings set confirm_via_webhook=false, payments_enabled=true, open_24_7=false where id=1");
+
+  console.log('\n7s. I have paid: wait for the confirmation instead of refusing');
+  await pool.query("update reservation_settings set confirm_via_webhook=true, payments_enabled=true, open_24_7=true where id=1");
+  appCtx.flowPollMs = 1500; appCtx.flowPollEveryMs = 60;
+  const w_mkRes = async (n, name) => { const ph = '23480123459' + n; await inbound(ph, 'w' + n); const tk = await tokenOf(ph); const r0 = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + tk, version: '3.0', data: { step: 'reserve', name, phone: '0803 100 20' + n, date: day(41), time: '20:00', guests: '2' } }); return { tk, ref: r0.json.data.ref, ft: 'bali-' + tk }; };
+  const w_chk = (g, screen) => flowCall({ action: 'data_exchange', screen: screen || 'PAY', flow_token: g.ft, version: '3.0', data: { step: 'check', ref: g.ref } });
+  const w_payRef = async (g) => (await pool.query('select paystack_ref from reservations where ref=$1', [g.ref])).rows[0].paystack_ref;
+  // 1) the webhook arrives while the form is still w_waiting: no extra tap needed
+  const w_g1 = await w_mkRes('81', 'Wait One'); paid.add(await w_payRef(w_g1));
+  const w_t1 = Date.now(); const w_waiting = w_chk(w_g1);
+  setTimeout(() => call('POST', '/webhook/paystack', { event: 'charge.success', data: { reference: w_payRef0 } }), 300);
+  const w_payRef0 = await w_payRef(w_g1);
+  const w_r1 = await w_waiting; const w_ms1 = Date.now() - w_t1;
+  ok(w_r1.json.screen === 'DONE' && w_ms1 >= 250 && w_ms1 < 1500, 'the form waits (WhatsApp shows its own spinner) and moves on by itself the moment the webhook arrives (' + w_ms1 + 'ms)');
+  // 2) not paid at all
+  const w_g2 = await w_mkRes('82', 'Wait Two'); appCtx.flowPollMs = 200;
+  const w_r2 = await w_chk(w_g2);
+  ok(w_r2.json.screen === 'WAIT' && w_r2.json.data.has_pay_link === true && /not received your payment/.test(w_r2.json.data.message) && /^https:\/\/checkout\.paystack\.com\//.test(w_r2.json.data.pay_url), 'not paid: after the wait, a Confirming your payment screen that says so and links back to the payment page');
+  // 3) paid but the webhook is late
+  paid.add(await w_payRef(w_g2));
+  const w_r3 = await w_chk(w_g2);
+  ok(w_r3.json.screen === 'WAIT' && w_r3.json.data.has_pay_link === false && /received your payment and are confirming/.test(w_r3.json.data.message), 'paid but the webhook is late: the screen says the payment was received and is being confirmed');
+  // 4) tapping Check again on that screen when still w_waiting: stay, with a message (never a redraw)
+  const w_r4 = await w_chk(w_g2, 'WAIT');
+  ok(w_r4.json.screen === 'WAIT' && Object.keys(w_r4.json.data).join() === 'error_message' && /Still confirming/.test(w_r4.json.data.error_message), 'Check again while still w_waiting: the guest stays on the screen with a message');
+  // 5) the webhook finally arrives
+  await call('POST', '/webhook/paystack', { event: 'charge.success', data: { reference: await w_payRef(w_g2) } });
+  const w_r5 = await w_chk(w_g2, 'WAIT');
+  ok(w_r5.json.screen === 'DONE', 'then Check again moves to the confirmed screen');
+  // 6) a reservation that is no longer held
+  const w_g3 = await w_mkRes('83', 'Wait Three'); await pool.query("update reservations set status='expired' where ref=$1", [w_g3.ref]);
+  const w_r6 = await w_chk(w_g3);
+  ok(w_r6.json.screen === 'PAY' && /no longer held/.test(w_r6.json.data.error_message), 'an expired hold: the guest stays on the payment screen with a clear message');
+  delete appCtx.flowPollMs; delete appCtx.flowPollEveryMs;
   await pool.query("update reservation_settings set confirm_via_webhook=false, payments_enabled=true, open_24_7=false where id=1");
 
   console.log('\n8. dashboard');

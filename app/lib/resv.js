@@ -270,6 +270,12 @@ function createResv(ctx, wa, ps) {
     return wa.send(phone, `${body}\n\nNeed to change or cancel? Manage your reservation here: ${manageUrl}`, 'your reservation');
   }
 
+  async function providerPaid(r) {
+    if (!r || !r.paystack_ref) return false;
+    const v = await ps.verify(r.paystack_ref);
+    return !!(v && v.status === 'success');
+  }
+
   // A guest changes their own reservation (date, time, guests). Their payment stays with the booking.
   async function change(ref, sessionPhone, input) {
     const S = await loadSettings(ctx); const T = makeTime(S, nowFn);
@@ -320,6 +326,6 @@ function createResv(ctx, wa, ps) {
     return (await pool.query('select short_code from web_sessions where phone_number=$1', [phone])).rows[0].short_code;
   }
 
-  return { sendPendingConfirmation, sendDueConfirmations, handoverNumbers, change, sessionShort, validate, createFromForm, confirmPayment, cancel, freeTimes, forGuest, sessionToken, describe, notifyHandover, guestsBooked };
+  return { providerPaid, sendPendingConfirmation, sendDueConfirmations, handoverNumbers, change, sessionShort, validate, createFromForm, confirmPayment, cancel, freeTimes, forGuest, sessionToken, describe, notifyHandover, guestsBooked };
 }
 module.exports = { createResv };

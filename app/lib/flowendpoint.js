@@ -1,17 +1,20 @@
 // The server side of Bali's WhatsApp form: availability, the payment screen and confirmation, all INSIDE the form.
-const { loadSettings, makeTime, naira, normalizePhone } = require('./core');
+//
+// How the form is allowed to answer (learned the hard way):
+//  - Moving FORWARD to another screen is always fine (RESERVE -> PAY -> WAIT -> DONE).
+//  - To REFUSE a step and keep the guest where they are (bad time, not paid yet ...) the answer is { screen: <current>, data: { error_message } }.
+//    WhatsApp then shows the message and leaves the screen exactly as it is, so nothing the guest typed is cleared. Answering with the same
+//    screen and fresh data instead leaves the form spinning forever.
+const { loadSettings, makeTime, naira } = require('./core');
 const flow = require('./flow');
 
 function createFlowEndpoint(ctx, resv) {
-  const { pool, env } = ctx;
-  const base = () => (env.APP_BASE_URL || '').replace(/\/$/, '');
+  const { pool } = ctx;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const formScreen = (S, over = {}) => ({ screen: 'RESERVE', data: { ...flow.flowData(S, {}), has_error: false, error: ' ', ...over } });
-
-  // keep what the guest already typed when we send them back to fix something
-  function keep(form) {
-    return { name_init: String(form.name || ''), phone_init: String(form.phone || ''), date_init: String(form.date || ''), time_init: String(form.time || '19:00'), guests_init: String(form.guests || '') };
-  }
+  // stay on the current screen and show a message
+  const stay = (screen, message) => ({ screen: screen || 'RESERVE', data: { error_message: message } });
 
   async function sessionFor(flowToken) {
     const token = String(flowToken || '').replace(/^bali-/, '');
@@ -20,7 +23,7 @@ function createFlowEndpoint(ctx, resv) {
     return rows[0] || null;
   }
 
-  function payScreen(S, T, r, url, note) {
+  function payScreen(S, T, r, url) {
     const total = S.reservation_fee_kobo + S.service_fee_kobo;
     return {
       screen: 'PAY',
@@ -29,19 +32,14 @@ function createFlowEndpoint(ctx, resv) {
         detail: `Pay ${naira(total)} to confirm your table. ${naira(S.reservation_fee_kobo)} of it is credited to your food and drinks order on the day.`,
         amount_label: `Pay ${naira(total)}`,
         pay_url: url, ref: r.ref,
-        has_note: !!note, note: note || ' ',
+        has_note: false, note: ' ',
         has_fee_note: true, fee_note: `The total includes a ${naira(S.service_fee_kobo)} service charge.`,
       },
     };
   }
-  function startOver(session, note) {
-    return {
-      screen: 'PAY',
-      data: {
-        summary: 'This reservation is no longer held.', detail: 'Tap the button to start a new reservation.',
-        amount_label: 'Start again', pay_url: `${base()}/go/${session.token}/reserve`, ref: 'none', has_note: true, note: note || 'Your reservation is no longer held.', has_fee_note: false, fee_note: ' ',
-      },
-    };
+  // "confirming your payment": shown when the guest taps I have paid and the payment is not confirmed yet
+  function waitScreen(r, message, showPayLink) {
+    return { screen: 'WAIT', data: { message, has_pay_link: !!showPayLink, pay_url: r.paystack_url || 'https://wa.me', ref: r.ref } };
   }
   function doneScreen(S, T, r) {
     return {
@@ -54,44 +52,62 @@ function createFlowEndpoint(ctx, resv) {
     };
   }
 
+  async function freshReservation(ref, phone) {
+    const { rows } = await pool.query('select * from reservations where ref=$1 and phone_number=$2', [String(ref || ''), phone]);
+    return rows[0] || null;
+  }
+
   async function handle(req) {
     const { action, screen, data, flow_token: flowToken } = req;
     if (action === 'ping') return { data: { status: 'active' } };
     if (data && data.error) return { data: { acknowledged: true } };      // the form reported a client side error
     const S = await loadSettings(ctx); const T = makeTime(S);
     const session = await sessionFor(flowToken);
-    if (!session) return formScreen(S, { has_error: true, error: 'This form has expired. Please send us a message on WhatsApp to get a fresh one.' });
+    if (!session) {
+      if (action === 'data_exchange') return stay(screen, 'This form has expired. Please send us a message on WhatsApp to get a fresh one.');
+      return formScreen(S, { has_error: true, error: 'This form has expired. Please send us a message on WhatsApp to get a fresh one.' });
+    }
     if (action === 'INIT' || action === 'BACK') return formScreen(S, {});
 
     if (action !== 'data_exchange') return formScreen(S, {});
-    // WhatsApp drops a payload key literally named "action", so the form sends "step"; if neither arrives (as in the real traffic
-    // before this fix) the request is recognised by its content so it can never fall through to a blank form
+    // WhatsApp drops a payload key literally named "action", so the form sends "step"; if neither arrives the request is recognised by
+    // its content so it can never fall through to a blank form
     const step = (data && (data.step || data.action)) || (data && data.name !== undefined ? 'reserve' : data && data.ref ? 'check' : undefined);
 
     if (step === 'reserve') {
-      // the form sends hour + minute from two pick lists; a typed `time` is still accepted (older form versions)
       // the form sends the picked time as HH:MM; hour + minute (a short-lived older version) is still understood
       const picked = data.time || (data.hour !== undefined && data.hour !== '' ? `${String(data.hour).padStart(2, '0')}:${String(data.minute || '0').padStart(2, '0')}` : '');
       const form = { name: data.name, phone: data.phone, date: flow.normalizeDate(data.date, S), time: flow.normalizeTime(picked), guests: data.guests };
       const out = await resv.createFromForm(form, session.phone_number, { source: 'flow' });
-      if (!out.ok) {
-        const msg = Object.values(out.errors || {})[0] || 'Something went wrong with that booking.';
-        return formScreen(S, { ...keep(form), has_error: true, error: msg });
-      }
-      const { rows } = await pool.query('select * from reservations where ref=$1', [out.ref]);
-      const r = rows[0];
+      if (!out.ok) return stay('RESERVE', Object.values(out.errors || {})[0] || 'Something went wrong with that booking.'); // the form keeps what they typed
+      const r = await freshReservation(out.ref, session.phone_number);
       if (out.status === 'pending_payment') return payScreen(S, T, r, out.payUrl);
       return doneScreen(S, T, r);
     }
 
     if (step === 'check') {
-      const { rows } = await pool.query('select * from reservations where ref=$1 and phone_number=$2', [String(data.ref || ''), session.phone_number]);
-      let r = rows[0];
-      if (!r) return startOver(session, 'I could not find that reservation.');
-      if (r.status === 'pending_payment') { await resv.confirmPayment(r); r = (await pool.query('select * from reservations where ref=$1', [r.ref])).rows[0]; }
+      let r = await freshReservation(data.ref, session.phone_number);
+      if (!r) return stay(screen || 'PAY', 'We could not find that reservation. Please close the form and start again.');
+      if (r.status === 'pending_payment') {
+        await resv.confirmPayment(r); // (in webhook-only mode this just reports "pending")
+        // Give the payment webhook a few seconds to arrive. WhatsApp shows its own loading spinner while we wait, then the guest moves on
+        // without having to tap again. Kept well inside WhatsApp's ~10 second limit.
+        const pollMs = ctx.flowPollMs !== undefined ? ctx.flowPollMs : Math.max(0, (ctx.flowTimeoutMs || 8000) - 2500);
+        const every = ctx.flowPollEveryMs || 600;
+        const started = Date.now();
+        for (;;) {
+          r = (await freshReservation(r.ref, session.phone_number)) || r;
+          if (r.status !== 'pending_payment' || Date.now() - started >= pollMs) break;
+          await sleep(every);
+        }
+      }
       if (r.status === 'confirmed') return doneScreen(S, T, r);
-      if (r.status === 'pending_payment') return payScreen(S, T, r, r.paystack_url, 'We are waiting for your payment to be confirmed. This takes a few seconds. If you have not paid yet, tap Pay first. Then tap this button again.');
-      return startOver(session, 'That reservation is no longer held.');
+      if (r.status !== 'pending_payment') return stay(screen || 'PAY', 'That reservation is no longer held. Please close the form and start again.');
+      const paid = await resv.providerPaid(r);
+      if (screen === 'WAIT') return stay('WAIT', paid ? 'Still confirming your payment. Please tap Check again in a few seconds.' : 'We have not received your payment yet. Open the payment page below, pay, then tap Check again.');
+      return waitScreen(r, paid
+        ? 'We have received your payment and are confirming your table. This only takes a moment. Tap Check again.'
+        : 'We have not received your payment yet. If you have not paid, open the payment page below. Once you have paid, tap Check again.', !paid);
     }
     return formScreen(S, {});
   }

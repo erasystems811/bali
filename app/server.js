@@ -166,8 +166,7 @@ function buildApp(ctx) {
       out = await Promise.race([flowEndpoint.handle(dec.decrypted), slow]);
       if (out && out.__slow) {
         console.error(`[flow] SLOW (> ${ctx.flowTimeoutMs || 8000}ms) step=${(d.data && (d.data.step || d.data.action)) || '-'}`);
-        const dd = d.data || {};
-        out = { screen: 'RESERVE', data: { ...flow.flowData(await loadSettings(ctx), {}), name_init: String(dd.name || ''), phone_init: String(dd.phone || ''), date_init: String(dd.date || flow.flowData(await loadSettings(ctx), {}).date_init), time_init: String(dd.time || '19:00'), guests_init: String(dd.guests || '2'), has_error: true, error: 'That took too long. Please tap Continue again.' } };
+        out = { screen: d.screen || 'RESERVE', data: { error_message: 'That took too long. Please try again.' } }; // stay where they are, nothing cleared
       }
       console.log(`[flow] -> ${out.screen || 'data'} in ${Date.now() - started}ms${out.data && out.data.error && out.data.error.trim() ? ' error: ' + out.data.error : ''}`);
     } catch (e) {

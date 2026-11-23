@@ -22,12 +22,13 @@ function flowJson(logoBase64) {
   return {
     version: '6.2',
     data_api_version: '3.0',
-    routing_model: { RESERVE: ['PAY', 'DONE'], PAY: ['DONE'], DONE: [] },
+    routing_model: { RESERVE: ['PAY', 'DONE'], PAY: ['WAIT', 'DONE'], WAIT: ['DONE'], DONE: [] },
     screens: [
       {
         id: 'RESERVE', title: 'Reserve a table',
         data: {
           intro: str('Tell us when you are coming and we will hold your table.'),
+          error_message: str('Error'),
           has_error: { type: 'boolean', __example__: false },
           error: str(' '),
           name_init: str('Ada Okafor'), phone_init: str('+2348012345678'), date_init: str('2026-12-05'), time_init: str('19:00'), guests_init: str('2'),
@@ -69,6 +70,7 @@ function flowJson(logoBase64) {
           note: str(' '),
           has_fee_note: { type: 'boolean', __example__: true },
           fee_note: str('The total includes a ₦500 service charge.'),
+          error_message: str('Error'),
         },
         layout: {
           type: 'SingleColumnLayout',
@@ -82,6 +84,26 @@ function flowJson(logoBase64) {
             { type: 'TextCaption', text: 'After paying, come back here and tap "I have paid".' },
             { type: 'TextCaption', text: '${data.fee_note}', visible: '${data.has_fee_note}' },
             { type: 'Footer', label: 'I have paid', 'on-click-action': { name: 'data_exchange', payload: { step: 'check', ref: '${data.ref}' } } },
+          ],
+        },
+      },
+      {
+        id: 'WAIT', title: 'Confirming your payment',
+        data: {
+          message: str('We are waiting for your payment to be confirmed. Tap Check again in a moment.'),
+          has_pay_link: { type: 'boolean', __example__: false },
+          pay_url: str('https://checkout.paystack.com/abc'),
+          ref: str('R-1234'),
+          error_message: str('Error'),
+        },
+        layout: {
+          type: 'SingleColumnLayout',
+          children: [
+            logo,
+            { type: 'TextHeading', text: 'Confirming your payment' },
+            { type: 'TextBody', text: '${data.message}' },
+            { type: 'EmbeddedLink', text: 'Open the payment page', visible: '${data.has_pay_link}', 'on-click-action': { name: 'open_url', url: '${data.pay_url}' } },
+            { type: 'Footer', label: 'Check again', 'on-click-action': { name: 'data_exchange', payload: { step: 'check', ref: '${data.ref}' } } },
           ],
         },
       },
