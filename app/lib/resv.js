@@ -157,7 +157,9 @@ function createResv(ctx, wa, ps) {
     await pool.query('update reservations set handed_over_at = case when $2 then now() else handed_over_at end, updated_at = now() where ref=$1', [r.ref, ok]);
     const link = S.order_link ? `${S.order_link}${S.order_link.includes('?') ? '&' : '?'}ref=${r.ref}` : '';
     const credit = paid ? ` Your ${naira(S.reservation_fee_kobo)} is credited to your order on the day.` : '';
-    const msg = `Your table at ${S.venue_name} is confirmed ✅\n\nRef: ${r.ref}\nName: ${r.guest_name}\n${describe(r, T)}.${credit}${link ? `\n\nIf you would like to place an order ahead for that day, you can do that through this link: ${link}` : ''}`;
+    const short = await sessionShort(r.phone_number);
+    const manage = `\n\nNeed to change or cancel? Manage your reservation here: ${base()}/m/${short}`;
+    const msg = `Your table at ${S.venue_name} is confirmed ✅\n\nRef: ${r.ref}\nName: ${r.guest_name}\n${describe(r, T)}.${credit}${link ? `\n\nIf you would like to place an order ahead for that day, you can do that through this link: ${link}` : ''}${manage}`;
     try { await wa.send(r.phone_number, msg, 'your reservation'); } catch (e) {}
   }
 
@@ -216,10 +218,46 @@ function createResv(ctx, wa, ps) {
     const tail = refund
       ? (refunded ? ` We have refunded ${naira(refund)}; it can take a few days to show.${refund < r.paid_amount_kobo ? ' The service fee is not refundable.' : ''}` : ' The team will process your refund shortly.')
       : (r.paid_amount_kobo ? ` As it is less than ${S.refund_hours} hours to your booking, the payment is not refunded.` : '');
-    const who = by === 'staff' ? 'Sorry, we had to cancel' : 'Your cancellation is done:';
-    try { await wa.send(r.phone_number, `${who} your reservation ${r.ref} for ${describe(r, T)}.${tail}`, 'your reservation'); } catch (e) {}
-    if (by === 'guest') await notifyHandover(S, `Reservation cancelled by guest: ${r.ref} ${r.guest_name} ${describe(r, T)}${refund ? ' (refunded ' + naira(refund) + ')' : ''}`, 'a cancelled reservation');
+    // A guest who cancels on their reservation page sees the confirmation there, so no WhatsApp message (saves a Meta message).
+    // Only a cancellation made by staff must be told to the guest.
+    if (by === 'staff') { try { await wa.send(r.phone_number, `Sorry, we had to cancel your reservation ${r.ref} for ${describe(r, T)}.${tail}`, 'your reservation'); } catch (e) {} }
+    if (by === 'guest' && S.notify_changes) await notifyHandover(S, `Reservation cancelled by guest: ${r.ref} ${r.guest_name} ${describe(r, T)}${refund ? ' (refunded ' + naira(refund) + ')' : ''}`, 'a cancelled reservation');
     return { ok: true, refund, refunded };
+  }
+
+  // A guest changes their own reservation (date, time, guests). Their payment stays with the booking.
+  async function change(ref, sessionPhone, input) {
+    const S = await loadSettings(ctx); const T = makeTime(S, nowFn);
+    const { rows } = await pool.query('select * from reservations where ref=$1 and phone_number=$2', [String(ref || ''), sessionPhone]);
+    const r = rows[0];
+    if (!r) return { ok: false, errors: { _: 'We could not find that reservation.' } };
+    if (r.status !== 'confirmed') return { ok: false, errors: { _: r.status === 'pending_payment' ? 'Please finish your payment first, or cancel and start again.' : 'This reservation can no longer be changed.' } };
+    const hrs = (new Date(r.starts_at).getTime() - nowFn()) / 3600000;
+    if (S.change_cutoff_hours > 0 && hrs < S.change_cutoff_hours) return { ok: false, errors: { _: `Changes close ${S.change_cutoff_hours} hours before your arrival. Please contact the venue.` } };
+    const cur = T.utcToLocalParts(r.starts_at);
+    const { errors, clean } = validate(S, T, {
+      name: r.guest_name, phone: r.contact_phone || r.phone_number,
+      date: input.date || cur.date, time: input.time || cur.time, guests: input.guests === undefined || input.guests === '' ? r.guests : input.guests,
+    });
+    if (Object.keys(errors).length) return { ok: false, errors };
+    if (clean.date === cur.date && clean.time === cur.time && clean.guests === r.guests) return { ok: false, errors: { _: 'Nothing has changed yet.' } };
+    const client = await pool.connect();
+    let upd;
+    try {
+      await client.query('begin');
+      await client.query('select pg_advisory_xact_lock(hashtext($1))', [`bali-slot-${clean.date}`]);
+      if (over(S, (await guestsBooked(S, T, clean.date, clean.time, r.ref, client)) + clean.guests)) {
+        await client.query('rollback');
+        return { ok: false, errors: { time: 'That time is fully booked. Please choose another.' } };
+      }
+      upd = (await client.query(
+        'update reservations set starts_at=$2, guests=$3, reminder_sent_at=null, reminder_tries=0, updated_at=now() where ref=$1 returning *',
+        [r.ref, T.localToUtcISO(clean.date, clean.time), clean.guests])).rows[0];
+      await client.query('commit');
+    } catch (e) { try { await client.query('rollback'); } catch (_) {} throw e; } finally { client.release(); }
+    if (S.notify_changes) await notifyHandover(S, `Reservation ${r.ref} was changed by the guest ✏️\nName: ${r.guest_name}\nPhone: ${r.contact_phone || r.phone_number}\nWas: ${describe(r, T)}\nNow: ${describe(upd, T)}`, 'a changed reservation');
+    // no WhatsApp message to the guest: the reservation page shows the new booking (saves a Meta message)
+    return { ok: true, ref: r.ref, text: describe(upd, T) };
   }
 
   async function forGuest(phone) {
@@ -237,6 +275,6 @@ function createResv(ctx, wa, ps) {
     return (await pool.query('select short_code from web_sessions where phone_number=$1', [phone])).rows[0].short_code;
   }
 
-  return { sessionShort, validate, createFromForm, confirmPayment, cancel, freeTimes, forGuest, sessionToken, describe, notifyHandover, guestsBooked };
+  return { change, sessionShort, validate, createFromForm, confirmPayment, cancel, freeTimes, forGuest, sessionToken, describe, notifyHandover, guestsBooked };
 }
 module.exports = { createResv };

@@ -119,16 +119,30 @@ function manage({ S, T, token, list, formUrl }) {
       : `This is less than ${S.refund_hours} hours away, so the payment will not be refunded.`);
     return `<div class="card res"><div style="display:flex;justify-content:space-between;align-items:center"><b>${esc(r.ref)}</b><span class="pill ${r.status === 'confirmed' ? '' : 'w'}">${r.status === 'confirmed' ? 'Confirmed' : 'Awaiting payment'}</span></div>
       <p style="margin:10px 0 2px;font-size:16px;font-weight:600">${esc(r.text)}</p><p class="note">${esc(r.guest_name)}${refundNote ? '<br>' + esc(refundNote) : ''}</p>
-      <button class="btn danger small" data-ref="${esc(r.ref)}" data-note="${esc(refundNote)}">Cancel reservation</button></div>`;
+      <div style="display:flex;gap:10px;flex-wrap:wrap">${r.status === 'confirmed' ? `<button class="btn small" data-change="${esc(r.ref)}" data-date="${esc(r.ldate)}" data-time="${esc(r.ltime)}" data-guests="${r.guests}">Change</button>` : ''}<button class="btn danger small" data-ref="${esc(r.ref)}" data-note="${esc(refundNote)}">Cancel reservation</button></div></div>`;
   }).join('');
   return `${HEAD('My reservation')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"></div><h1>My reservation</h1><p class="sub">Your upcoming tables at ${esc(S.venue_name)}.</p>
   ${items || `<div class="card center"><p class="note">You have no upcoming reservations.</p></div>`}
   <a class="btn" style="margin-top:18px" href="${esc(formUrl)}">Book a table</a><p class="foot">Powered by ERA Systems</p></div>
+  <div class="modal" id="cm"><div class="sheet"><h1 style="font-size:20px">Change your reservation</h1><p class="note" id="cmref"></p>
+   <div class="field"><label for="cd">Date</label><input id="cd" type="date" min="${esc(T.todayStr())}" max="${esc(T.addDaysISO(T.todayStr(), S.max_days_ahead))}"></div>
+   <div class="field"><label for="ct">Arrival time</label><input id="ct" type="time"></div>
+   <div class="field"><label for="cg">Number of guests</label><input id="cg" type="number" inputmode="numeric" min="1"></div>
+   <p class="note">Your payment stays with the new booking. Changes close ${S.change_cutoff_hours > 0 ? S.change_cutoff_hours + ' hours' : 'at arrival'} before you arrive.</p>
+   <div class="err" id="cerr" style="margin-bottom:10px"></div>
+   <button class="btn" id="csave">Save changes</button><button class="btn ghost" id="cno" style="margin-top:10px">Close</button></div></div>
   <div class="modal" id="m"><div class="sheet"><h1 style="font-size:20px">Cancel this reservation?</h1><p class="note" id="mn"></p><button class="btn danger" id="yes">Yes, cancel it</button><button class="btn ghost" id="no" style="margin-top:10px">Keep it</button></div></div>
   <script>let cur=null;const m=document.getElementById('m');
   document.querySelectorAll('[data-ref]').forEach(b=>b.onclick=()=>{cur=b.dataset.ref;document.getElementById('mn').textContent=b.dataset.note||'';m.classList.add('open')});
   document.getElementById('no').onclick=()=>m.classList.remove('open');
-  document.getElementById('yes').onclick=async()=>{const y=document.getElementById('yes');y.disabled=true;y.textContent='Cancelling…';await fetch('/api/my/${esc(token)}/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref:cur})});location.reload()};</script></body></html>`;
+  document.getElementById('yes').onclick=async()=>{const y=document.getElementById('yes');y.disabled=true;y.textContent='Cancelling…';await fetch('/api/my/${esc(token)}/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref:cur})});location.reload()};
+  let chg=null;const cm=document.getElementById('cm');
+  document.querySelectorAll('[data-change]').forEach(b=>b.onclick=()=>{chg=b.dataset.change;document.getElementById('cmref').textContent='Reservation '+chg;document.getElementById('cd').value=b.dataset.date;document.getElementById('ct').value=b.dataset.time;document.getElementById('cg').value=b.dataset.guests;document.getElementById('cerr').textContent='';cm.classList.add('open')});
+  document.getElementById('cno').onclick=()=>cm.classList.remove('open');
+  document.getElementById('csave').onclick=async()=>{const s=document.getElementById('csave');const er=document.getElementById('cerr');er.textContent='';s.disabled=true;s.textContent='Saving…';
+   try{const r=await fetch('/api/my/${esc(token)}/change',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref:chg,date:document.getElementById('cd').value,time:document.getElementById('ct').value,guests:+document.getElementById('cg').value})});const j=await r.json();
+    if(j.ok){location.reload();return}er.textContent=Object.values(j.errors||{})[0]||'Something went wrong.'}catch(e){er.textContent='Network problem. Please try again.'}
+   s.disabled=false;s.textContent='Save changes'};</script></body></html>`;
 }
 
 function ask({ S, token, formUrl, chips, waNumber }) {

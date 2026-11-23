@@ -113,6 +113,11 @@ function buildApp(ctx) {
         await wa.flushQueue(from);
         if (from === handover) continue; // the venue's own number never gets the guest welcome
         if (m.type === 'interactive' && m.interactive?.type === 'nfm_reply') { await handleFormSubmission(S, from, m.interactive.nfm_reply); continue; }
+        // "cancel" / "change" / "reschedule" texted to the bot: one tap-to-manage button, not the whole welcome
+        if (m.text?.body && /\b(cancel|change|reschedule|re-schedule|move|modify|amend)\b/i.test(m.text.body) && (await resv.forGuest(from)).length) {
+          await wa.sendCta(from, { body: 'You can see, change or cancel your reservation here.', button: 'MANAGE BOOKING', url: `${base()}/m/${await resv.sessionShort(from)}` });
+          continue;
+        }
         await welcomeCard(S, from);
       }
     })().catch((e) => console.error('webhook error', e));
@@ -239,7 +244,21 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
     if (!s) return res.status(404).send(pages.notFound());
     const S = await loadSettings(ctx); const T = makeTime(S);
     const list = await resv.forGuest(s.phone_number);
-    res.send(pages.manage({ S, T, token: req.params.token, list: list.map((r) => ({ ...r, text: resv.describe(r, T), hoursAway: (new Date(r.starts_at).getTime() - Date.now()) / 3600000 })) , formUrl: `${base()}/go/${req.params.token}/reserve` }));
+    res.send(pages.manage({ S, T, token: req.params.token, list: list.map((r) => { const lp = T.utcToLocalParts(r.starts_at); return { ...r, text: resv.describe(r, T), ldate: lp.date, ltime: lp.time, hoursAway: (new Date(r.starts_at).getTime() - Date.now()) / 3600000 }; }), formUrl: `${base()}/go/${req.params.token}/reserve` }));
+  }));
+  // Guest changes date / time / guests on their own reservation
+  app.post('/api/my/:token/change', wrap(async (req, res) => {
+    if (limited(`chg:${req.ip}`, 20, 60000)) return res.status(429).json({ ok: false, errors: { _: 'Too many attempts, please wait a minute.' } });
+    const s = await sessionFor(req.params.token);
+    if (!s) return res.status(404).json({ ok: false, errors: { _: 'This link is not valid.' } });
+    const out = await resv.change(req.body?.ref, s.phone_number, req.body || {});
+    res.status(out.ok ? 200 : 422).json(out);
+  }));
+  // short manage link used in the confirmation message
+  app.get('/m/:code', wrap(async (req, res) => {
+    const { rows } = await pool.query('select token from web_sessions where short_code=$1', [String(req.params.code).slice(0, 20)]);
+    if (!rows[0]) return res.status(404).send(pages.notFound());
+    res.redirect(`/my/${rows[0].token}`);
   }));
   app.post('/api/my/:token/cancel', wrap(async (req, res) => {
     const s = await sessionFor(req.params.token);
@@ -392,7 +411,7 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
     venue_name: 'text', open_time: 'time', close_time: 'time', slot_minutes: 'int', max_guests_per_slot: 'int', max_guests_per_booking: 'int',
     min_notice_minutes: 'int', max_days_ahead: 'int', closed_weekdays: 'intarr', reservation_fee_kobo: 'int', service_fee_kobo: 'int',
     hold_minutes: 'int', refund_hours: 'int', order_link: 'text', welcome_image_url: 'text', welcome_text: 'text', handover_number: 'phone',
-    payments_enabled: 'bool', open_24_7: 'bool', reminder_hours: 'int', enquiry_intro: 'text', venue_notes: 'text', flow_id: 'text',
+    payments_enabled: 'bool', open_24_7: 'bool', reminder_hours: 'int', change_cutoff_hours: 'int', notify_changes: 'bool', enquiry_intro: 'text', venue_notes: 'text', flow_id: 'text',
   };
   api.get('/settings', wrap(async (req, res) => { const S = await loadSettings(ctx); res.json({ settings: S, paystackConfigured: ps.configured, whatsappConfigured: !!env.META_ACCESS_TOKEN }); }));
   api.put('/settings', wrap(async (req, res) => {
