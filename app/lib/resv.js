@@ -115,10 +115,10 @@ function createResv(ctx, wa, ps) {
     const reference = `BALI-${r.ref}-${Date.now().toString(36)}`;
     let url;
     try {
-      url = await ps.init({ reference, amountKobo: total, phone: sessionPhone, callbackUrl: `${base()}/reserve/${token}/done?ref=${r.ref}`, metadata: { reservation_ref: r.ref, phone: sessionPhone } });
+      url = await ps.init({ reference, amountKobo: total, phone: sessionPhone, customerName: clean.name, callbackUrl: `${base()}/reserve/${token}/done?ref=${r.ref}`, metadata: { reservation_ref: r.ref, phone: sessionPhone } });
     } catch (e) {
       await pool.query("update reservations set status='expired' where ref=$1", [r.ref]);
-      await notifyHandover(S, `Could not start a Paystack payment for ${r.ref}. Please check the Paystack key.`, 'a payment problem');
+      await notifyHandover(S, `Could not start a ${ps.name} payment for ${r.ref}. Please check the ${ps.name} keys.`, 'a payment problem');
       return { ok: false, errors: { _: 'Payment could not be started. The venue has been told. Please try again shortly.' }, code: 'paystack_failed' };
     }
     await pool.query('update reservations set paystack_ref=$1, paystack_url=$2 where ref=$3', [reference, url, r.ref]);
@@ -207,7 +207,7 @@ function createResv(ctx, wa, ps) {
     const v = await ps.verify(r.paystack_ref);
     if (!v || v.status !== 'success') return { status: 'pending', ref: r.ref };
     const need = S.reservation_fee_kobo + S.service_fee_kobo;
-    if (v.amount < need) { await notifyHandover(S, `Payment problem on ${r.ref}: Paystack shows ${naira(v.amount)}, expected ${naira(need)}. Guest ${r.phone_number}.`, 'a payment problem'); return { status: 'short' }; }
+    if (v.amount < need) { await notifyHandover(S, `Payment problem on ${r.ref}: ${ps.name} shows ${naira(v.amount)}, expected ${naira(need)}. Guest ${r.phone_number}.`, 'a payment problem'); return { status: 'short' }; }
     const holdLost = r.status !== 'pending_payment' || (r.hold_expires_at && new Date(r.hold_expires_at).getTime() < nowFn());
     if (holdLost) {
       const p = T.utcToLocalParts(r.starts_at);
@@ -217,7 +217,7 @@ function createResv(ctx, wa, ps) {
         const ok = await ps.refund(r.paystack_ref, v.amount);
         await pool.query('update reservations set refund_amount_kobo=$2, refund_status=$3 where ref=$1', [r.ref, ok ? v.amount : null, ok ? 'refunded' : 'failed']);
         try { await wa.send(r.phone_number, `Sorry, your payment came in after your table hold ended and that time is now full. ${ok ? 'We have refunded the full ' + naira(v.amount) + '.' : 'The team will refund you shortly.'} Please make a new reservation.`, 'your reservation'); } catch (e) {}
-        if (!ok) await notifyHandover(S, `Late payment on ${r.ref}, no room left, automatic refund FAILED. Please refund ${naira(v.amount)} to ${r.phone_number} in Paystack.`, 'a refund needed');
+        if (!ok) await notifyHandover(S, `Late payment on ${r.ref}, no room left, automatic refund FAILED. Please refund ${naira(v.amount)} to ${r.phone_number} in ${ps.name}.`, 'a refund needed');
         return { status: 'late_refunded' };
       }
     }
@@ -248,7 +248,7 @@ function createResv(ctx, wa, ps) {
     if (refund) {
       refunded = await ps.refund(r.paystack_ref, refund);
       await pool.query('update reservations set refund_amount_kobo=$2, refund_status=$3 where ref=$1', [ref, refunded ? refund : null, refunded ? 'refunded' : 'failed']);
-      if (!refunded) await notifyHandover(S, `Automatic refund FAILED for ${ref}. Please refund ${naira(refund)} to ${r.phone_number} in Paystack.`, 'a refund needed');
+      if (!refunded) await notifyHandover(S, `Automatic refund FAILED for ${ref}. Please refund ${naira(refund)} to ${r.phone_number} in ${ps.name}.`, 'a refund needed');
     }
     const tail = refund
       ? (refunded ? ` We have refunded ${naira(refund)}; it can take a few days to show.${refund < r.paid_amount_kobo ? ' The service fee is not refundable.' : ''}` : ' The team will process your refund shortly.')

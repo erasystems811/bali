@@ -14,7 +14,7 @@ const env = {
   APP_BASE_URL: 'https://app.test', META_ACCESS_TOKEN: 'tok', META_PHONE_NUMBER_ID: '1', META_WEBHOOK_VERIFY_TOKEN: 'vt',
   BALI_FORWARD_SECRET: 'fsec', PAYSTACK_SECRET_KEY: 'sk_test', SESSION_SECRET: 's', NODE_ENV: 'test',
 };
-const sent = []; const refunds = []; const paid = new Set(); let paystackDown = false; let rejectReminderTemplate = false; let claudeFail = false; let graphTransient = 0; let graphFlowDown = false;
+const sent = []; const refunds = []; const paid = new Set(); let paystackDown = false; const monnifyCalls = []; const monnifyRefunds = []; let rejectReminderTemplate = false; let claudeFail = false; let payHang = false; let graphTransient = 0; let graphFlowDown = false;
 const claudeCalls = [];
 async function http(method, url, { body, headers } = {}) {
   const u = new URL(url);
@@ -23,9 +23,16 @@ async function http(method, url, { body, headers } = {}) {
     if (graphFlowDown && body.interactive?.type === 'flow') { const e = new Error('HTTP 400 graph'); e.body = { error: { code: 2, is_transient: true, message: '(#2) Service temporarily unavailable' } }; throw e; }
     if (rejectReminderTemplate && body.template?.name === 'bali_reservation_reminder') throw new Error('template not approved'); sent.push({ tname: body.template?.name, tcomponents: body.template?.components, to: body.to, type: body.type, text: body.text?.body || body.interactive?.body?.text || body.template?.components?.[0]?.parameters?.[0]?.text, interactive: body.interactive, template: body.type === 'template' }); return { messages: [{ id: 'wamid.' + sent.length }] }; }
   if (u.hostname === 'api.paystack.co') {
-    if (u.pathname === '/transaction/initialize') { if (paystackDown) throw new Error('down'); return { data: { authorization_url: 'https://checkout.paystack.com/' + body.reference } }; }
+    if (u.pathname === '/transaction/initialize') { if (payHang) await new Promise((r) => setTimeout(r, 1500)); if (paystackDown) throw new Error('down'); return { data: { authorization_url: 'https://checkout.paystack.com/' + body.reference } }; }
     if (u.pathname.startsWith('/transaction/verify/')) { const ref = decodeURIComponent(u.pathname.split('/').pop()); return { data: paid.has(ref) ? { status: 'success', amount: 2050000 } : { status: 'abandoned', amount: 0 } }; }
     if (u.pathname === '/refund') { refunds.push(body); return { status: true }; }
+  }
+  if (u.hostname === 'sandbox.monnify.com') {
+    monnifyCalls.push({ path: u.pathname, headers, body });
+    if (u.pathname === '/api/v1/auth/login') return { requestSuccessful: true, responseBody: { accessToken: 'mtok', expiresIn: 3000 } };
+    if (u.pathname === '/api/v1/merchant/transactions/init-transaction') return { requestSuccessful: true, responseBody: { checkoutUrl: 'https://sandbox.monnify.com/checkout/' + body.paymentReference, transactionReference: 'MNFY|' + body.paymentReference } };
+    if (u.pathname === '/api/v2/merchant/transactions/query') { const ref = u.searchParams.get('paymentReference'); return { requestSuccessful: true, responseBody: { paymentStatus: paid.has(ref) ? 'PAID' : 'PENDING', amountPaid: paid.has(ref) ? 20500 : 0, transactionReference: 'MNFY|' + ref } }; }
+    if (u.pathname === '/api/v1/refunds/initiate-refund') { monnifyRefunds.push(body); return { requestSuccessful: true, responseBody: { refundStatus: 'IN_PROGRESS' } }; }
   }
   if (u.hostname === 'api.anthropic.com') {
     claudeCalls.push({ headers, body });
@@ -50,7 +57,7 @@ async function http(method, url, { body, headers } = {}) {
     min_notice_minutes=60, max_days_ahead=60, closed_weekdays='{}', open_24_7=false, payments_enabled=false, handover_number='08031112222', welcome_image_url=null where id=1`);
   await pool.query("insert into dashboard_users (username, password_hash) values ('admin', $1)", [await bcrypt.hash('pw', 4)]);
 
-  const app = buildApp({ pool, env, http, noRateLimit: true, retryDelayMs: 1 });
+  const app = buildApp({ pool, env, http, noRateLimit: true, retryDelayMs: 1, flowTimeoutMs: 400 });
   const server = app.listen(0); const base = `http://127.0.0.1:${server.address().port}`;
   const call = async (method, path, body, cookie) => {
     const r = await fetch(base + path, { method, redirect: 'manual', headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
@@ -504,6 +511,49 @@ async function http(method, url, { body, headers } = {}) {
   ok(fb.length === 1 && !fb[0].interactive && /Reserve your table here:\nhttps:\/\/app\.test\/reserve\//.test(fb[0].text) && /Questions\? Chat with us:\nhttps:\/\/app\.test\/c\//.test(fb[0].text), 'if the form message cannot be delivered at all, the guest still gets a reply with the reservation and chat links');
   graphFlowDown = false;
   await pool.query("update reservation_settings set flow_id=null where id=1");
+
+  console.log('\n7o. payments through Monnify');
+  const savedPk = env.PAYSTACK_SECRET_KEY; delete env.PAYSTACK_SECRET_KEY;
+  Object.assign(env, { MONNIFY_API_KEY: 'MK_TEST_X', MONNIFY_SECRET_KEY: 'SECRETY', MONNIFY_CONTRACT_CODE: '1234567', MONNIFY_BASE_URL: 'https://sandbox.monnify.com' });
+  await pool.query("update reservation_settings set payments_enabled=true, open_24_7=true, reminder_hours=0 where id=1");
+  const MN = '2348012345901'; await inbound(MN, 'mn1'); const mnTok = await tokenOf(MN);
+  const mnRes = await call('POST', `/api/reserve/${mnTok}`, form({ date: day(35), time: '19:00', guests: 2, name: 'Mona Nify' }));
+  ok(mnRes.json.ok && mnRes.json.status === 'pending_payment' && /^https:\/\/sandbox\.monnify\.com\/checkout\/BALI-/.test(mnRes.json.payUrl) && mnRes.json.amountKobo === 2050000, 'with Monnify keys set, the guest gets a Monnify checkout link for N20,500');
+  const mnLogin = monnifyCalls.find((c) => c.path === '/api/v1/auth/login'); const mnInit = monnifyCalls.filter((c) => c.path.endsWith('init-transaction')).at(-1);
+  ok(mnLogin.headers.Authorization === 'Basic ' + Buffer.from('MK_TEST_X:SECRETY').toString('base64'), 'logs in with the API key and secret (Basic auth)');
+  ok(mnInit.headers.Authorization === 'Bearer mtok' && mnInit.body.amount === 20500 && mnInit.body.contractCode === '1234567' && mnInit.body.currencyCode === 'NGN' && mnInit.body.customerName === 'Mona Nify' && /^BALI-/.test(mnInit.body.paymentReference) && /\/reserve\/.+\/done\?ref=/.test(mnInit.body.redirectUrl), 'mnInit request: amount in naira (20500), contract code, guest name, our reference, return link');
+  ok(/Waiting for your payment/.test((await call('GET', `/reserve/${mnTok}/done?ref=${mnRes.json.ref}`)).text), 'unpaid: the return page waits');
+  const mnRef = (await pool.query('select paystack_ref from reservations where ref=$1', [mnRes.json.ref])).rows[0].paystack_ref; paid.add(mnRef);
+  const hm0 = sent.length;
+  await call('POST', '/webhook/monnify', { eventType: 'SUCCESSFUL_TRANSACTION', eventData: { paymentReference: mnRef, paymentStatus: 'PAID', amountPaid: 20500 } }); await settle();
+  ok((await pool.query('select status, paid_amount_kobo from reservations where ref=$1', [mnRes.json.ref])).rows[0].status === 'confirmed', 'the Monnify webhook (re-verified) confirms the reservation');
+  ok(sent.slice(hm0).some((x) => x.to === HANDOVER && /Mona Nify/.test(x.text || '')), 'details handed over after the Monnify payment');
+  const hm1 = sent.length; await call('POST', '/webhook/monnify', { eventType: 'SUCCESSFUL_TRANSACTION', eventData: { paymentReference: 'NOPE', paymentStatus: 'PAID' } }); await call('POST', '/webhook/monnify', { eventType: 'FAILED_TRANSACTION', eventData: { paymentReference: mnRef, paymentStatus: 'FAILED' } }); await settle();
+  ok(sent.length === hm1, 'unknown references and failed-payment events do nothing');
+  const mnCan = await call('POST', `/api/my/${mnTok}/cancel`, { ref: mnRes.json.ref });
+  ok(mnCan.json.ok && monnifyRefunds.length === 1 && monnifyRefunds[0].refundAmount === 20000 && monnifyRefunds[0].transactionReference === 'MNFY|' + mnRef && monnifyRefunds[0].contractCode === '1234567', 'cancelling 24h+ ahead refunds N20,000 through Monnify (not the service fee)');
+  const stg = (await fetch(base + '/dashboard/login', { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'username=admin&password=pw' })).headers.get('set-cookie').split(';')[0];
+  const stJ = (await call('GET', '/api/settings', null, stg)).json;
+  ok(stJ.paymentsConfigured === true && stJ.paymentProvider === 'Monnify', 'the dashboard reports Monnify as connected');
+  delete env.MONNIFY_API_KEY; env.PAYSTACK_SECRET_KEY = savedPk;
+  ok((await call('GET', '/api/settings', null, stg)).json.paymentProvider === 'Paystack', 'with only Paystack keys, Paystack is used');
+  env.PAYMENT_PROVIDER = 'monnify'; ok((await call('GET', '/api/settings', null, stg)).json.paymentProvider === 'Paystack', 'a provider that is not configured is never chosen'); delete env.PAYMENT_PROVIDER;
+  delete env.MONNIFY_SECRET_KEY; delete env.MONNIFY_CONTRACT_CODE; delete env.MONNIFY_BASE_URL;
+  await pool.query("update reservation_settings set payments_enabled=true, open_24_7=false, reminder_hours=6 where id=1");
+
+  console.log('\n7p. a slow payment provider never leaves the form spinning');
+  await pool.query("update reservation_settings set payments_enabled=true, open_24_7=true where id=1");
+  const SLW = '2348012345951'; await inbound(SLW, 'slw1'); const slwTok = await tokenOf(SLW);
+  payHang = true; const slwStart = Date.now();
+  const slw = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + slwTok, version: '3.0', data: { step: 'reserve', name: 'Slow Pay', phone: '0803 555 1212', date: day(38), time: '20:00', guests: '2' } });
+  const slwMs = Date.now() - slwStart; payHang = false;
+  ok(slw.json.screen === 'RESERVE' && /took too long/.test(slw.json.data.error) && slwMs < 1200, 'a payment provider that takes too long: the form answers within the time limit with a clear message (' + slwMs + 'ms)');
+  ok(slw.json.data.name_init === 'Slow Pay' && slw.json.data.phone_init === '0803 555 1212' && slw.json.data.date_init === day(38) && slw.json.data.time_init === '20:00' && slw.json.data.guests_init === '2', 'and their entries are kept so they only tap Continue again');
+  await new Promise((r) => setTimeout(r, 1700));
+  const slw2 = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + slwTok, version: '3.0', data: { step: 'reserve', name: 'Slow Pay', phone: '0803 555 1212', date: day(38), time: '20:00', guests: '2' } });
+  ok(slw2.json.screen === 'PAY', 'tapping Continue again goes straight through to payment once the provider is back');
+  ok((await pool.query("select count(*)::int n from reservations where guest_name='Slow Pay' and status='pending_payment'")).rows[0].n === 1, 'and only one table hold is left (the earlier attempt was replaced)');
+  await pool.query("update reservation_settings set payments_enabled=true, open_24_7=false where id=1");
 
   console.log('\n8. dashboard');
   ok((await call('GET', '/api/overview')).status === 401, 'API needs login');

@@ -198,7 +198,7 @@
   async function viewSet() {
     const main = $('#main');
     main.append(h('div', { class: 'head' }, h('div', {}, h('h1', {}, 'Settings'), h('p', {}, 'Handover number, payments, opening hours and capacity.'))));
-    const { settings: S, paystackConfigured, whatsappConfigured } = await api('/settings');
+    const { settings: S, paymentsConfigured, paymentProvider, whatsappConfigured } = await api('/settings');
     const F = {}; const errBox = {};
     const field = (key, label, type, hint, opts = {}) => {
       const val = opts.fromNaira ? S[key] / 100 : (S[key] ?? '');
@@ -218,8 +218,8 @@
         h('div', { class: 'fg' }, field('handover_number', 'Handover WhatsApp number', 'tel', 'e.g. 0803 000 0000 or +234 803 000 0000'), field('handover_number_2', 'Second handover number (optional)', 'tel', 'Gets exactly the same messages')),
         h('div', { class: 'sw', style: 'margin-top:14px' }, notifyCh, h('div', {}, h('b', {}, 'Also tell this number when a guest changes or cancels'))),
         h('div', { class: 'row', style: 'margin-top:14px' }, h('button', { class: 'btn', onclick: async (e) => { e.target.disabled = true; try { await save(true); const r = await api('/settings/test-handover', { method: 'POST' }); toast(r.ok ? 'Test message sent' : r.note, !r.ok); if (r.ok) alert(r.note); } catch (er) { toast(er.message, true); } e.target.disabled = false; } }, 'Save and send a test message'))),
-      h('div', { class: 'card sec' }, h('h3', {}, 'Payment'), h('div', { class: 'sub' }, paystackConfigured ? 'Paystack is connected.' : 'Paystack is not connected yet. Add the secret key on the server before taking payments.'),
-        !paystackConfigured && S.payments_enabled ? h('div', { class: 'warn' }, 'Payments are on but Paystack is not connected, so the form will show "payment not available". Switch payments off below to take free reservations for now.') : null,
+      h('div', { class: 'card sec' }, h('h3', {}, 'Payment'), h('div', { class: 'sub' }, paymentsConfigured ? paymentProvider + ' is connected.' : 'No payment provider is connected yet (Monnify). Add the Monnify keys on the server before taking payments.'),
+        !paymentsConfigured && S.payments_enabled ? h('div', { class: 'warn' }, 'Payments are on but no payment provider is connected, so the form will show "payment not available". Switch payments off below to take free reservations for now.') : null,
         h('div', { class: 'sw', style: 'margin-bottom:16px' }, pay, h('div', {}, h('b', {}, 'Take payment to confirm a reservation'))),
         h('div', { class: 'fg' }, field('reservation_fee_kobo', 'Reservation amount (₦)', 'number', 'Credited to the guest\'s order', { fromNaira: true }), field('service_fee_kobo', 'Service fee (₦)', 'number', 'Not refundable', { fromNaira: true }), field('refund_hours', 'Refund if cancelled at least (hours) before', 'number'), field('order_link', 'Order link', 'text', 'Sent to guests after they pay'))),
       h('div', { class: 'card sec' }, h('h3', {}, 'Opening hours and capacity'), h('div', { class: 'sub' }, 'Guests type the time they want to arrive. Turn off "open 24 hours" to only accept times within set hours.'),

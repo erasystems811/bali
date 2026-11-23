@@ -6,7 +6,7 @@ const path = require('path');
 const { Pool } = require('pg');
 const { loadSettings, makeTime, normalizePhone, naira } = require('./lib/core');
 const { createWa } = require('./lib/wa');
-const { createPaystack } = require('./lib/paystack');
+const { createPayments } = require('./lib/payments');
 const { createResv } = require('./lib/resv');
 const { createEnquiry } = require('./lib/enquiry');
 const { createReminders } = require('./lib/reminders');
@@ -15,8 +15,8 @@ const flow = require('./lib/flow');
 const { createFlowEndpoint } = require('./lib/flowendpoint');
 const { decryptRequest, encryptResponse } = require('./lib/flowcrypto');
 
-async function http(method, url, { headers, body } = {}) {
-  const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(25000) });
+async function http(method, url, { headers, body, timeoutMs } = {}) {
+  const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(timeoutMs || 25000) });
   const text = await res.text();
   let json = null; try { json = JSON.parse(text); } catch (e) {}
   if (!res.ok) { const err = new Error(`HTTP ${res.status} ${url}`); err.body = json || text; throw err; }
@@ -26,7 +26,7 @@ async function http(method, url, { headers, body } = {}) {
 function buildApp(ctx) {
   const { pool, env } = ctx;
   const wa = createWa(ctx);
-  const ps = createPaystack(ctx);
+  const ps = createPayments(ctx); // Monnify when its keys are set, otherwise Paystack
   const resv = createResv(ctx, wa, ps);
   const enquiry = createEnquiry(ctx, resv);
   const flowEndpoint = createFlowEndpoint(ctx, resv);
@@ -164,12 +164,34 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
     try { dec = decryptRequest(req.body, privateKey()); } catch (e) { console.log(`[flow] 421 cannot decrypt (${e.message}); body keys: ${Object.keys(req.body || {}).join(',')}`); return res.sendStatus(421); }
     const d = dec.decrypted || {};
     console.log(`[flow] action=${d.action} screen=${d.screen || '-'} step=${(d.data && d.data.action) || '-'} version=${d.version || '-'} keys=${Object.keys(d.data || {}).join(',')}`);
-    let out;
-    try { out = await flowEndpoint.handle(dec.decrypted); console.log(`[flow] -> ${out.screen || 'data'}${out.data && out.data.error && out.data.error.trim() ? ' error: ' + out.data.error : ''}`); } catch (e) {
+    let out; const started = Date.now();
+    try {
+      // WhatsApp gives up on the form after about 10 seconds and leaves the guest on a spinner. Always answer before that.
+      const slow = new Promise((resolve) => setTimeout(() => resolve({ __slow: true }), ctx.flowTimeoutMs || 8000));
+      out = await Promise.race([flowEndpoint.handle(dec.decrypted), slow]);
+      if (out && out.__slow) {
+        console.error(`[flow] SLOW (> ${ctx.flowTimeoutMs || 8000}ms) step=${(d.data && (d.data.step || d.data.action)) || '-'}`);
+        const dd = d.data || {};
+        out = { screen: 'RESERVE', data: { ...flow.flowData(await loadSettings(ctx), {}), name_init: String(dd.name || ''), phone_init: String(dd.phone || ''), date_init: String(dd.date || flow.flowData(await loadSettings(ctx), {}).date_init), time_init: String(dd.time || '19:00'), guests_init: String(dd.guests || '2'), has_error: true, error: 'That took too long. Please tap Continue again.' } };
+      }
+      console.log(`[flow] -> ${out.screen || 'data'} in ${Date.now() - started}ms${out.data && out.data.error && out.data.error.trim() ? ' error: ' + out.data.error : ''}`);
+    } catch (e) {
       console.error('flow endpoint error', e);
       out = { screen: 'RESERVE', data: { ...flow.flowData(await loadSettings(ctx), {}), has_error: true, error: 'Something went wrong on our side. Please try again.' } };
     }
     res.type('text/plain').send(encryptResponse(out, dec.aesKey, dec.iv));
+  });
+
+  // Monnify tells us a payment succeeded. The body is never trusted: we re-verify the payment with Monnify before confirming anything.
+  app.post('/webhook/monnify', (req, res) => {
+    res.sendStatus(200);
+    const d = req.body && req.body.eventData;
+    const ref = d && d.paymentReference;
+    if (!ref || !/SUCCESS|COMPLETED|PAID/i.test(String((req.body && req.body.eventType) || '') + String(d.paymentStatus || ''))) return;
+    (async () => {
+      const { rows } = await pool.query('select * from reservations where paystack_ref=$1', [String(ref)]);
+      if (rows[0]) await resv.confirmPayment(rows[0]);
+    })().catch((e) => console.error('monnify webhook error', e));
   });
 
   app.post('/webhook/paystack', (req, res) => {
@@ -418,7 +440,7 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
     hold_minutes: 'int', refund_hours: 'int', order_link: 'text', welcome_image_url: 'text', welcome_text: 'text', handover_number: 'phone', handover_number_2: 'phone',
     payments_enabled: 'bool', open_24_7: 'bool', reminder_hours: 'int', change_cutoff_hours: 'int', notify_changes: 'bool', enquiry_intro: 'text', venue_notes: 'text', flow_id: 'text',
   };
-  api.get('/settings', wrap(async (req, res) => { const S = await loadSettings(ctx); res.json({ settings: S, paystackConfigured: ps.configured, whatsappConfigured: !!env.META_ACCESS_TOKEN }); }));
+  api.get('/settings', wrap(async (req, res) => { const S = await loadSettings(ctx); res.json({ settings: S, paymentsConfigured: ps.configured, paymentProvider: ps.name, whatsappConfigured: !!env.META_ACCESS_TOKEN }); }));
   api.put('/settings', wrap(async (req, res) => {
     const sets = []; const vals = []; const errors = {};
     for (const [k, type] of Object.entries(SETTING_FIELDS)) {
