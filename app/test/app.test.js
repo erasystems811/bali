@@ -177,7 +177,7 @@ async function http(method, url, { body } = {}) {
   const fm = sent.slice(bf).find((x) => x.to === F);
   const fp = fm?.interactive?.action?.parameters;
   ok(fm?.interactive?.type === 'flow' && fp.flow_id === 'FLOW1' && fp.flow_cta === 'TAP HERE TO RESERVE' && fp.flow_action === 'navigate', 'welcome is the native form message with an obvious TAP HERE TO RESERVE button');
-  ok(fm.interactive.header?.image?.link === 'https://app.test/assets/welcome.png' && /Hey, welcome to Bali/.test(fm.text) && /\n\nTap the button below to make your table reservation\.\n\nQuestions\? Chat with us:\nhttps:\/\/app\.test\/c\/[a-f0-9]{12}$/.test(fm.text) && !/[a-f0-9]{32}/.test(fm.text), 'has the Bali picture and a clean three-part message: greeting, instruction, short chat link');
+  ok(fm.interactive.header?.image?.link === 'https://app.test/assets/welcome.png' && /Hey, welcome to Bali/.test(fm.text) && /\n\nPlease tap the button below to make your table reservation\.\n\nQuestions\? Chat with us:\nhttps:\/\/app\.test\/c\/[a-f0-9]{12}$/.test(fm.text) && !/[a-f0-9]{32}/.test(fm.text), 'has the Bali picture and a clean three-part message: greeting, instruction, short chat link');
   const shortCode = fm.text.match(/\/c\/([a-f0-9]{12})/)[1]; const sRes = await fetch(`${base}/c/${shortCode}`, { redirect: 'manual' });
   ok(sRes.status === 302 && /^\/ask\/[a-f0-9]{32}$/.test(sRes.headers.get('location')) && (await fetch(`${base}/c/000000000000`, { redirect: 'manual' })).status === 404, 'the short link opens the enquiry chat; unknown codes 404');
   ok(fp.flow_token.startsWith('bali-') && fp.flow_action_payload.screen === 'RESERVE', 'flow token and first screen set');
