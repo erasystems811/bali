@@ -4,7 +4,19 @@
 function createWa(ctx) {
   const { pool, env } = ctx;
   const SANDBOX = !env.META_ACCESS_TOKEN;
-  const graph = (body) => ctx.http('POST', `https://graph.facebook.com/v20.0/${env.META_PHONE_NUMBER_ID}/messages`, {
+  // Meta sometimes answers "temporarily unavailable" (code 1/2, is_transient). Retry a couple of times before giving up.
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const graph = async (body) => {
+    for (let attempt = 1; ; attempt++) {
+      try { return await graphOnce(body); } catch (err) {
+        const e = err && err.body && err.body.error;
+        const transient = !!e && (e.is_transient === true || e.code === 1 || e.code === 2);
+        if (!transient || attempt >= 3) throw err;
+        await sleep(ctx.retryDelayMs === undefined ? 700 * attempt : ctx.retryDelayMs);
+      }
+    }
+  };
+  const graphOnce = (body) => ctx.http('POST', `https://graph.facebook.com/v20.0/${env.META_PHONE_NUMBER_ID}/messages`, {
     headers: { Authorization: `Bearer ${env.META_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
     body: { messaging_product: 'whatsapp', ...body },
   }).then((r) => r?.messages?.[0]?.id || null);

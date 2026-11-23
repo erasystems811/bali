@@ -80,7 +80,12 @@ function buildApp(ctx) {
       await pool.query('update web_sessions set welcomed_at = now(), last_seen = now() where token=$1', [token]);
       if (w[0]?.welcomed_at && Date.now() - new Date(w[0].welcomed_at).getTime() < 90000) return; // ignore rapid repeat texts
       const { rows: c } = await pool.query('select name from contacts where phone_number=$1', [phone]);
-      return sendForm(S, phone, token, { nameInit: c[0]?.name || '' });
+      try { return await sendForm(S, phone, token, { nameInit: c[0]?.name || '' }); } catch (e) {
+        // The WhatsApp form message could not be delivered (even after retries): never leave the guest without a reply
+        console.error('form message failed, sending links instead:', JSON.stringify((e && e.body) || e.message));
+        const askShort = `${base()}/c/${await resv.sessionShort(phone)}`;
+        return wa.send(phone, `${S.welcome_text}\n\nReserve your table here:\n${base()}/reserve/${token}\n\nQuestions? Chat with us:\n${askShort}`, 'your reservation links', { reply: true });
+      }
     }
     const formUrl = `${base()}/reserve/${token}`;
     const askUrl = `${base()}/c/${await resv.sessionShort(phone)}`;

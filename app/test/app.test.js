@@ -14,11 +14,14 @@ const env = {
   APP_BASE_URL: 'https://app.test', META_ACCESS_TOKEN: 'tok', META_PHONE_NUMBER_ID: '1', META_WEBHOOK_VERIFY_TOKEN: 'vt',
   BALI_FORWARD_SECRET: 'fsec', PAYSTACK_SECRET_KEY: 'sk_test', SESSION_SECRET: 's', NODE_ENV: 'test',
 };
-const sent = []; const refunds = []; const paid = new Set(); let paystackDown = false; let rejectReminderTemplate = false; let claudeFail = false;
+const sent = []; const refunds = []; const paid = new Set(); let paystackDown = false; let rejectReminderTemplate = false; let claudeFail = false; let graphTransient = 0; let graphFlowDown = false;
 const claudeCalls = [];
 async function http(method, url, { body, headers } = {}) {
   const u = new URL(url);
-  if (u.hostname === 'graph.facebook.com') { if (rejectReminderTemplate && body.template?.name === 'bali_reservation_reminder') throw new Error('template not approved'); sent.push({ tname: body.template?.name, tcomponents: body.template?.components, to: body.to, type: body.type, text: body.text?.body || body.interactive?.body?.text || body.template?.components?.[0]?.parameters?.[0]?.text, interactive: body.interactive, template: body.type === 'template' }); return { messages: [{ id: 'wamid.' + sent.length }] }; }
+  if (u.hostname === 'graph.facebook.com') {
+    if (graphTransient > 0) { graphTransient -= 1; const e = new Error('HTTP 400 graph'); e.body = { error: { code: 2, is_transient: true, message: '(#2) Service temporarily unavailable' } }; throw e; }
+    if (graphFlowDown && body.interactive?.type === 'flow') { const e = new Error('HTTP 400 graph'); e.body = { error: { code: 2, is_transient: true, message: '(#2) Service temporarily unavailable' } }; throw e; }
+    if (rejectReminderTemplate && body.template?.name === 'bali_reservation_reminder') throw new Error('template not approved'); sent.push({ tname: body.template?.name, tcomponents: body.template?.components, to: body.to, type: body.type, text: body.text?.body || body.interactive?.body?.text || body.template?.components?.[0]?.parameters?.[0]?.text, interactive: body.interactive, template: body.type === 'template' }); return { messages: [{ id: 'wamid.' + sent.length }] }; }
   if (u.hostname === 'api.paystack.co') {
     if (u.pathname === '/transaction/initialize') { if (paystackDown) throw new Error('down'); return { data: { authorization_url: 'https://checkout.paystack.com/' + body.reference } }; }
     if (u.pathname.startsWith('/transaction/verify/')) { const ref = decodeURIComponent(u.pathname.split('/').pop()); return { data: paid.has(ref) ? { status: 'success', amount: 2050000 } : { status: 'abandoned', amount: 0 } }; }
@@ -47,7 +50,7 @@ async function http(method, url, { body, headers } = {}) {
     min_notice_minutes=60, max_days_ahead=60, closed_weekdays='{}', open_24_7=false, payments_enabled=false, handover_number='08031112222', welcome_image_url=null where id=1`);
   await pool.query("insert into dashboard_users (username, password_hash) values ('admin', $1)", [await bcrypt.hash('pw', 4)]);
 
-  const app = buildApp({ pool, env, http, noRateLimit: true });
+  const app = buildApp({ pool, env, http, noRateLimit: true, retryDelayMs: 1 });
   const server = app.listen(0); const base = `http://127.0.0.1:${server.address().port}`;
   const call = async (method, path, body, cookie) => {
     const r = await fetch(base + path, { method, redirect: 'manual', headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
@@ -488,6 +491,19 @@ async function http(method, url, { body, headers } = {}) {
   ok(dueN === 1 && sent.slice(bsf).filter((x) => x.to === SF && /Your table at Bali is confirmed/.test(x.text || '')).length === 1, 'after 2 minutes the confirmation is sent anyway, once');
   ok((await app.confirmations.sendDue()) === 0, 'and never again');
   await pool.query("update reservation_settings set payments_enabled=true, open_24_7=false where id=1");
+
+  console.log('\n7n. Meta hiccups never leave a guest without a reply');
+  await pool.query("update reservation_settings set flow_id='FLOWX' where id=1");
+  const HI = '2348012345801'; const bh = sent.length; graphTransient = 2;
+  await inbound(HI, 'hi1', 'hi'); await settle();
+  const afterRetry = sent.slice(bh).filter((x) => x.to === HI);
+  ok(afterRetry.length === 1 && afterRetry[0].interactive?.type === 'flow', 'two temporary Meta errors in a row: the welcome form message is still delivered (retries)');
+  const HJ = '2348012345802'; const bj = sent.length; graphFlowDown = true;
+  await inbound(HJ, 'hj1', 'hello'); await settle();
+  const fb = sent.slice(bj).filter((x) => x.to === HJ);
+  ok(fb.length === 1 && !fb[0].interactive && /Reserve your table here:\nhttps:\/\/app\.test\/reserve\//.test(fb[0].text) && /Questions\? Chat with us:\nhttps:\/\/app\.test\/c\//.test(fb[0].text), 'if the form message cannot be delivered at all, the guest still gets a reply with the reservation and chat links');
+  graphFlowDown = false;
+  await pool.query("update reservation_settings set flow_id=null where id=1");
 
   console.log('\n8. dashboard');
   ok((await call('GET', '/api/overview')).status === 401, 'API needs login');
