@@ -281,8 +281,7 @@ async function http(method, url, { body, headers } = {}) {
   const good = await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '19:15', guests: '4' });
   ok(good.json.screen === 'PAY' && /checkout\.paystack\.com/.test(good.json.data.pay_url) && good.json.data.amount_label === 'Pay ₦20,500' && /20,000/.test(good.json.data.detail) && !/service/i.test(good.json.data.detail) && !/held for|15 minutes/i.test(good.json.data.detail) && good.json.data.has_fee_note === true && /includes a ₦500 service charge.$/.test(good.json.data.fee_note), 'payment screen: the total, no hold time, the service charge only as one small note at the end');
   ok(!sent.slice(hb).some((x) => x.to === HANDOVER), 'nothing handed over before payment');
-  const payBtn = sent.slice(hb).find((x) => x.to === H && x.interactive?.type === 'cta_url');
-  ok(payBtn && payBtn.interactive.action.parameters.display_text === 'PAY ₦20,500' && payBtn.interactive.action.parameters.url === good.json.data.pay_url && /Tap the button below to pay ₦20,500/.test(payBtn.text) && /A Pay button is also in your WhatsApp chat/.test(good.json.data.detail), 'the payment page is ALSO sent as a PAY button in the chat (opens inside WhatsApp)');
+  ok(!sent.slice(hb).some((x) => x.to === H), 'no WhatsApp message is sent when the payment screen appears (the form already shows it, saving a Meta message)');
   const kref = good.json.data.ref;
   const unpaid = await ex({ action: 'check', ref: kref });
   ok(unpaid.json.screen === 'PAY' && unpaid.json.data.has_note && /waiting for your payment/.test(unpaid.json.data.note), 'tapping I have paid before paying shows a gentle note');
@@ -560,10 +559,12 @@ async function http(method, url, { body, headers } = {}) {
   console.log('\n7q. after paying, back to the WhatsApp chat');
   await pool.query("update reservation_settings set payments_enabled=true, open_24_7=true where id=1");
   const BK = '2348012345961'; await inbound(BK, 'bk1'); const bkTok = await tokenOf(BK);
+  const bkSent = sent.length;
   const bkRes = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + bkTok, version: '3.0', data: { step: 'reserve', name: 'Back Chat', phone: '0803 666 1212', date: day(36), time: '20:00', guests: '2' } });
   const bkRef = bkRes.json.data.ref; const bkPay = (await pool.query('select paystack_ref from reservations where ref=$1', [bkRef])).rows[0].paystack_ref; paid.add(bkPay);
   const bkPage = (await call('GET', `/reserve/${bkTok}/done?ref=${bkRef}`)).text;
-  ok(/Your table is confirmed/.test(bkPage) && /Back to WhatsApp/.test(bkPage) && /https:\/\/wa\.me\/2348140490247/.test(bkPage) && /location\.href="https:\/\/wa\.me\/2348140490247"/.test(bkPage), 'paid inside the form: the return page takes the guest straight back to the WhatsApp chat (button + automatic)');
+  ok(/Payment received/.test(bkPage) && /Close this page to go back to WhatsApp, then tap <b>I have paid<\/b>/.test(bkPage) && /window\.close\(\)/.test(bkPage) && !/location\.href="https:\/\/wa\.me/.test(bkPage) && !/Your table is confirmed/.test(bkPage), 'paid inside the form: the return page closes itself (WhatsApp built-in browser) so the guest is back on the form screen to tap I have paid; no jump to a different chat');
+  ok(sent.slice(bkSent).filter((x) => x.to === BK).length === 0, 'and no WhatsApp message was sent to the guest during payment');
   ok(!/Place your order/.test(bkPage), 'and does not send them off to other pages');
   await pool.query("update reservation_settings set payments_enabled=true, open_24_7=false where id=1");
 
@@ -583,7 +584,7 @@ async function http(method, url, { body, headers } = {}) {
   ok(sent.slice(hw0).some((x) => x.to === HANDOVER && /Web Hook/.test(x.text || '')), 'and only then is it handed over');
   const chk2 = await flowCall({ action: 'data_exchange', screen: 'PAY', flow_token: 'bali-' + whTok, version: '3.0', data: { step: 'check', ref: whRef } });
   ok(chk2.json.screen === 'DONE', 'after the webhook, the I-have-paid button moves on to the confirmed screen');
-  ok(/Your table is confirmed/.test((await call('GET', `/reserve/${whTok}/done?ref=${whRef}`)).text), 'and the return page now says confirmed');
+  ok(/Payment received/.test((await call('GET', `/reserve/${whTok}/done?ref=${whRef}`)).text), 'and the return page now says payment received');
   const WH2 = '2348012345972'; await inbound(WH2, 'wh2'); const wh2Tok = await tokenOf(WH2);
   const wh2 = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + wh2Tok, version: '3.0', data: { step: 'reserve', name: 'Never Paid', phone: '0803 444 1313', date: day(37), time: '21:00', guests: '2' } });
   await call('POST', '/webhook/paystack', { event: 'charge.success', data: { reference: (await pool.query('select paystack_ref from reservations where ref=$1', [wh2.json.data.ref])).rows[0].paystack_ref } }); await settle();

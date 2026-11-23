@@ -101,9 +101,20 @@ function done({ S, T, r, state, token, describe, waNumber }) {
   const kv = `<dl class="kv"><dt>Reference</dt><dd>${esc(r.ref)}</dd><dt>Name</dt><dd>${esc(r.guest_name)}</dd><dt>Date</dt><dd>${esc(T.fmtDateFull(p.date))}</dd><dt>Arrival</dt><dd>${esc(T.fmtTime(p.time))}</dd><dt>Guests</dt><dd>${r.guests}</dd></dl>`;
   let inner;
   if (state === 'confirmed') {
-    inner = `<div class="tick">✓</div><h1 class="center">Your table is confirmed</h1><p class="sub center">We have sent the details to your WhatsApp.${r.paid_amount_kobo ? ` Your ${esc(naira(S.reservation_fee_kobo))} is credited to your order on the day.` : ''}</p><div class="card">${kv}</div>
+    const kvBlock = `<div class="card">${kv}</div>`;
+    if (inForm) {
+      // Paid from inside the WhatsApp form. WhatsApp opened this page in its built-in browser on top of the form, so closing it drops the
+      // guest straight back onto the form screen where they tap "I have paid". A web page cannot reopen the form itself, only close itself.
+      inner = `<div class="tick">✓</div><h1 class="center">Payment received</h1><p class="sub center">Close this page to go back to WhatsApp, then tap <b>I have paid</b> on the form.</p>${kvBlock}
+    <button class="btn" id="closeBtn" style="margin-top:18px">Close and go back</button>
+    <a class="btn ghost" style="margin-top:12px" href="${esc(wa)}">Open WhatsApp</a>
+    <script>function backToForm(){try{window.close()}catch(e){}}document.getElementById('closeBtn').onclick=backToForm;setTimeout(backToForm,1200)</script>`;
+    } else {
+      inner = `<div class="tick">✓</div><h1 class="center">Your table is confirmed</h1><p class="sub center">We have sent the details to your WhatsApp.${r.paid_amount_kobo ? ` Your ${esc(naira(S.reservation_fee_kobo))} is credited to your order on the day.` : ''}</p>${kvBlock}
     <a class="btn" style="margin-top:18px" href="${esc(wa)}">Back to WhatsApp</a>
-    ${inForm ? `<p class="note center" style="margin-top:12px">Taking you back to WhatsApp…</p><script>setTimeout(function(){location.href=${JSON.stringify(wa)}},1500)</script>` : `${link ? `<p class="note center" style="margin-top:18px">You can place your food and drinks order for that day now.</p><a class="btn ghost" href="${esc(link)}">Place your order</a>` : ''}<a class="btn ghost" style="margin-top:12px" href="/my/${esc(token)}">Change or cancel</a>`}`;
+    ${link ? `<p class="note center" style="margin-top:18px">You can place your food and drinks order for that day now.</p><a class="btn ghost" href="${esc(link)}">Place your order</a>` : ''}
+    <a class="btn ghost" style="margin-top:12px" href="/my/${esc(token)}">Change or cancel</a>`;
+    }
   } else if (state === 'pending' || state === 'pending_payment') {
     inner = `<div class="tick wait">…</div><h1 class="center">Waiting for your payment</h1><p class="sub center">If you have just paid, this page updates by itself.</p><div class="card">${kv}</div><a class="btn ghost" style="margin-top:16px" href="">Check again</a>
     <script>setTimeout(()=>location.reload(),4000)</script>`;

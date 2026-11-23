@@ -20,13 +20,13 @@ function createFlowEndpoint(ctx, resv) {
     return rows[0] || null;
   }
 
-  function payScreen(S, T, r, url, note, chatButton) {
+  function payScreen(S, T, r, url, note) {
     const total = S.reservation_fee_kobo + S.service_fee_kobo;
     return {
       screen: 'PAY',
       data: {
         summary: `${r.guest_name}\n${resv.describe(r, T)}\nRef ${r.ref}`,
-        detail: `Pay ${naira(total)} to confirm your table. ${naira(S.reservation_fee_kobo)} of it is credited to your food and drinks order on the day.${chatButton ? ' A Pay button is also in your WhatsApp chat.' : ''}`,
+        detail: `Pay ${naira(total)} to confirm your table. ${naira(S.reservation_fee_kobo)} of it is credited to your food and drinks order on the day.`,
         amount_label: `Pay ${naira(total)}`,
         pay_url: url, ref: r.ref,
         has_note: !!note, note: note || ' ',
@@ -80,10 +80,7 @@ function createFlowEndpoint(ctx, resv) {
       }
       const { rows } = await pool.query('select * from reservations where ref=$1', [out.ref]);
       const r = rows[0];
-      if (out.status === 'pending_payment') {
-        const chatButton = await resv.sendPayButton(r, out.payUrl); // the same payment page as a tap button in the chat
-        return payScreen(S, T, r, out.payUrl, null, chatButton);
-      }
+      if (out.status === 'pending_payment') return payScreen(S, T, r, out.payUrl);
       return doneScreen(S, T, r);
     }
 
