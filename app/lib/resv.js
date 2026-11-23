@@ -68,9 +68,11 @@ function createResv(ctx, wa, ps) {
   }
 
   // ---------- create ----------
+  // R-001, R-002, ... (a database sequence, so two bookings at the same moment can never share a number)
   async function newRef(client) {
     for (let i = 0; i < 8; i++) {
-      const ref = `R-${1000 + Math.floor(Math.random() * 9000)}`;
+      const n = (await client.query("select nextval('reservation_ref_seq') as n")).rows[0].n;
+      const ref = `R-${String(n).padStart(3, '0')}`;
       const { rows } = await client.query('select 1 from reservations where ref=$1', [ref]);
       if (!rows[0]) return ref;
     }

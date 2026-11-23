@@ -14,14 +14,21 @@ const env = {
   APP_BASE_URL: 'https://app.test', META_ACCESS_TOKEN: 'tok', META_PHONE_NUMBER_ID: '1', META_WEBHOOK_VERIFY_TOKEN: 'vt',
   BALI_FORWARD_SECRET: 'fsec', PAYSTACK_SECRET_KEY: 'sk_test', SESSION_SECRET: 's', NODE_ENV: 'test',
 };
-const sent = []; const refunds = []; const paid = new Set(); let paystackDown = false; let rejectReminderTemplate = false;
-async function http(method, url, { body } = {}) {
+const sent = []; const refunds = []; const paid = new Set(); let paystackDown = false; let rejectReminderTemplate = false; let claudeFail = false;
+const claudeCalls = [];
+async function http(method, url, { body, headers } = {}) {
   const u = new URL(url);
   if (u.hostname === 'graph.facebook.com') { if (rejectReminderTemplate && body.template?.name === 'bali_reservation_reminder') throw new Error('template not approved'); sent.push({ tname: body.template?.name, tcomponents: body.template?.components, to: body.to, type: body.type, text: body.text?.body || body.interactive?.body?.text || body.template?.components?.[0]?.parameters?.[0]?.text, interactive: body.interactive, template: body.type === 'template' }); return { messages: [{ id: 'wamid.' + sent.length }] }; }
   if (u.hostname === 'api.paystack.co') {
     if (u.pathname === '/transaction/initialize') { if (paystackDown) throw new Error('down'); return { data: { authorization_url: 'https://checkout.paystack.com/' + body.reference } }; }
     if (u.pathname.startsWith('/transaction/verify/')) { const ref = decodeURIComponent(u.pathname.split('/').pop()); return { data: paid.has(ref) ? { status: 'success', amount: 2050000 } : { status: 'abandoned', amount: 0 } }; }
     if (u.pathname === '/refund') { refunds.push(body); return { status: true }; }
+  }
+  if (u.hostname === 'api.anthropic.com') {
+    claudeCalls.push({ headers, body });
+    if (claudeFail) throw new Error('claude down');
+    const q = body.messages[0].content;
+    return { content: [{ type: 'text', text: 'Here you go: ' + JSON.stringify(/terrace/i.test(q) ? { found: true, answer: 'Yes, we have a terrace.' } : { found: false, answer: '' }) }] };
   }
   if (u.hostname === 'api.openai.com') throw new Error('no key');
   throw new Error('unexpected ' + url);
@@ -94,6 +101,7 @@ async function http(method, url, { body } = {}) {
   ok(sent.slice(before).some((x) => x.to === G && /confirmed/.test(x.text) && /baliabuja\.mylo\.africa/.test(x.text)), 'guest gets confirmation + order link');
   const row = (await pool.query('select * from reservations where ref=$1', [r1.json.ref])).rows[0];
   ok(row.handed_over_at && row.contact_phone === '2348034445555', 'stored with handover time and the typed phone');
+  ok(r1.json.ref === 'R-001', 'the first reservation is R-001');
 
   console.log('\n4. capacity');
   const G2 = '2348012345002'; await inbound(G2, 'c1'); const t2 = await tokenOf(G2);
@@ -354,6 +362,30 @@ async function http(method, url, { body } = {}) {
   }
   const errBack = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: FT, version: '3.0', data: { ...realBody, name: 'Typed Name', phone: '0803 444 5555', time: '04:00', date: day(32), guests: 'abc' } });
   ok(errBack.json.screen === 'RESERVE' && errBack.json.data.name_init === 'Typed Name' && errBack.json.data.phone_init === '0803 444 5555', 'when something is wrong the typed name and phone come straight back');
+  console.log('\n7j. the AI (Claude) answers only from the knowledge base');
+  env.ANTHROPIC_API_KEY = 'ak-test';
+  await pool.query("update knowledge_base set answer = 'We have a lovely terrace overlooking the garden.' where question = 'Do you have parking?'");
+  await pool.query("insert into knowledge_base (question, answer, keywords, sort_order) values ('Is there an outdoor area?', 'Yes, we have a terrace.', '', 99)");
+  const cb = claudeCalls.length;
+  const kbHit = (await ask('is there parking?')).reply;
+  ok(claudeCalls.length === cb && /terrace overlooking/.test(kbHit), 'a question the knowledge base matches never calls the AI');
+  const viaAi = (await ask('hello, do you have somewhere to sit outside? a terrace maybe')).reply;
+  ok(/Yes, we have a terrace\./.test(viaAi), 'when the matcher finds nothing, the AI answers from the knowledge base');
+  const lastCall = claudeCalls.at(-1);
+  ok(lastCall.headers['x-api-key'] === 'ak-test' && lastCall.headers['anthropic-version'] === '2023-06-01' && lastCall.body.model === 'claude-haiku-5-5', 'request goes to Claude with the key (model claude-haiku-5-5)');
+  ok(/ONLY this knowledge base/.test(lastCall.body.system) && /terrace overlooking the garden/.test(lastCall.body.system) && /Never invent/.test(lastCall.body.system), 'the AI is shown the knowledge base and told never to invent');
+  const un0 = (await pool.query('select count(*)::int n from kb_unanswered')).rows[0].n;
+  const sentBefore = sent.length;
+  const notKb = (await ask('what is the wifi password and do you sell cigars')).reply;
+  await settle();
+  ok(/passed it to the team/.test(notKb) && (await pool.query('select count(*)::int n from kb_unanswered')).rows[0].n === un0 + 1, 'AI says not found: the question goes to the venue instead of being invented');
+  claudeFail = true;
+  const failed = (await ask('another thing entirely about live music nights')).reply;
+  ok(/passed it to the team/.test(failed), 'if the AI is down the bot still answers safely (escalates)');
+  claudeFail = false;
+  delete env.ANTHROPIC_API_KEY;
+  const cb2 = claudeCalls.length; await ask('something about valet and shuttles'); ok(claudeCalls.length === cb2, 'no key set: the AI is never called');
+
   console.log('\n8. dashboard');
   ok((await call('GET', '/api/overview')).status === 401, 'API needs login');
   ok((await call('GET', '/dashboard/')).status === 302, 'dashboard redirects to login');
@@ -377,9 +409,9 @@ async function http(method, url, { body } = {}) {
   ok(kbc.id, 'knowledge base entry added');
   ok(/terrace/.test((await ask('can I bring my dog')).reply), 'bot uses the new entry immediately');
   const kl = (await call('GET', '/api/kb', null, cookie)).json;
-  ok(kl.unanswered.length === 1, 'unanswered list visible');
+  ok(kl.unanswered.length >= 1 && kl.unanswered.some((u) => /pets/.test(u.question)), 'unanswered list visible');
   await call('POST', `/api/kb/unanswered/${kl.unanswered[0].id}/answer`, { question: 'Do you allow pets?', answer: 'Yes on the terrace.' }, cookie);
-  ok((await call('GET', '/api/kb', null, cookie)).json.unanswered.length === 0, 'answering clears it from the unanswered list');
+  ok((await call('GET', '/api/kb', null, cookie)).json.unanswered.length === kl.unanswered.length - 1, 'answering clears it from the unanswered list');
   ok((await call('PUT', `/api/kb/${kbc.id}`, { question: 'Do you allow pets?', answer: 'Updated answer', keywords: '' }, cookie)).json.answer === 'Updated answer', 'edit works');
   await call('DELETE', `/api/kb/${kbc.id}`, null, cookie);
   ok(!(await call('GET', '/api/kb', null, cookie)).json.rows.some((r) => r.id === kbc.id), 'delete works');
@@ -396,6 +428,9 @@ async function http(method, url, { body } = {}) {
   if (pf) { const rr = refunds.length; const sc = await call('POST', `/api/reservations/${pf.ref}/cancel`, { refund: 'full' }, cookie); ok(sc.json.ok && refunds.length === rr + 1 && refunds.at(-1).amount === 2050000, 'staff cancel with full refund returns N20,500'); }
   ok((await call('POST', `/api/reservations/${r1.json.ref}/status`, { status: 'completed' }, cookie)).json.ok, 'mark completed');
 
+  const refs = (await pool.query("select ref from reservations where source = 'form' order by created_at")).rows.map((x) => x.ref).filter((x) => !x.startsWith('RM-'));
+  const refsOk = refs.length > 5 && refs.every((x) => /^R-\d{3,}$/.test(x)) && refs[1] === 'R-002' && new Set(refs).size === refs.length;
+  ok(refsOk, 'numbers run R-001, R-002, ... with no repeats' + (refsOk ? '' : ' (got ' + refs.join(',') + ')'));
   console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
   server.close(); await pool.end(); process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(2); });

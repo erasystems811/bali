@@ -32,22 +32,33 @@ function createEnquiry(ctx, resv) {
   const { pool, env } = ctx;
   const base = () => (env.APP_BASE_URL || '').replace(/\/$/, '');
 
+  // Optional AI pass, ONLY when the keyword matcher found nothing. It may answer from the knowledge base alone and must say
+  // "not found" otherwise (then the question goes to the venue). Claude is used when ANTHROPIC_API_KEY is set; OpenAI otherwise.
   async function llmAnswer(question, entries) {
-    if (!env.OPENAI_API_KEY) return null;
+    const kb = JSON.stringify(entries.map((x) => ({ q: x.question, a: x.answer })));
+    const system = `You answer a guest's question for a venue using ONLY this knowledge base: ${kb}
+Reply ONLY with JSON: {"found": true|false, "answer": "short friendly answer in plain text, no hyphens or asterisks"}. If the knowledge base does not clearly answer the question, found must be false. Never invent facts, prices, hours, menus or policies.`;
     try {
-      const res = await ctx.http('POST', 'https://api.openai.com/v1/chat/completions', {
-        headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-        body: {
-          model: 'gpt-4o-mini', temperature: 0, response_format: { type: 'json_object' },
-          messages: [
-            { role: 'system', content: `Answer a guest's question using ONLY this knowledge base: ${JSON.stringify(entries.map((e) => ({ q: e.question, a: e.answer })))}. Reply ONLY JSON {"found":true|false,"answer":"short friendly plain text, no hyphens or asterisks"}. If the knowledge base does not clearly answer it, found must be false. Never invent facts.` },
-            { role: 'user', content: question },
-          ],
-        },
-      });
-      const j = JSON.parse(res.choices[0].message.content);
-      return j.found && j.answer ? String(j.answer).trim() : null;
-    } catch (e) { return null; }
+      if (env.ANTHROPIC_API_KEY) {
+        const res = await ctx.http('POST', 'https://api.anthropic.com/v1/messages', {
+          headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+          body: { model: env.ANTHROPIC_MODEL || 'claude-haiku-5-5', max_tokens: 300, system, messages: [{ role: 'user', content: question }] },
+        });
+        const text = (res && res.content && res.content[0] && res.content[0].text) || '';
+        const m = text.match(/\{[\s\S]*\}/);
+        const j = JSON.parse(m ? m[0] : text);
+        return j.found && j.answer ? String(j.answer).trim() : null;
+      }
+      if (env.OPENAI_API_KEY) {
+        const res = await ctx.http('POST', 'https://api.openai.com/v1/chat/completions', {
+          headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+          body: { model: 'gpt-4o-mini', temperature: 0, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: question }] },
+        });
+        const j = JSON.parse(res.choices[0].message.content);
+        return j.found && j.answer ? String(j.answer).trim() : null;
+      }
+    } catch (err) { return null; }
+    return null;
   }
 
   // returns {text, action?:{label,url}, chips?:[...]}

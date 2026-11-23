@@ -33,6 +33,7 @@ services:
       BALI_FORWARD_SECRET: ${BALI_FORWARD_SECRET}
       PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY_WORKING:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       FLOW_PRIVATE_KEY_FILE: /keys/flow_private.pem
     volumes: ["/opt/bali/keys:/keys:ro"]
     depends_on: {postgres: {condition: service_healthy}}
