@@ -14,10 +14,10 @@ const env = {
   APP_BASE_URL: 'https://app.test', META_ACCESS_TOKEN: 'tok', META_PHONE_NUMBER_ID: '1', META_WEBHOOK_VERIFY_TOKEN: 'vt',
   BALI_FORWARD_SECRET: 'fsec', PAYSTACK_SECRET_KEY: 'sk_test', SESSION_SECRET: 's', NODE_ENV: 'test',
 };
-const sent = []; const refunds = []; const paid = new Set(); let paystackDown = false;
+const sent = []; const refunds = []; const paid = new Set(); let paystackDown = false; let rejectReminderTemplate = false;
 async function http(method, url, { body } = {}) {
   const u = new URL(url);
-  if (u.hostname === 'graph.facebook.com') { sent.push({ to: body.to, type: body.type, text: body.text?.body || body.interactive?.body?.text || body.template?.components?.[0]?.parameters?.[0]?.text, interactive: body.interactive, template: body.type === 'template' }); return { messages: [{ id: 'wamid.' + sent.length }] }; }
+  if (u.hostname === 'graph.facebook.com') { if (rejectReminderTemplate && body.template?.name === 'bali_reservation_reminder') throw new Error('template not approved'); sent.push({ tname: body.template?.name, tcomponents: body.template?.components, to: body.to, type: body.type, text: body.text?.body || body.interactive?.body?.text || body.template?.components?.[0]?.parameters?.[0]?.text, interactive: body.interactive, template: body.type === 'template' }); return { messages: [{ id: 'wamid.' + sent.length }] }; }
   if (u.hostname === 'api.paystack.co') {
     if (u.pathname === '/transaction/initialize') { if (paystackDown) throw new Error('down'); return { data: { authorization_url: 'https://checkout.paystack.com/' + body.reference } }; }
     if (u.pathname.startsWith('/transaction/verify/')) { const ref = decodeURIComponent(u.pathname.split('/').pop()); return { data: paid.has(ref) ? { status: 'success', amount: 2050000 } : { status: 'abandoned', amount: 0 } }; }
@@ -180,7 +180,10 @@ async function http(method, url, { body } = {}) {
   ok(fm.interactive.header?.image?.link === 'https://app.test/assets/welcome.png' && /WELCOME TO BALI/.test(fm.text) && /\/ask\//.test(fm.text), 'has the Bali picture, welcome text and enquiries link');
   ok(fp.flow_token.startsWith('bali-') && fp.flow_action_payload.screen === 'RESERVE', 'flow token and first screen set');
   const fd = fp.flow_action_payload.data;
-  ok(fd.times === undefined && fd.time_init === '7:00 PM', 'arrival time is typed, starting from a 7:00 PM suggestion');
+  ok(fd.times === undefined && fd.hour_init === '19' && fd.minute_init === '00', 'arrival time starts from a 7:00 PM suggestion on the pickers');
+  const fjs = require('../lib/flow').flowJson('A'); const formKids = fjs.screens[0].layout.children.find((c) => c.type === 'Form').children;
+  const hourDd = formKids.find((c) => c.name === 'hour'); const minDd = formKids.find((c) => c.name === 'minute');
+  ok(hourDd.type === 'Dropdown' && hourDd['data-source'].length === 24 && hourDd['data-source'][0].id === '12' && hourDd['data-source'][11].id === '23' && hourDd['data-source'][12].id === '00' && minDd['data-source'].length === 12, 'hour list runs 12 to 23 then 0 to 11, minutes in 5s');
   ok(fd.guests_hint === 'Up to 8 guests online' && fd.guests === undefined, 'guests is typed, with the online limit as a hint');
   ok(!('footer' in fm.interactive), 'no footer on the main welcome message');
   ok(fd.min_date === day(0) && fd.max_date === day(60) && fd.unavailable.length >= 8 && fd.unavailable.every((d) => new Date(d + 'T00:00:00Z').getUTCDay() === 1), 'date range is live and Mondays (closed) are unavailable');
@@ -243,8 +246,9 @@ async function http(method, url, { body } = {}) {
   const H = '2348012345201'; await inbound(H, 'h1'); const hTok = await tokenOf(H); const FT = 'bali-' + hTok;
   const init = await flowCall({ action: 'INIT', flow_token: FT, version: '3.0' });
   ok(init.json.screen === 'RESERVE' && init.json.data.has_error === false, 'INIT returns the live form');
-  ok(init.json.data.time_init === '7:00 PM' && init.json.data.guests_init === '2' && /^\d{4}-\d{2}-\d{2}$/.test(init.json.data.date_init), 'form starts with valid defaults');
-  const ex = (data, token) => flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: token || FT, version: '3.0', data });
+  ok(init.json.data.hour_init === '19' && init.json.data.minute_init === '00' && init.json.data.guests_init === '2' && /^\d{4}-\d{2}-\d{2}$/.test(init.json.data.date_init), 'form starts with valid defaults');
+  const hm = (d) => (/^\d{2}:\d{2}$/.test(d.time || '') ? { ...d, hour: d.time.slice(0, 2), minute: d.time.slice(3), time: undefined } : d);
+  const ex = (data, token) => flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: token || FT, version: '3.0', data: hm(data) });
   const bad7 = await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '03:00', guests: '2' });
   ok(bad7.json.screen === 'RESERVE' && bad7.json.data.has_error && /between/.test(bad7.json.data.error) && bad7.json.data.name_init === 'Kunle Ade' && bad7.json.data.date_init === day(20), 'a bad time sends the guest back with the reason and their entries kept');
   ok((await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803', date: day(20), time: '19:00', guests: '2' })).json.data.error.includes('valid phone'), 'bad phone caught inside the form');
@@ -261,15 +265,15 @@ async function http(method, url, { body } = {}) {
   ok(stolen.screen === 'PAY' && stolen.data.amount_label === 'Start again' && !stolen.data.pay_url.includes('paystack'), "another guest's token cannot touch this reservation");
   const kr = (await pool.query('select paystack_ref from reservations where ref=$1', [kref])).rows[0].paystack_ref; paid.add(kr);
   const done7 = await ex({ action: 'check', ref: kref }); await settle();
-  ok(done7.json.screen === 'DONE' && done7.json.data.credit.includes('credited') && /order link are in this chat/.test(done7.json.data.credit) && done7.json.data.order_url === undefined, 'after paying, the confirmation screen sends them back to the chat for the order link');
+  ok(done7.json.screen === 'DONE' && done7.json.data.credit.includes('credited') && /link to order ahead are in this chat/.test(done7.json.data.credit) && done7.json.data.order_url === undefined, 'after paying, the confirmation screen sends them back to the chat for the order-ahead link');
   ok(sent.slice(hb).some((x) => x.to === HANDOVER && /Kunle Ade/.test(x.text) && /2348031234567/.test(x.text) && /Guests: 4/.test(x.text) && /Arrival: 7:15pm/.test(x.text)), 'details handed over to the venue after payment');
-  ok(sent.slice(hb).some((x) => x.to === H && /confirmed/.test(x.text) && /baliabuja/.test(x.text)), 'guest also gets the WhatsApp confirmation with the order link');
+  ok(sent.slice(hb).some((x) => x.to === H && /confirmed/.test(x.text) && /place an order ahead for that day, you can do that through this link: https:\/\/baliabuja\.mylo\.africa/.test(x.text)), 'guest also gets the WhatsApp confirmation inviting them to order ahead through the link');
   const nb = sent.length; await submit(H, 'fin1', { ref: kref, flow_token: FT }); ok(sent.length === nb, 'finishing the form (Done) triggers nothing extra');
   const full7 = await ex({ action: 'reserve', name: 'Late Guest', phone: '0803 999 0000', date: day(20), time: '19:30', guests: '8' });
   ok(full7.json.screen === 'RESERVE' && /fully booked/.test(full7.json.data.error), 'a full time is reported inside the form');
   await pool.query("update reservation_settings set payments_enabled=false where id=1");
   const free7 = await ex({ action: 'reserve', name: 'Free Guest', phone: '0803 777 0000', date: day(21), time: '18:00', guests: '2' }); await settle();
-  ok(free7.json.screen === 'DONE' && !free7.json.data.credit.includes('credited') && /order link are in this chat/.test(free7.json.data.credit), 'payments off: straight to the confirmation screen');
+  ok(free7.json.screen === 'DONE' && !free7.json.data.credit.includes('credited') && /link to order ahead are in this chat/.test(free7.json.data.credit), 'payments off: straight to the confirmation screen');
   await pool.query("update reservation_settings set payments_enabled=true where id=1");
   const fj = require('../lib/flow').flowJson('AAAA');
   ok(fj.screens.map((s) => s.id).join() === 'RESERVE,PAY,DONE' && fj.data_api_version === '3.0' && fj.screens[2].terminal, 'form definition has the three screens and an endpoint');
@@ -298,10 +302,40 @@ async function http(method, url, { body } = {}) {
   const ft24 = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + t24, version: '3.0', data: { action: 'reserve', name: 'Typed Time', phone: '0803 222 3333', date: day(27), time: '11:45 pm', guests: '2' } });
   ok(ft24.json.screen === 'PAY' || ft24.json.screen === 'DONE', 'typing "11:45 pm" in the form works');
   const amb = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + t24, version: '3.0', data: { action: 'reserve', name: 'Typed Time', phone: '0803 222 3333', date: day(27), time: '7:30', guests: '2' } });
-  ok(amb.json.screen === 'RESERVE' && /AM or PM/.test(amb.json.data.error) && amb.json.data.time_init === '7:30', 'an ambiguous time is sent back asking for AM or PM, entry kept');
+  ok(amb.json.screen === 'RESERVE' && /AM or PM/.test(amb.json.data.error), 'an ambiguous typed time (older form versions) is sent back asking for AM or PM');
   const lo = await require('../lib/core').loadSettings({ pool });
   ok(lo.open_time === '00:00' && lo.close_time === '24:00', 'settings expose 24 hour hours');
   await pool.query("update reservation_settings set open_24_7=false, max_guests_per_slot=10, max_guests_per_booking=8 where id=1");
+  console.log('\n7g. reminders 6 hours before every reservation');
+  await pool.query("update reservation_settings set reminder_hours=6 where id=1");
+  const mk = async (ph, name, hoursAhead, createdHoursAgo) => (await pool.query("insert into reservations (ref, phone_number, contact_phone, guest_name, guests, starts_at, status, created_at) values ($1,$2,$2,$3,2, now() + ($4 || ' hours')::interval, 'confirmed', now() - ($5 || ' hours')::interval) returning ref", ['RM-' + (1000 + Math.floor(Math.random() * 9000)), ph, name, String(hoursAhead), String(createdHoursAgo)])).rows[0].ref;
+  const RO = '2348012345401'; await inbound(RO, 'ro1'); const roTok = await tokenOf(RO);   // window open
+  const RC = '2348012345402'; await pool.query("insert into web_sessions (token, phone_number) values ('tokRC', $1)", [RC]);                  // window closed (never messaged)
+  const RJ = '2348012345403'; await pool.query("insert into web_sessions (token, phone_number) values ('tokRJ', $1)", [RJ]);                  // window closed, template not approved
+  await mk(RO, 'Remy Open', 5, 48); await mk(RC, 'Remy Closed', 5, 48); await mk(RJ, 'Remy Reject', 5, 48);
+  await mk('2348012345404', 'Remy Later', 9, 48);          // 9h away: not yet
+  await mk('2348012345405', 'Remy LateBooked', 4, 1);      // booked inside the 6h: nothing to remind
+  await pool.query("update reservations set status='cancelled' where guest_name='Remy Cancelled'");
+  const rb = sent.length; rejectReminderTemplate = false;
+  const mkC = await mk('2348012345406', 'Remy Cancelled', 5, 48); await pool.query("update reservations set status='cancelled' where ref=$1", [mkC]);
+  const n1 = await app.reminders.tick(); await settle();
+  const rsent = sent.slice(rb);
+  const open = rsent.find((x) => x.to === RO);
+  ok(open?.interactive?.type === 'cta_url' && open.interactive.action.parameters.display_text === 'CHAT WITH US' && open.interactive.action.parameters.url === `https://app.test/ask/${roTok}`, 'window open: reminder with a CHAT WITH US button that opens the enquiry chat');
+  ok(/^Hey Remy, just a reminder that by \d{1,2}:\d{2} (AM|PM) (today|tomorrow) you'll be spending time with us at Bali\. We are excited and we can't wait to see you!/.test(open.text), 'the reminder is warm: Hey Remy, just a reminder that by <time> you will be spending time with us at Bali, we are excited and cannot wait to see you');
+  ok(/Table for 2 guests, Ref RM-/.test(open.text) && /For further enquiries, you can tap the button below to chat with us\.$/.test(open.text), 'it carries the booking details and the enquiries line');
+  const tpl = rsent.find((x) => x.to === RC);
+  ok(tpl?.tname === 'bali_reservation_reminder' && tpl.tcomponents[0].parameters[0].text === 'Remy' && /^\d{1,2}:\d{2} (AM|PM) (today|tomorrow)$/.test(tpl.tcomponents[0].parameters[1].text) && /^Table for 2 guests, Ref RM-/.test(tpl.tcomponents[0].parameters[2].text) && tpl.tcomponents[1].sub_type === 'url' && tpl.tcomponents[1].parameters[0].text === 'tokRC', 'window closed: the approved reminder template with the chat button for this guest');
+  ok(n1 === 3 && !rsent.some((x) => x.to === '2348012345404' || x.to === '2348012345405' || x.to === '2348012345406'), 'only due reservations are reminded (not 9h away, not booked late, not cancelled)');
+  const n2 = await app.reminders.tick(); ok(n2 === 0, 'a reminder is sent once only');
+  ok((await pool.query("select count(*)::int n from reservations where guest_name like 'Remy %' and reminder_sent_at is not null")).rows[0].n === 3, 'reminder time is recorded');
+  await pool.query("update reservations set reminder_sent_at=null, reminder_tries=0 where guest_name='Remy Reject'"); rejectReminderTemplate = true; const rb2 = sent.length;
+  await app.reminders.tick(); await settle();
+  ok(sent.slice(rb2).some((x) => x.to === RJ && x.template) && (await pool.query("select message_text from queued_messages where phone_number=$1", [RJ])).rows.some((q) => /chat with us here: https:\/\/app\.test\/ask\/tokRJ/.test(q.message_text)), 'template not approved yet: falls back to the ping + queued text with the chat link');
+  rejectReminderTemplate = false;
+  await pool.query("update reservations set reminder_sent_at=null where guest_name='Remy Open'"); await pool.query("update reservation_settings set reminder_hours=0 where id=1");
+  ok((await app.reminders.tick()) === 0, 'reminders can be turned off (0 hours)');
+  await pool.query("update reservation_settings set reminder_hours=6 where id=1");
   console.log('\n8. dashboard');
   ok((await call('GET', '/api/overview')).status === 401, 'API needs login');
   ok((await call('GET', '/dashboard/')).status === 302, 'dashboard redirects to login');

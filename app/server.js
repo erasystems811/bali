@@ -9,6 +9,7 @@ const { createWa } = require('./lib/wa');
 const { createPaystack } = require('./lib/paystack');
 const { createResv } = require('./lib/resv');
 const { createEnquiry } = require('./lib/enquiry');
+const { createReminders } = require('./lib/reminders');
 const pages = require('./views/pages');
 const flow = require('./lib/flow');
 const { createFlowEndpoint } = require('./lib/flowendpoint');
@@ -29,6 +30,7 @@ function buildApp(ctx) {
   const resv = createResv(ctx, wa, ps);
   const enquiry = createEnquiry(ctx, resv);
   const flowEndpoint = createFlowEndpoint(ctx, resv);
+  const reminders = createReminders(ctx, wa, resv);
   const base = () => (env.APP_BASE_URL || '').replace(/\/$/, '');
 
   const app = express();
@@ -379,7 +381,7 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
     venue_name: 'text', open_time: 'time', close_time: 'time', slot_minutes: 'int', max_guests_per_slot: 'int', max_guests_per_booking: 'int',
     min_notice_minutes: 'int', max_days_ahead: 'int', closed_weekdays: 'intarr', reservation_fee_kobo: 'int', service_fee_kobo: 'int',
     hold_minutes: 'int', refund_hours: 'int', order_link: 'text', welcome_image_url: 'text', welcome_text: 'text', handover_number: 'phone',
-    payments_enabled: 'bool', open_24_7: 'bool', enquiry_intro: 'text', venue_notes: 'text', flow_id: 'text',
+    payments_enabled: 'bool', open_24_7: 'bool', reminder_hours: 'int', enquiry_intro: 'text', venue_notes: 'text', flow_id: 'text',
   };
   api.get('/settings', wrap(async (req, res) => { const S = await loadSettings(ctx); res.json({ settings: S, paystackConfigured: ps.configured, whatsappConfigured: !!env.META_ACCESS_TOKEN }); }));
   api.put('/settings', wrap(async (req, res) => {
@@ -406,6 +408,7 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
   }));
   app.use('/api', api);
 
+  app.reminders = reminders;
   return app;
 }
 
@@ -417,6 +420,7 @@ if (require.main === module) {
   const app = buildApp({ pool, env, http });
   const port = Number(env.PORT || 3000);
   // unpaid holds past their time are marked expired so the dashboard never shows stale "pending" rows
+  setInterval(() => app.reminders.tick().catch((e) => console.error('reminder tick', e.message)), 60000);
   setInterval(() => pool.query("update reservations set status='expired', updated_at=now() where status='pending_payment' and hold_expires_at < now()").catch(() => {}), 60000);
   app.listen(port, () => console.log(`Bali app listening on ${port}`));
 }

@@ -51,6 +51,12 @@ function createWa(ctx) {
     if (image) interactive.header = { type: 'image', image: { link: image } };
     return graph({ to, type: 'interactive', interactive });
   }
+  // An approved message template (needed outside the 24h window). components = Graph API components array.
+  async function sendTemplateMessage(to, name, language, components, logText) {
+    await log(to, 'outbound', logText || `[template ${name}]`);
+    if (SANDBOX) { ctx.sandbox?.push({ to, text: logText || name, kind: 'template-named', name, components }); return null; }
+    return graph({ to, type: 'template', template: { name, language: { code: language }, components } });
+  }
   // The native WhatsApp form (Flow): one message with a header picture, text and a button that opens the form INSIDE WhatsApp.
   async function sendFlow(to, { image, body, footer, cta, flowId, token, data }) {
     await log(to, 'outbound', `${body} [${cta}]`);
@@ -72,6 +78,6 @@ function createWa(ctx) {
     }
     return rows.length;
   }
-  return { send, sendCta, sendFlow, flushQueue, log, withinWindow };
+  return { send, sendCta, sendFlow, sendTemplateMessage, flushQueue, log, withinWindow };
 }
 module.exports = { createWa };

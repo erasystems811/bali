@@ -155,7 +155,7 @@ function createResv(ctx, wa, ps) {
     await pool.query('update reservations set handed_over_at = case when $2 then now() else handed_over_at end, updated_at = now() where ref=$1', [r.ref, ok]);
     const link = S.order_link ? `${S.order_link}${S.order_link.includes('?') ? '&' : '?'}ref=${r.ref}` : '';
     const credit = paid ? ` Your ${naira(S.reservation_fee_kobo)} is credited to your order on the day.` : '';
-    const msg = `Your table at ${S.venue_name} is confirmed ✅\n\nRef: ${r.ref}\nName: ${r.guest_name}\n${describe(r, T)}.${credit}${link ? `\n\nPlace your order for the day here: ${link}` : ''}`;
+    const msg = `Your table at ${S.venue_name} is confirmed ✅\n\nRef: ${r.ref}\nName: ${r.guest_name}\n${describe(r, T)}.${credit}${link ? `\n\nIf you would like to place an order ahead for that day, you can do that through this link: ${link}` : ''}`;
     try { await wa.send(r.phone_number, msg, 'your reservation'); } catch (e) {}
   }
 

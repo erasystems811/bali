@@ -8,6 +8,14 @@ const { makeTime } = require('./core');
 
 const SCREEN = 'RESERVE';
 
+// Arrival time is picked from two lists (WhatsApp has no native clock): Hour starts at 12 and runs to 23, then 0 to 11
+// (Bali is open 24 hours), Minute goes in 5s.
+const HOURS = [...Array.from({ length: 12 }, (_, i) => 12 + i), ...Array.from({ length: 12 }, (_, i) => i)].map((h) => ({
+  id: String(h).padStart(2, '0'),
+  title: `${h % 12 || 12} ${h >= 12 ? 'PM' : 'AM'} (${h})`,
+}));
+const MINUTES = Array.from({ length: 12 }, (_, i) => ({ id: String(i * 5).padStart(2, '0'), title: ':' + String(i * 5).padStart(2, '0') }));
+
 function flowJson(logoBase64) {
   const opt = { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' } } } };
   const logo = { type: 'Image', src: logoBase64, height: 110, 'scale-type': 'contain' };
@@ -23,7 +31,7 @@ function flowJson(logoBase64) {
           intro: str('Tell us when you are coming and we will hold your table.'),
           has_error: { type: 'boolean', __example__: false },
           error: str(' '),
-          name_init: str('Ada Okafor'), phone_init: str('+2348012345678'), date_init: str('2026-12-05'), time_init: str('7:00 PM'), guests_init: str('2'),
+          name_init: str('Ada Okafor'), phone_init: str('+2348012345678'), date_init: str('2026-12-05'), hour_init: str('19'), minute_init: str('00'), guests_init: str('2'),
           min_date: str('2026-12-01'), max_date: str('2027-01-30'),
           unavailable: { type: 'array', items: { type: 'string' }, __example__: ['2026-12-07'] },
           guests_hint: str('Up to 12 guests online'),
@@ -37,15 +45,16 @@ function flowJson(logoBase64) {
             { type: 'TextBody', text: '${data.error}', visible: '${data.has_error}', 'font-weight': 'bold' },
             {
               type: 'Form', name: 'form',
-              'init-values': { name: '${data.name_init}', phone: '${data.phone_init}', date: '${data.date_init}', time: '${data.time_init}', guests: '${data.guests_init}' },
+              'init-values': { name: '${data.name_init}', phone: '${data.phone_init}', date: '${data.date_init}', hour: '${data.hour_init}', minute: '${data.minute_init}', guests: '${data.guests_init}' },
               children: [
                 { type: 'TextInput', name: 'name', label: 'Full name', 'input-type': 'text', required: true },
                 { type: 'TextInput', name: 'phone', label: 'Phone number', 'input-type': 'phone', required: true },
                 { type: 'DatePicker', name: 'date', label: 'Date', required: true, 'min-date': '${data.min_date}', 'max-date': '${data.max_date}', 'unavailable-dates': '${data.unavailable}' },
-                { type: 'TextInput', name: 'time', label: 'Arrival time', 'input-type': 'text', required: true, 'helper-text': 'Type the time you want to come, e.g. 7:30 PM or 19:30' },
+                { type: 'Dropdown', name: 'hour', label: 'Arrival hour', required: true, 'data-source': HOURS },
+                { type: 'Dropdown', name: 'minute', label: 'Arrival minutes', required: true, 'data-source': MINUTES },
                 { type: 'TextInput', name: 'guests', label: 'Number of guests', 'input-type': 'number', required: true, 'helper-text': '${data.guests_hint}' },
                 { type: 'TextCaption', text: 'Powered by ERA Systems' },
-                { type: 'Footer', label: 'Continue', 'on-click-action': { name: 'data_exchange', payload: { action: 'reserve', name: '${form.name}', phone: '${form.phone}', date: '${form.date}', time: '${form.time}', guests: '${form.guests}' } } },
+                { type: 'Footer', label: 'Continue', 'on-click-action': { name: 'data_exchange', payload: { action: 'reserve', name: '${form.name}', phone: '${form.phone}', date: '${form.date}', hour: '${form.hour}', minute: '${form.minute}', guests: '${form.guests}' } } },
               ],
             },
           ],
@@ -80,7 +89,7 @@ function flowJson(logoBase64) {
         id: 'DONE', title: 'Table confirmed', terminal: true, success: true,
         data: {
           summary: str('Ada Okafor\nFriday 5 Dec at 7pm for 4 guests\nRef R-1234'),
-          credit: str('Your ₦20,000 is credited to your order on the day. Your confirmation and order link are in this chat.'),
+          credit: str('Your ₦20,000 is credited to your order on the day. Your confirmation and the link to order ahead are in this chat.'),
           ref: str('R-1234'),
         },
         layout: {
@@ -110,7 +119,6 @@ function flowData(S, { intro, nameInit, phoneInit, now } = {}) {
   const closed = S.closed_weekdays || [];
   const unavailable = [];
   if (closed.length) for (let d = today; d <= max; d = T.addDaysISO(d, 1)) if (closed.includes(T.dowOf(d))) unavailable.push(d);
-  const label = (m) => `${Math.floor(m / 60) % 12 || 12}:${String(m % 60).padStart(2, '0')} ${m >= 720 && m < 1440 ? 'PM' : 'AM'}`;
   const evening = Math.min(Math.max(19 * 60, T.toMin(S.open_time)), T.lastSeatingMin());
   // sensible, VALID defaults so the form starts filled: the next open day, 7pm (or the first slot), 2 guests
   let first = T.addDaysISO(today, 1);
@@ -119,7 +127,7 @@ function flowData(S, { intro, nameInit, phoneInit, now } = {}) {
     intro: intro || 'Tell us when you are coming and we will hold your table.',
     has_error: false, error: ' ',
     name_init: nameInit || '', phone_init: phoneInit || '',
-    date_init: first <= max ? first : today, time_init: label(evening), guests_init: '2',
+    date_init: first <= max ? first : today, hour_init: String(Math.floor(evening / 60)).padStart(2, '0'), minute_init: String(Math.floor((evening % 60) / 5) * 5).padStart(2, '0'), guests_init: '2',
     min_date: today, max_date: max, unavailable: unavailable.length ? unavailable : ['2000-01-01'], // an empty list is rejected by WhatsApp
     guests_hint: S.max_guests_per_booking > 0 ? `Up to ${S.max_guests_per_booking} guests online` : 'Any number of guests',
   };
