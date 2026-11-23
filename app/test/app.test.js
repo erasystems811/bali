@@ -129,7 +129,7 @@ async function http(method, url, { body, headers } = {}) {
   const pref = (await pool.query('select paystack_ref from reservations where ref=$1', [pr.json.ref])).rows[0].paystack_ref;
   const b2 = sent.length;
   ok(!sent.slice(b2).some((x) => x.to === HANDOVER), 'nothing handed over before payment');
-  ok(/Waiting for your payment/.test((await call('GET', `/reserve/${tp}/done?ref=${pr.json.ref}`)).text), 'return page waits while unpaid');
+  ok(/Confirming your payment/.test((await call('GET', `/reserve/${tp}/done?ref=${pr.json.ref}`)).text), 'return page waits while unpaid');
   paid.add(pref);
   const done = await call('GET', `/reserve/${tp}/done?ref=${pr.json.ref}`); await settle();
   ok(/Your table is confirmed/.test(done.text) && /Place your order/.test(done.text), 'return page confirms and shows the order button');
@@ -523,7 +523,7 @@ async function http(method, url, { body, headers } = {}) {
   const mnLogin = monnifyCalls.find((c) => c.path === '/api/v1/auth/login'); const mnInit = monnifyCalls.filter((c) => c.path.endsWith('init-transaction')).at(-1);
   ok(mnLogin.headers.Authorization === 'Basic ' + Buffer.from('MK_TEST_X:SECRETY').toString('base64'), 'logs in with the API key and secret (Basic auth)');
   ok(mnInit.headers.Authorization === 'Bearer mtok' && mnInit.body.amount === 20500 && mnInit.body.contractCode === '1234567' && mnInit.body.currencyCode === 'NGN' && mnInit.body.customerName === 'Mona Nify' && /^BALI-/.test(mnInit.body.paymentReference) && /\/reserve\/.+\/done\?ref=/.test(mnInit.body.redirectUrl), 'mnInit request: amount in naira (20500), contract code, guest name, our reference, return link');
-  ok(/Waiting for your payment/.test((await call('GET', `/reserve/${mnTok}/done?ref=${mnRes.json.ref}`)).text), 'unpaid: the return page waits');
+  ok(/Confirming your payment/.test((await call('GET', `/reserve/${mnTok}/done?ref=${mnRes.json.ref}`)).text), 'unpaid: the return page waits');
   const mnRef = (await pool.query('select paystack_ref from reservations where ref=$1', [mnRes.json.ref])).rows[0].paystack_ref; paid.add(mnRef);
   const hm0 = sent.length;
   await call('POST', '/webhook/monnify', { eventType: 'SUCCESSFUL_TRANSACTION', eventData: { paymentReference: mnRef, paymentStatus: 'PAID', amountPaid: 20500 } }); await settle();
@@ -575,7 +575,7 @@ async function http(method, url, { body, headers } = {}) {
   const whRef = whRes.json.data.ref; const whPay = (await pool.query('select paystack_ref from reservations where ref=$1', [whRef])).rows[0].paystack_ref; paid.add(whPay); // the money has arrived at the provider
   const hw0 = sent.length;
   const pg1 = (await call('GET', `/reserve/${whTok}/done?ref=${whRef}`)).text;
-  ok(/Waiting for your payment/.test(pg1) && !/Your table is confirmed/.test(pg1), 'return page: paid but the webhook has not arrived: it still says waiting, never confirmed');
+  ok(/Confirming your payment/.test(pg1) && !/Your table is confirmed/.test(pg1), 'webhook-only mode (opt-in): paid but the webhook has not arrived: the return page still says Confirming your payment, never confirmed');
   const chk1 = await flowCall({ action: 'data_exchange', screen: 'PAY', flow_token: 'bali-' + whTok, version: '3.0', data: { step: 'check', ref: whRef } });
   ok(chk1.json.screen === 'WAIT' && /received your payment/.test(chk1.json.data.message) && chk1.json.data.has_pay_link === false, 'I have paid, money received but the webhook has not arrived: a Confirming your payment screen');
   ok((await pool.query('select status from reservations where ref=$1', [whRef])).rows[0].status === 'pending_payment' && !sent.slice(hw0).some((x) => x.to === HANDOVER || /confirmed/.test(x.text || '')), 'nothing is confirmed, handed over or messaged yet');
@@ -624,6 +624,24 @@ async function http(method, url, { body, headers } = {}) {
   const w_r6 = await w_chk(w_g3);
   ok(w_r6.json.screen === 'PAY' && /no longer held/.test(w_r6.json.data.error_message), 'an expired hold: the guest stays on the payment screen with a clear message');
   delete appCtx.flowPollMs; delete appCtx.flowPollEveryMs;
+  await pool.query("update reservation_settings set confirm_via_webhook=false, payments_enabled=true, open_24_7=false where id=1");
+
+  console.log('\n7t. payment received = table confirmed immediately (default)');
+  await pool.query("update reservation_settings set confirm_via_webhook=false, payments_enabled=true, open_24_7=true where id=1");
+  const IM = '2348012345991'; await inbound(IM, 'im1'); const imTok = await tokenOf(IM);
+  const imRes = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + imTok, version: '3.0', data: { step: 'reserve', name: 'Instant Confirm', phone: '0803 900 1212', date: day(42), time: '20:00', guests: '2' } });
+  const imRef = imRes.json.data.ref;
+  const imWait = await flowCall({ action: 'data_exchange', screen: 'PAY', flow_token: 'bali-' + imTok, version: '3.0', data: { step: 'check', ref: imRef } });
+  ok(imWait.json.screen === 'WAIT' && /not received your payment/.test(imWait.json.data.message), 'payment NOT received yet: the Confirming your payment screen');
+  paid.add((await pool.query('select paystack_ref from reservations where ref=$1', [imRef])).rows[0].paystack_ref);
+  const imHand = sent.length;
+  const imDone = await flowCall({ action: 'data_exchange', screen: 'WAIT', flow_token: 'bali-' + imTok, version: '3.0', data: { step: 'check', ref: imRef } }); await settle();
+  ok(imDone.json.screen === 'DONE', 'the moment Monnify says the money is received, the very next tap goes straight to the confirmed screen (no webhook needed)');
+  ok((await pool.query('select status from reservations where ref=$1', [imRef])).rows[0].status === 'confirmed' && sent.slice(imHand).some((x) => x.to === HANDOVER && /Instant Confirm/.test(x.text || '')), 'the table is confirmed and handed over at once');
+  const IM2 = '2348012345992'; await inbound(IM2, 'im2'); const im2Tok = await tokenOf(IM2);
+  const im2 = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + im2Tok, version: '3.0', data: { step: 'reserve', name: 'Return Page', phone: '0803 900 1313', date: day(42), time: '21:00', guests: '2' } });
+  paid.add((await pool.query('select paystack_ref from reservations where ref=$1', [im2.json.data.ref])).rows[0].paystack_ref);
+  ok(/Payment received/.test((await call('GET', `/reserve/${im2Tok}/done?ref=${im2.json.data.ref}`)).text), 'coming back from the payment page after paying: confirmed straight away');
   await pool.query("update reservation_settings set confirm_via_webhook=false, payments_enabled=true, open_24_7=false where id=1");
 
   console.log('\n8. dashboard');

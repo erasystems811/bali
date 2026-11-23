@@ -116,7 +116,7 @@ function done({ S, T, r, state, token, describe, waNumber }) {
     <a class="btn ghost" style="margin-top:12px" href="/my/${esc(token)}">Change or cancel</a>`;
     }
   } else if (state === 'pending' || state === 'pending_payment') {
-    inner = `<div class="tick wait">…</div><h1 class="center">Waiting for your payment</h1><p class="sub center">If you have just paid, this page updates by itself.</p><div class="card">${kv}</div><a class="btn ghost" style="margin-top:16px" href="">Check again</a>
+    inner = `<div class="tick wait">…</div><h1 class="center">Confirming your payment</h1><p class="sub center">If you have just paid, this page updates by itself.</p><div class="card">${kv}</div><a class="btn ghost" style="margin-top:16px" href="">Check again</a>
     <script>setTimeout(()=>location.reload(),4000)</script>`;
   } else {
     inner = `<div class="tick wait">!</div><h1 class="center">This reservation is ${esc(state.replace('_', ' '))}</h1><p class="sub center">If you paid and see this, message us on WhatsApp and we will sort it out.</p><a class="btn" href="/reserve/${esc(token)}">Make a new reservation</a>`;
