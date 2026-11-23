@@ -12,7 +12,7 @@ then fix this file.
 
 ## What this business needs
 
-Bali is a venue with many vendors. Guests reserve TABLES. Standalone Node app in `app/` (no n8n); see `ops/README.md` for the full picture. Flow: WhatsApp card (picture + TABLE RESERVATION button + enquiries link) -> form (name, phone, date, arrival time, guests) -> Paystack N20,500 (N20,000 credited to the order + N500 fee, refund of N20,000 if cancelled 24h+ ahead) -> details sent to the HANDOVER number + stored -> order link baliabuja.mylo.africa. Enquiry chat answers only from the knowledge_base table. Dashboard tabs: Reservations (graphs), Chats, Knowledge base, Settings.
+Bali is a venue with many vendors. Guests reserve TABLES. Standalone Node app in `app/` (no n8n); see `ops/README.md` for the full picture. Flow: WhatsApp message (Bali picture + TABLE RESERVATION button + enquiries link) -> NATIVE WhatsApp form (a published Flow, ID in reservation_settings.flow_id, definition in app/lib/flow.js, publish with scripts/publish-flow.js; dates/times/closed days are sent live with every message; website form /reserve is only the fallback when flow_id is empty) with name, phone, date, arrival time, guests -> Paystack N20,500 (N20,000 credited to the order + N500 fee, refund of N20,000 if cancelled 24h+ ahead) -> details sent to the HANDOVER number + stored -> order link baliabuja.mylo.africa. Enquiry chat answers only from the knowledge_base table. Dashboard tabs: Reservations (graphs), Chats, Knowledge base, Settings.
 
 ## What is built (2026-11-23)
 

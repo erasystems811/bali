@@ -10,6 +10,7 @@ const { createPaystack } = require('./lib/paystack');
 const { createResv } = require('./lib/resv');
 const { createEnquiry } = require('./lib/enquiry');
 const pages = require('./views/pages');
+const flow = require('./lib/flow');
 
 async function http(method, url, { headers, body } = {}) {
   const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(25000) });
@@ -56,8 +57,25 @@ function buildApp(ctx) {
     res.sendStatus(403);
   });
 
+  async function sendForm(S, phone, token, { intro, nameInit } = {}) {
+    const askUrl = `${base()}/ask/${token}`;
+    return wa.sendFlow(phone, {
+      image: S.welcome_image_url || `${base()}/assets/welcome.png`,
+      body: `${intro ? intro + '\n\n' : ''}${S.welcome_text}\n\nHave a question instead? Tap here to chat: ${askUrl}`,
+      footer: 'Powered by ERA Systems', cta: 'TABLE RESERVATION', flowId: S.flow_id, token: `bali-${token}`,
+      data: flow.flowData(S, { intro: intro || '', nameInit, phoneInit: `+${phone}` }),
+    });
+  }
+
   async function welcomeCard(S, phone) {
     const token = await resv.sessionToken(phone);
+    if (S.flow_id) {
+      const { rows: w } = await pool.query('select welcomed_at from web_sessions where token=$1', [token]);
+      await pool.query('update web_sessions set welcomed_at = now(), last_seen = now() where token=$1', [token]);
+      if (w[0]?.welcomed_at && Date.now() - new Date(w[0].welcomed_at).getTime() < 90000) return; // ignore rapid repeat texts
+      const { rows: c } = await pool.query('select name from contacts where phone_number=$1', [phone]);
+      return sendForm(S, phone, token, { nameInit: c[0]?.name || '' });
+    }
     const formUrl = `${base()}/reserve/${token}`;
     const askUrl = `${base()}/ask/${token}`;
     const { rows } = await pool.query('select welcomed_at from web_sessions where token=$1', [token]);
@@ -88,10 +106,38 @@ function buildApp(ctx) {
         await wa.log(from, 'inbound', m.text?.body || `[${m.type}]`);
         await wa.flushQueue(from);
         if (from === handover) continue; // the venue's own number never gets the guest welcome
+        if (m.type === 'interactive' && m.interactive?.type === 'nfm_reply') { await handleFormSubmission(S, from, m.interactive.nfm_reply); continue; }
         await welcomeCard(S, from);
       }
     })().catch((e) => console.error('webhook error', e));
   });
+
+  // A guest finished the native form inside WhatsApp.
+  async function handleFormSubmission(S, from, nfm) {
+    let r = {}; try { r = JSON.parse(nfm.response_json || '{}'); } catch (e) {}
+    await wa.log(from, 'inbound', `[form] ${r.name || ''} ${r.date || ''} ${r.time || ''} ${r.guests || ''}`);
+    const token = await resv.sessionToken(from);
+    const T = makeTime(S);
+    const out = await resv.createFromForm({ name: r.name, phone: r.phone, date: flow.normalizeDate(r.date, S), time: r.time, guests: r.guests }, from);
+    if (!out.ok) {
+      const msg = Object.values(out.errors || {})[0] || 'Something went wrong with that booking.';
+      await sendForm(S, from, token, { intro: `Sorry: ${msg}`, nameInit: r.name });
+      return;
+    }
+    if (out.status === 'pending_payment') {
+      const { rows } = await pool.query('select * from reservations where ref=$1', [out.ref]);
+      const rr = rows[0];
+      await wa.sendCta(from, {
+        body: `Almost done ${rr.guest_name.split(' ')[0]}. Your table is held for ${S.hold_minutes} minutes:
+
+${resv.describe(rr, T)}
+Ref: ${rr.ref}
+
+Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is credited to your food and drinks order on the day, plus a ${naira(S.service_fee_kobo)} service fee.`,
+        button: `PAY ${naira(out.amountKobo)}`.slice(0, 20), url: out.payUrl,
+      });
+    } // free reservations were confirmed (and the guest messaged) inside createFromForm
+  }
 
   app.post('/webhook/paystack', (req, res) => {
     res.sendStatus(200);
@@ -112,7 +158,7 @@ function buildApp(ctx) {
     const s = await sessionFor(req.params.token);
     if (!s) return res.status(404).send(pages.notFound());
     const S = await loadSettings(ctx); const T = makeTime(S);
-    res.send(pages.form({ S, T, token: req.params.token, phone: s.phone_number, askUrl: `${base()}/ask/${req.params.token}` }));
+    res.send(pages.form({ S, T, token: req.params.token, phone: s.phone_number, askUrl: `${base()}/ask/${req.params.token}`, waNumber: env.WHATSAPP_NUMBER || '2348140490247' }));
   }));
   app.post('/api/reserve/:token', wrap(async (req, res) => {
     if (limited(`res:${req.ip}`, 12, 60000)) return res.status(429).json({ errors: { _: 'Too many attempts, please wait a minute.' } });
@@ -152,7 +198,7 @@ function buildApp(ctx) {
     const s = await sessionFor(req.params.token);
     if (!s) return res.status(404).send(pages.notFound());
     const S = await loadSettings(ctx);
-    res.send(pages.ask({ S, token: req.params.token, formUrl: `${base()}/reserve/${req.params.token}`, chips: await enquiry.chips() }));
+    res.send(pages.ask({ S, token: req.params.token, formUrl: `${base()}/reserve/${req.params.token}`, chips: await enquiry.chips(), waNumber: env.WHATSAPP_NUMBER || '2348140490247' }));
   }));
   app.get('/api/ask/:token/history', wrap(async (req, res) => {
     const s = await sessionFor(req.params.token);
@@ -291,7 +337,7 @@ function buildApp(ctx) {
     venue_name: 'text', open_time: 'time', close_time: 'time', slot_minutes: 'int', max_guests_per_slot: 'int', max_guests_per_booking: 'int',
     min_notice_minutes: 'int', max_days_ahead: 'int', closed_weekdays: 'intarr', reservation_fee_kobo: 'int', service_fee_kobo: 'int',
     hold_minutes: 'int', refund_hours: 'int', order_link: 'text', welcome_image_url: 'text', welcome_text: 'text', handover_number: 'phone',
-    payments_enabled: 'bool', enquiry_intro: 'text', venue_notes: 'text',
+    payments_enabled: 'bool', enquiry_intro: 'text', venue_notes: 'text', flow_id: 'text',
   };
   api.get('/settings', wrap(async (req, res) => { const S = await loadSettings(ctx); res.json({ settings: S, paystackConfigured: ps.configured, whatsappConfigured: !!env.META_ACCESS_TOKEN }); }));
   api.put('/settings', wrap(async (req, res) => {

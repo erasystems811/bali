@@ -19,6 +19,7 @@ const DEFAULTS = {
   welcome_image_url: null,
   welcome_text: 'HEY, WELCOME TO BALI. PLEASE TAP THE BUTTON BELOW TO MAKE A TABLE RESERVATION.',
   handover_number: null,
+  flow_id: null,
   payments_enabled: true,
   enquiry_intro: 'Hi, welcome to Bali. Ask me anything about the venue.',
 };

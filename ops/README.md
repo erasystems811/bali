@@ -4,7 +4,7 @@ Host: shared Hetzner server 77.42.122.241, folder /opt/bali. Two containers: `po
 Caddy (shared, /opt/shared-caddy) routes bali.erasystems.com.ng + bali.77-42-122-241.sslip.io to 127.0.0.1:21102.
 
 What the app does
-- WhatsApp webhook `/webhook/whatsapp?k=<BALI_FORWARD_SECRET>`: any guest text gets ONE card (Bali picture, TABLE RESERVATION button -> /reserve/<token>, enquiries link in the text).
+- WhatsApp webhook `/webhook/whatsapp?k=<BALI_FORWARD_SECRET>`: any guest text gets ONE message: Bali picture + TABLE RESERVATION button that opens the NATIVE WhatsApp form (Flow, id in reservation_settings.flow_id; fallback to the /reserve/<token> web form if empty) + enquiries link in the text. Form submissions arrive as nfm_reply on this same webhook.
 - /reserve/<token>: form (name, phone, date, arrival time, guests) -> Paystack (N20,500: N20,000 credited to the order + N500 fee) -> confirmation + order link -> details WhatsApp'd to the handover number and stored.
 - /ask/<token>: enquiry chat, answers ONLY from the knowledge_base table (edited on the dashboard); unknown questions are stored + sent to the handover number.
 - /my/<token>: guest change/cancel (refund of N20,000 if cancelled 24h+ ahead).

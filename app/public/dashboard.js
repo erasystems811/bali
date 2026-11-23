@@ -223,7 +223,7 @@
         h('div', { class: 'fg' }, field('open_time', 'First arrival time', 'time'), field('close_time', 'Closing time', 'time', 'Last arrival is one slot before closing'), field('slot_minutes', 'Slot length (minutes)', 'number'), field('max_guests_per_slot', 'Guests we can seat per slot', 'number'), field('max_guests_per_booking', 'Largest party booked online', 'number', 'Bigger groups must contact the venue'), field('min_notice_minutes', 'Minimum notice (minutes)', 'number'), field('max_days_ahead', 'Book up to (days ahead)', 'number')),
         h('div', { class: 'fld', style: 'margin-top:16px' }, h('label', {}, 'Closed on'), dayChecks)),
       h('div', { class: 'card sec' }, h('h3', {}, 'Welcome message'), h('div', { class: 'sub' }, 'The first WhatsApp message a guest receives, with the Bali picture and the reservation button.'),
-        h('div', { class: 'fg', style: 'grid-template-columns:1fr' }, field('welcome_text', 'Welcome text', 'text', null, { area: true }), field('welcome_image_url', 'Picture link (optional)', 'text', 'Leave empty to use the Bali logo'), field('enquiry_intro', 'Enquiry chat greeting', 'text'))),
+        h('div', { class: 'fg', style: 'grid-template-columns:1fr' }, field('welcome_text', 'Welcome text', 'text', null, { area: true }), field('flow_id', 'WhatsApp form ID', 'text', 'The published reservation form. Leave empty to fall back to the website form.'), field('welcome_image_url', 'Picture link (optional)', 'text', 'Leave empty to use the Bali logo'), field('enquiry_intro', 'Enquiry chat greeting', 'text'))),
       h('button', { class: 'btn primary', onclick: () => save(false) }, 'Save settings'));
     async function save(quiet) {
       Object.values(errBox).forEach((e) => (e.textContent = ''));

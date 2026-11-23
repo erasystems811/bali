@@ -47,14 +47,15 @@ function notFound() {
   return `${HEAD('Link not found')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"></div><h1>This link is not valid</h1><p class="sub">Please message Bali on WhatsApp again and tap the button in the reply.</p></div></body></html>`;
 }
 
-function form({ S, T, token, phone, askUrl }) {
+function form({ S, T, token, phone, askUrl, waNumber }) {
+  const wa = `https://wa.me/${String(waNumber || '').replace(/D/g, '')}`;
   const today = T.todayStr();
   const max = T.addDaysISO(today, S.max_days_ahead);
   const times = [];
   for (let m = T.toMin(S.open_time); m <= T.lastSeatingMin(); m += 30) times.push(T.fromMin(m));
   const total = S.reservation_fee_kobo + S.service_fee_kobo;
   const cfg = { token, today, max, closed: S.closed_weekdays || [], maxGuests: S.max_guests_per_booking, pay: S.payments_enabled, total: naira(total) };
-  return `${HEAD('Reserve a table')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"></div>
+  return `${HEAD('Reserve a table')}${GUEST_CSS}</head><body><div class="wrap"><div class="banner"><a href="${esc(wa)}" aria-label="Back to WhatsApp" style="position:absolute;top:14px;left:16px;z-index:2;width:38px;height:38px;border-radius:50%;background:rgba(26,13,7,.65);border:1px solid var(--line);color:var(--cream);font-size:26px;line-height:34px;text-align:center;text-decoration:none">‹</a></div>
 <h1>Reserve a table</h1><p class="sub">Tell us when you are coming and we will hold your table.</p>
 <form id="f" class="card" novalidate>
  <div class="field"><label for="name">Full name</label><input id="name" name="name" autocomplete="name" placeholder="e.g. Ada Okafor" maxlength="60"><div class="err" data-e="name"></div></div>
@@ -131,13 +132,15 @@ function manage({ S, T, token, list, formUrl }) {
   document.getElementById('yes').onclick=async()=>{const y=document.getElementById('yes');y.disabled=true;y.textContent='Cancelling…';await fetch('/api/my/${esc(token)}/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref:cur})});location.reload()};</script></body></html>`;
 }
 
-function ask({ S, token, formUrl, chips }) {
+function ask({ S, token, formUrl, chips, waNumber }) {
+  const wa = `https://wa.me/${String(waNumber || '').replace(/D/g, '')}`;
   return `${HEAD('Bali enquiries')}<style>
 :root{--bg:#efeae2;--header:#075e54;--in:#fff;--out:#d9fdd3;--text:#111b21;--text2:#667781;--accent:#00a884}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{margin:0;height:100%;font-family:Inter,system-ui,sans-serif;color:var(--text);background:var(--bg);overflow:hidden}
 #app{display:flex;flex-direction:column;height:100%}
 header{flex:none;background:var(--header);color:#fff;padding:10px 14px;display:flex;align-items:center;gap:10px;padding-top:calc(10px + env(safe-area-inset-top))}
 .av{width:38px;height:38px;border-radius:50%;background:#3a1a0d url(/assets/welcome.png) center/cover}
+header .back{flex:none;color:#fff;font-size:30px;line-height:1;padding:0 6px 4px 0;text-decoration:none;font-weight:300}
 header .n{font-weight:600;font-size:16px}header .s{font-size:12px;opacity:.75}header .by{font-size:10px;opacity:.55;letter-spacing:.3px}
 #scroll{flex:1;overflow-y:auto;padding:14px 10px;background-image:radial-gradient(rgba(0,0,0,.055) 1px,transparent 1px);background-size:22px 22px}
 .row{display:flex;margin:3px 0}.row.in{justify-content:flex-start}.row.out{justify-content:flex-end}
@@ -152,7 +155,7 @@ input{flex:1;border:none;border-radius:22px;padding:12px 16px;font:inherit;font-
 button.send{width:46px;height:46px;border-radius:50%;border:none;background:var(--accent);color:#fff;font-size:20px;cursor:pointer}
 .top{display:flex;gap:8px;padding:8px 10px;background:#fff;border-bottom:1px solid rgba(0,0,0,.08)}.top a{flex:1;text-align:center;padding:9px;border-radius:9px;background:#f0f2f5;color:var(--accent);font-weight:700;font-size:13.5px;text-decoration:none}
 </style></head><body><div id="app">
-<header><div class="av"></div><div><div class="n">${esc(S.venue_name)}</div><div class="s">Enquiries</div><div class="by">Powered by ERA Systems</div></div></header>
+<header><a class="back" href="${esc(wa)}" aria-label="Back to WhatsApp">‹</a><div class="av"></div><div><div class="n">${esc(S.venue_name)}</div><div class="s">Enquiries</div><div class="by">Powered by ERA Systems</div></div></header>
 <div class="top"><a href="${esc(formUrl)}">Reserve a table</a></div>
 <div id="scroll"><div id="list"></div><div class="chips" id="chips"></div></div>
 <form id="f" autocomplete="off"><input id="t" placeholder="Type your question" maxlength="500"><button class="send" aria-label="Send">➤</button></form></div>
