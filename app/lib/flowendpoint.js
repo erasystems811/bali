@@ -10,7 +10,7 @@ function createFlowEndpoint(ctx, resv) {
 
   // keep what the guest already typed when we send them back to fix something
   function keep(form) {
-    return { name_init: String(form.name || ''), phone_init: String(form.phone || ''), date_init: String(form.date || ''), hour_init: String(form.hour || '19'), minute_init: String(form.minute || '00'), guests_init: String(form.guests || '') };
+    return { name_init: String(form.name || ''), phone_init: String(form.phone || ''), date_init: String(form.date || ''), time_init: String(form.time || '19:00'), guests_init: String(form.guests || '') };
   }
 
   async function sessionFor(flowToken) {
@@ -63,12 +63,15 @@ function createFlowEndpoint(ctx, resv) {
     if (action === 'INIT' || action === 'BACK') return formScreen(S, {});
 
     if (action !== 'data_exchange') return formScreen(S, {});
-    const step = data && data.action;
+    // WhatsApp drops a payload key literally named "action", so the form sends "step"; if neither arrives (as in the real traffic
+    // before this fix) the request is recognised by its content so it can never fall through to a blank form
+    const step = (data && (data.step || data.action)) || (data && data.name !== undefined ? 'reserve' : data && data.ref ? 'check' : undefined);
 
     if (step === 'reserve') {
       // the form sends hour + minute from two pick lists; a typed `time` is still accepted (older form versions)
-      const picked = data.hour !== undefined && data.hour !== '' ? `${String(data.hour).padStart(2, '0')}:${String(data.minute || '0').padStart(2, '0')}` : data.time;
-      const form = { name: data.name, phone: data.phone, date: flow.normalizeDate(data.date, S), time: flow.normalizeTime(picked), guests: data.guests, hour: data.hour, minute: data.minute };
+      // the form sends the picked time as HH:MM; hour + minute (a short-lived older version) is still understood
+      const picked = data.time || (data.hour !== undefined && data.hour !== '' ? `${String(data.hour).padStart(2, '0')}:${String(data.minute || '0').padStart(2, '0')}` : '');
+      const form = { name: data.name, phone: data.phone, date: flow.normalizeDate(data.date, S), time: flow.normalizeTime(picked), guests: data.guests };
       const out = await resv.createFromForm(form, session.phone_number);
       if (!out.ok) {
         const msg = Object.values(out.errors || {})[0] || 'Something went wrong with that booking.';

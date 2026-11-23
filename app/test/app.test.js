@@ -66,12 +66,12 @@ async function http(method, url, { body } = {}) {
   ok(sent.length === 1 && sent[0].interactive?.type === 'cta_url', 'guest gets ONE rich card');
   const tok = await tokenOf(G);
   ok(sent[0].interactive.action.parameters.display_text === 'TAP HERE TO RESERVE' && sent[0].interactive.action.parameters.url === `https://app.test/reserve/${tok}`, 'button opens the reservation form');
-  ok(/WELCOME TO BALI/.test(sent[0].text) && sent[0].text.includes(`https://app.test/ask/${tok}`), 'card text has the welcome line and the enquiries link');
+  ok(/Hey, welcome to Bali/.test(sent[0].text) && /Questions\? Chat with us:\n/.test(sent[0].text) && /https:\/\/app\.test\/c\/[a-f0-9]{12}$/.test(sent[0].text) && !/[a-f0-9]{32}/.test(sent[0].text), 'card text is tidy: greeting, instruction, then the short enquiries link (no long token)');
   ok(sent[0].interactive.header?.image?.link === 'https://app.test/assets/welcome.png', 'Bali picture in the card header');
   await inbound(G, 'm1', 'hi');
   ok(sent.length === 1, 'duplicate delivery is ignored');
   await inbound(G, 'm2', 'hello again');
-  ok(sent.length === 2 && !sent[1].interactive && /reserve\//.test(sent[1].text) && /ask\//.test(sent[1].text), 'second text gets a short links message, not another card');
+  ok(sent.length === 2 && !sent[1].interactive && /reserve\//.test(sent[1].text) && /\/c\//.test(sent[1].text), 'second text gets a short links message, not another card');
   await inbound(HANDOVER, 'm3', 'okay');
   ok(!sent.slice(2).some((x) => x.interactive), 'the handover number never receives the guest card');
 
@@ -177,14 +177,16 @@ async function http(method, url, { body } = {}) {
   const fm = sent.slice(bf).find((x) => x.to === F);
   const fp = fm?.interactive?.action?.parameters;
   ok(fm?.interactive?.type === 'flow' && fp.flow_id === 'FLOW1' && fp.flow_cta === 'TAP HERE TO RESERVE' && fp.flow_action === 'navigate', 'welcome is the native form message with an obvious TAP HERE TO RESERVE button');
-  ok(fm.interactive.header?.image?.link === 'https://app.test/assets/welcome.png' && /WELCOME TO BALI/.test(fm.text) && /\/ask\//.test(fm.text), 'has the Bali picture, welcome text and enquiries link');
+  ok(fm.interactive.header?.image?.link === 'https://app.test/assets/welcome.png' && /Hey, welcome to Bali/.test(fm.text) && /\n\nTap the button below to make your table reservation\.\n\nQuestions\? Chat with us:\nhttps:\/\/app\.test\/c\/[a-f0-9]{12}$/.test(fm.text) && !/[a-f0-9]{32}/.test(fm.text), 'has the Bali picture and a clean three-part message: greeting, instruction, short chat link');
+  const shortCode = fm.text.match(/\/c\/([a-f0-9]{12})/)[1]; const sRes = await fetch(`${base}/c/${shortCode}`, { redirect: 'manual' });
+  ok(sRes.status === 302 && /^\/ask\/[a-f0-9]{32}$/.test(sRes.headers.get('location')) && (await fetch(`${base}/c/000000000000`, { redirect: 'manual' })).status === 404, 'the short link opens the enquiry chat; unknown codes 404');
   ok(fp.flow_token.startsWith('bali-') && fp.flow_action_payload.screen === 'RESERVE', 'flow token and first screen set');
   const fd = fp.flow_action_payload.data;
-  ok(fd.times === undefined && fd.hour_init === '19' && fd.minute_init === '00', 'arrival time starts from a 7:00 PM suggestion on the pickers');
+  ok(fd.times === undefined && fd.time_init === '19:00', 'arrival time starts from a 7:00 PM suggestion on the picker');
   const fjs = require('../lib/flow').flowJson('A'); const formKids = fjs.screens[0].layout.children.find((c) => c.type === 'Form').children;
-  const hourDd = formKids.find((c) => c.name === 'hour'); const minDd = formKids.find((c) => c.name === 'minute');
-  ok(hourDd.type === 'Dropdown' && hourDd['data-source'].length === 24 && hourDd['data-source'][0].id === '12' && hourDd['data-source'][11].id === '23' && hourDd['data-source'][12].id === '00' && minDd['data-source'].length === 12, 'hour list runs 12 to 23 then 0 to 11, minutes in 5s');
-  ok(fd.guests_hint === 'Up to 8 guests online' && fd.guests === undefined, 'guests is typed, with the online limit as a hint');
+  const timeDd = formKids.find((c) => c.name === 'time'); const hasHour = formKids.some((c) => c.name === 'hour' || c.name === 'minute');
+  ok(timeDd.type === 'Dropdown' && !hasHour && timeDd['data-source'].length === 96 && timeDd['data-source'][0].id === '12:00' && timeDd['data-source'][0].title === '12:00 PM' && timeDd['data-source'][47].id === '23:45' && timeDd['data-source'][48].id === '00:00' && timeDd['data-source'][95].id === '11:45', 'ONE arrival time list: every 15 minutes, 12:00 PM to 11:45 PM then 12:00 AM to 11:45 AM');
+  ok(fd.guests_hint === undefined && fd.guests === undefined, 'no helper text under the guests field');
   ok(!('footer' in fm.interactive), 'no footer on the main welcome message');
   ok(fd.min_date === day(0) && fd.max_date === day(60) && fd.unavailable.length >= 8 && fd.unavailable.every((d) => new Date(d + 'T00:00:00Z').getUTCDay() === 1), 'date range is live and Mondays (closed) are unavailable');
   ok(fd.phone_init === '+' + F, 'phone is pre-filled');
@@ -246,8 +248,8 @@ async function http(method, url, { body } = {}) {
   const H = '2348012345201'; await inbound(H, 'h1'); const hTok = await tokenOf(H); const FT = 'bali-' + hTok;
   const init = await flowCall({ action: 'INIT', flow_token: FT, version: '3.0' });
   ok(init.json.screen === 'RESERVE' && init.json.data.has_error === false, 'INIT returns the live form');
-  ok(init.json.data.hour_init === '19' && init.json.data.minute_init === '00' && init.json.data.guests_init === '2' && /^\d{4}-\d{2}-\d{2}$/.test(init.json.data.date_init), 'form starts with valid defaults');
-  const hm = (d) => (/^\d{2}:\d{2}$/.test(d.time || '') ? { ...d, hour: d.time.slice(0, 2), minute: d.time.slice(3), time: undefined } : d);
+  ok(init.json.data.time_init === '19:00' && /^\d{4}-\d{2}-\d{2}$/.test(init.json.data.date_init) && init.json.data.guests_init === '2', 'form starts with valid defaults');
+  const hm = (d) => d;
   const ex = (data, token) => flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: token || FT, version: '3.0', data: hm(data) });
   const bad7 = await ex({ action: 'reserve', name: 'Kunle Ade', phone: '0803 123 4567', date: day(20), time: '03:00', guests: '2' });
   ok(bad7.json.screen === 'RESERVE' && bad7.json.data.has_error && /between/.test(bad7.json.data.error) && bad7.json.data.name_init === 'Kunle Ade' && bad7.json.data.date_init === day(20), 'a bad time sends the guest back with the reason and their entries kept');
@@ -287,7 +289,7 @@ async function http(method, url, { body } = {}) {
   const BIG = '2348012345320'; await inbound(BIG, 'big1');
   const bigRes = await call('POST', `/api/reserve/${await tokenOf(BIG)}`, form({ date: day(26), time: '20:00', guests: 60, name: 'Big Party' }));
   ok(bigRes.json.ok, 'any number of guests is accepted (60 here)');
-  ok(require('../lib/flow').flowData(await require('../lib/core').loadSettings({ pool })).guests_hint === 'Any number of guests', 'the form says any number of guests');
+  ok(require('../lib/flow').flowData(await require('../lib/core').loadSettings({ pool })).guests_hint === undefined, 'nothing is said about guest limits on the form');
   ok(!(await call('POST', `/api/reserve/${await tokenOf(BIG)}`, form({ date: day(26), time: '20:00', guests: 5000, name: 'Silly' }))).json.ok, 'an absurd number is still rejected');
   await pool.query("update reservation_settings set max_guests_per_slot=10, max_guests_per_booking=8 where id=1");
   console.log('\n7f. Bali is open 24 hours: guests type the time');
@@ -336,6 +338,19 @@ async function http(method, url, { body } = {}) {
   await pool.query("update reservations set reminder_sent_at=null where guest_name='Remy Open'"); await pool.query("update reservation_settings set reminder_hours=0 where id=1");
   ok((await app.reminders.tick()) === 0, 'reminders can be turned off (0 hours)');
   await pool.query("update reservation_settings set reminder_hours=6 where id=1");
+  console.log('\n7i. the real payload from WhatsApp (no instruction key) is still a reservation');
+  const realBody = { name: 'Real Payload', phone: '0803 444 5555', date: day(30), time: '20:30', guests: '3' };
+  const real = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: FT, version: '3.0', data: realBody });
+  ok(real.json.screen === 'PAY' || real.json.screen === 'DONE', 'details with no step key become a reservation, not a blank form');
+  ok(!(real.json.screen === 'RESERVE'), 'and never wipe the guest\'s entries by returning an empty form');
+  const withStep = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: FT, version: '3.0', data: { ...realBody, step: 'reserve', name: 'Step Payload', date: day(31) } });
+  ok(withStep.json.screen === 'PAY' || withStep.json.screen === 'DONE', 'the new step key works too');
+  if (real.json.screen === 'PAY') {
+    const chk = await flowCall({ action: 'data_exchange', screen: 'PAY', flow_token: FT, version: '3.0', data: { ref: real.json.data.ref } });
+    ok(chk.json.screen === 'PAY' && chk.json.data.has_note, 'a payment check with only a ref is understood');
+  }
+  const errBack = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: FT, version: '3.0', data: { ...realBody, name: 'Typed Name', phone: '0803 444 5555', time: '04:00', date: day(32), guests: 'abc' } });
+  ok(errBack.json.screen === 'RESERVE' && errBack.json.data.name_init === 'Typed Name' && errBack.json.data.phone_init === '0803 444 5555', 'when something is wrong the typed name and phone come straight back');
   console.log('\n8. dashboard');
   ok((await call('GET', '/api/overview')).status === 401, 'API needs login');
   ok((await call('GET', '/dashboard/')).status === 302, 'dashboard redirects to login');

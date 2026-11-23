@@ -19,7 +19,7 @@ const DEFAULTS = {
   refund_hours: 24,
   order_link: 'https://baliabuja.mylo.africa',
   welcome_image_url: null,
-  welcome_text: 'HEY, WELCOME TO BALI. PLEASE TAP THE BUTTON BELOW TO MAKE A TABLE RESERVATION.',
+  welcome_text: '*Hey, welcome to Bali!* 👋\n\nTap the button below to make your table reservation.',
   handover_number: null,
   flow_id: null,
   payments_enabled: true,

@@ -63,11 +63,11 @@ function buildApp(ctx) {
   });
 
   async function sendForm(S, phone, token, { intro, nameInit, short } = {}) {
-    const askUrl = `${base()}/ask/${token}`;
+    const askUrl = `${base()}/c/${await resv.sessionShort(phone)}`;
     return wa.sendFlow(phone, {
       // short = the guest tapped "Reserve a table" on the web chat and is about to land in WhatsApp: a compact message with the button right there
       image: short ? null : (S.welcome_image_url || `${base()}/assets/welcome.png`),
-      body: short ? 'Your reservation form is ready. Tap TAP HERE TO RESERVE below to open it.' : `${intro ? intro + '\n\n' : ''}${S.welcome_text}\n\nHave a question instead? Tap here to chat: ${askUrl}`,
+      body: short ? 'Your reservation form is ready. Tap TAP HERE TO RESERVE below to open it.' : `${intro ? intro + '\n\n' : ''}${S.welcome_text}\n\nQuestions? Chat with us:\n${askUrl}`,
       cta: 'TAP HERE TO RESERVE', flowId: S.flow_id, token: `bali-${token}`,
       data: flow.flowData(S, { intro: intro || '', nameInit, phoneInit: `+${phone}` }),
     });
@@ -83,7 +83,7 @@ function buildApp(ctx) {
       return sendForm(S, phone, token, { nameInit: c[0]?.name || '' });
     }
     const formUrl = `${base()}/reserve/${token}`;
-    const askUrl = `${base()}/ask/${token}`;
+    const askUrl = `${base()}/c/${await resv.sessionShort(phone)}`;
     const { rows } = await pool.query('select welcomed_at from web_sessions where token=$1', [token]);
     const recent = rows[0]?.welcomed_at && Date.now() - new Date(rows[0].welcomed_at).getTime() < 12 * 3600000;
     await pool.query('update web_sessions set welcomed_at = now(), last_seen = now() where token=$1', [token]);
@@ -93,7 +93,7 @@ function buildApp(ctx) {
     }
     await wa.sendCta(phone, {
       image: S.welcome_image_url || `${base()}/assets/welcome.png`,
-      body: `${S.welcome_text}\n\nHave a question instead? Tap here to chat: ${askUrl}`,
+      body: `${S.welcome_text}\n\nQuestions? Chat with us:\n${askUrl}`,
       button: 'TAP HERE TO RESERVE',
       url: formUrl,
     });
@@ -191,6 +191,13 @@ Pay ${naira(out.amountKobo)} to confirm: ${naira(S.reservation_fee_kobo)} is cre
       }
     } catch (e) { console.error('go/reserve push failed', e.message); }
     res.redirect(`${chat}?text=${encodeURIComponent('Table reservation')}`);
+  }));
+
+  // short chat link used in WhatsApp messages
+  app.get('/c/:code', wrap(async (req, res) => {
+    const { rows } = await pool.query('select token from web_sessions where short_code=$1', [String(req.params.code).slice(0, 20)]);
+    if (!rows[0]) return res.status(404).send(pages.notFound());
+    res.redirect(`/ask/${rows[0].token}`);
   }));
 
   // ===================== guest pages =====================

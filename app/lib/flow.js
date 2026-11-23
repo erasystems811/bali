@@ -8,13 +8,12 @@ const { makeTime } = require('./core');
 
 const SCREEN = 'RESERVE';
 
-// Arrival time is picked from two lists (WhatsApp has no native clock): Hour starts at 12 and runs to 23, then 0 to 11
-// (Bali is open 24 hours), Minute goes in 5s.
-const HOURS = [...Array.from({ length: 12 }, (_, i) => 12 + i), ...Array.from({ length: 12 }, (_, i) => i)].map((h) => ({
-  id: String(h).padStart(2, '0'),
-  title: `${h % 12 || 12} ${h >= 12 ? 'PM' : 'AM'} (${h})`,
-}));
-const MINUTES = Array.from({ length: 12 }, (_, i) => ({ id: String(i * 5).padStart(2, '0'), title: ':' + String(i * 5).padStart(2, '0') }));
+// ONE arrival time list (WhatsApp has no native clock): every 15 minutes, starting at 12:00 PM, running to 11:45 PM,
+// then 12:00 AM to 11:45 AM (Bali is open 24 hours). 96 entries, within WhatsApp's 200 limit.
+const TIMES = Array.from({ length: 96 }, (_, i) => (720 + i * 15) % 1440).map((m) => {
+  const h = Math.floor(m / 60); const mm = String(m % 60).padStart(2, '0');
+  return { id: `${String(h).padStart(2, '0')}:${mm}`, title: `${h % 12 || 12}:${mm} ${h >= 12 ? 'PM' : 'AM'}` };
+});
 
 function flowJson(logoBase64) {
   const opt = { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' } } } };
@@ -31,10 +30,9 @@ function flowJson(logoBase64) {
           intro: str('Tell us when you are coming and we will hold your table.'),
           has_error: { type: 'boolean', __example__: false },
           error: str(' '),
-          name_init: str('Ada Okafor'), phone_init: str('+2348012345678'), date_init: str('2026-12-05'), hour_init: str('19'), minute_init: str('00'), guests_init: str('2'),
+          name_init: str('Ada Okafor'), phone_init: str('+2348012345678'), date_init: str('2026-12-05'), time_init: str('19:00'), guests_init: str('2'),
           min_date: str('2026-12-01'), max_date: str('2027-01-30'),
           unavailable: { type: 'array', items: { type: 'string' }, __example__: ['2026-12-07'] },
-          guests_hint: str('Up to 12 guests online'),
         },
         layout: {
           type: 'SingleColumnLayout',
@@ -45,16 +43,15 @@ function flowJson(logoBase64) {
             { type: 'TextBody', text: '${data.error}', visible: '${data.has_error}', 'font-weight': 'bold' },
             {
               type: 'Form', name: 'form',
-              'init-values': { name: '${data.name_init}', phone: '${data.phone_init}', date: '${data.date_init}', hour: '${data.hour_init}', minute: '${data.minute_init}', guests: '${data.guests_init}' },
+              'init-values': { name: '${data.name_init}', phone: '${data.phone_init}', date: '${data.date_init}', time: '${data.time_init}', guests: '${data.guests_init}' },
               children: [
                 { type: 'TextInput', name: 'name', label: 'Full name', 'input-type': 'text', required: true },
                 { type: 'TextInput', name: 'phone', label: 'Phone number', 'input-type': 'phone', required: true },
                 { type: 'DatePicker', name: 'date', label: 'Date', required: true, 'min-date': '${data.min_date}', 'max-date': '${data.max_date}', 'unavailable-dates': '${data.unavailable}' },
-                { type: 'Dropdown', name: 'hour', label: 'Arrival hour', required: true, 'data-source': HOURS },
-                { type: 'Dropdown', name: 'minute', label: 'Arrival minutes', required: true, 'data-source': MINUTES },
-                { type: 'TextInput', name: 'guests', label: 'Number of guests', 'input-type': 'number', required: true, 'helper-text': '${data.guests_hint}' },
+                { type: 'Dropdown', name: 'time', label: 'Arrival time', required: true, 'data-source': TIMES },
+                { type: 'TextInput', name: 'guests', label: 'Number of guests', 'input-type': 'number', required: true },
                 { type: 'TextCaption', text: 'Powered by ERA Systems' },
-                { type: 'Footer', label: 'Continue', 'on-click-action': { name: 'data_exchange', payload: { action: 'reserve', name: '${form.name}', phone: '${form.phone}', date: '${form.date}', hour: '${form.hour}', minute: '${form.minute}', guests: '${form.guests}' } } },
+                { type: 'Footer', label: 'Continue', 'on-click-action': { name: 'data_exchange', payload: { step: 'reserve', name: '${form.name}', phone: '${form.phone}', date: '${form.date}', time: '${form.time}', guests: '${form.guests}' } } },
               ],
             },
           ],
@@ -81,7 +78,7 @@ function flowJson(logoBase64) {
             { type: 'TextBody', text: '${data.note}', visible: '${data.has_note}' },
             { type: 'EmbeddedLink', text: '${data.amount_label}', 'on-click-action': { name: 'open_url', url: '${data.pay_url}' } },
             { type: 'TextCaption', text: 'After paying, come back here and tap "I have paid".' },
-            { type: 'Footer', label: 'I have paid', 'on-click-action': { name: 'data_exchange', payload: { action: 'check', ref: '${data.ref}' } } },
+            { type: 'Footer', label: 'I have paid', 'on-click-action': { name: 'data_exchange', payload: { step: 'check', ref: '${data.ref}' } } },
           ],
         },
       },
@@ -127,9 +124,8 @@ function flowData(S, { intro, nameInit, phoneInit, now } = {}) {
     intro: intro || 'Tell us when you are coming and we will hold your table.',
     has_error: false, error: ' ',
     name_init: nameInit || '', phone_init: phoneInit || '',
-    date_init: first <= max ? first : today, hour_init: String(Math.floor(evening / 60)).padStart(2, '0'), minute_init: String(Math.floor((evening % 60) / 5) * 5).padStart(2, '0'), guests_init: '2',
+    date_init: first <= max ? first : today, time_init: T.fromMin(Math.floor(evening / 15) * 15), guests_init: '2',
     min_date: today, max_date: max, unavailable: unavailable.length ? unavailable : ['2000-01-01'], // an empty list is rejected by WhatsApp
-    guests_hint: S.max_guests_per_booking > 0 ? `Up to ${S.max_guests_per_booking} guests online` : 'Any number of guests',
   };
 }
 

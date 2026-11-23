@@ -127,7 +127,7 @@ function createResv(ctx, wa, ps) {
     const { rows } = await pool.query('select token from web_sessions where phone_number=$1', [phone]);
     if (rows[0]) return rows[0].token;
     const token = randHex(16);
-    await pool.query('insert into web_sessions (token, phone_number) values ($1,$2) on conflict (phone_number) do nothing', [token, phone]);
+    await pool.query('insert into web_sessions (token, phone_number, short_code) values ($1,$2,$3) on conflict (phone_number) do nothing', [token, phone, randHex(6)]);
     return (await pool.query('select token from web_sessions where phone_number=$1', [phone])).rows[0].token;
   }
 
@@ -226,6 +226,15 @@ function createResv(ctx, wa, ps) {
     return rows.filter((r) => r.status === 'confirmed' || (r.hold_expires_at && new Date(r.hold_expires_at).getTime() > nowFn()));
   }
 
-  return { validate, createFromForm, confirmPayment, cancel, freeTimes, forGuest, sessionToken, describe, notifyHandover, guestsBooked };
+  // short, shareable-looking link code for the enquiry chat (/c/<code> redirects to /ask/<token>)
+  async function sessionShort(phone) {
+    await sessionToken(phone);
+    const cur = (await pool.query('select short_code from web_sessions where phone_number=$1', [phone])).rows[0];
+    if (cur && cur.short_code) return cur.short_code;
+    await pool.query('update web_sessions set short_code=$2 where phone_number=$1 and short_code is null', [phone, randHex(6)]);
+    return (await pool.query('select short_code from web_sessions where phone_number=$1', [phone])).rows[0].short_code;
+  }
+
+  return { sessionShort, validate, createFromForm, confirmPayment, cancel, freeTimes, forGuest, sessionToken, describe, notifyHandover, guestsBooked };
 }
 module.exports = { createResv };
