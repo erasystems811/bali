@@ -158,9 +158,13 @@ function createResv(ctx, wa, ps) {
     const link = S.order_link ? `${S.order_link}${S.order_link.includes('?') ? '&' : '?'}ref=${r.ref}` : '';
     const credit = paid ? ` Your ${naira(S.reservation_fee_kobo)} is credited to your order on the day.` : '';
     const short = await sessionShort(r.phone_number);
-    const manage = `\n\nNeed to change or cancel? Manage your reservation here: ${base()}/m/${short}`;
-    const msg = `Your table at ${S.venue_name} is confirmed ✅\n\nRef: ${r.ref}\nName: ${r.guest_name}\n${describe(r, T)}.${credit}${link ? `\n\nIf you would like to place an order ahead for that day, you can do that through this link: ${link}` : ''}${manage}`;
-    try { await wa.send(r.phone_number, msg, 'your reservation'); } catch (e) {}
+    const manageUrl = `${base()}/m/${short}`;
+    const body = `Your table at ${S.venue_name} is confirmed ✅\n\nRef: ${r.ref}\nName: ${r.guest_name}\n${describe(r, T)}.${credit}${link ? `\n\nIf you would like to place an order ahead for that day, you can do that through this link: ${link}` : ''}`;
+    // One message with a real tap button (MANAGE BOOKING). Outside the 24h window only plain text is possible, so the link goes in the text.
+    try {
+      if (await wa.withinWindow(r.phone_number, false)) await wa.sendCta(r.phone_number, { body, button: 'MANAGE BOOKING', url: manageUrl });
+      else await wa.send(r.phone_number, `${body}\n\nNeed to change or cancel? Manage your reservation here: ${manageUrl}`, 'your reservation');
+    } catch (e) {}
   }
 
   async function confirmPayment(refOrRow) {

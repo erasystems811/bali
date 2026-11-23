@@ -391,8 +391,9 @@ async function http(method, url, { body, headers } = {}) {
   const CH = '2348012345501'; await inbound(CH, 'ch1'); const chTok = await tokenOf(CH);
   const chBook = await call('POST', `/api/reserve/${chTok}`, form({ date: day(40), time: '19:00', guests: 2, name: 'Chidi Change' }));
   const chRef = chBook.json.ref; await pool.query("update reservations set status='confirmed', paid_amount_kobo=2050000, paystack_ref='PS-CH' where ref=$1", [chRef]);
-  ok(/Need to change or cancel\? Manage your reservation here: https:\/\/app\.test\/m\/[a-f0-9]{12}/.test(sent.filter((x) => x.to === CH).at(-1).text || ''), 'the confirmation message says how to change or cancel, with a short link');
-  const mCode = sent.filter((x) => x.to === CH).at(-1).text.match(/\/m\/([a-f0-9]{12})/)[1];
+  const confMsg = sent.filter((x) => x.to === CH).at(-1);
+  ok(confMsg.interactive?.type === 'cta_url' && confMsg.interactive.action.parameters.display_text === 'MANAGE BOOKING' && /^https:\/\/app\.test\/m\/[a-f0-9]{12}$/.test(confMsg.interactive.action.parameters.url) && !/Manage your reservation here/.test(confMsg.text) && /confirmed/.test(confMsg.text), 'the confirmation has a real MANAGE BOOKING button, not a pasted link');
+  const mCode = confMsg.interactive.action.parameters.url.match(/\/m\/([a-f0-9]{12})/)[1];
   const mRes = await fetch(`${base}/m/${mCode}`, { redirect: 'manual' });
   ok(mRes.status === 302 && mRes.headers.get('location') === `/my/${chTok}`, 'the short manage link opens their reservation page');
   const myPage = (await call('GET', `/my/${chTok}`)).text;
