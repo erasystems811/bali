@@ -20,7 +20,7 @@ async function call(method, url, body, isForm) {
 (async () => {
   let id = process.argv[2];
   if (!id) {
-    const c = await call('POST', `${G}/${WABA}/flows`, { name: 'Bali reservation ' + new Date().toISOString().slice(0, 19).replace('T', ' '), categories: ['APPOINTMENT_BOOKING'], endpoint_uri: process.env.FLOW_ENDPOINT || 'https://bali.77-42-122-241.sslip.io/flow/endpoint' });
+    const c = await call('POST', `${G}/${WABA}/flows`, { name: 'Bali reservation ' + new Date().toISOString().slice(0, 19).replace('T', ' '), categories: ['APPOINTMENT_BOOKING'], endpoint_uri: process.env.FLOW_ENDPOINT || 'https://bali.erasystems.com.ng/flow/endpoint' });
     if (!c.ok) { console.error('create failed', JSON.stringify(c.j)); process.exit(1); }
     id = c.j.id; console.log('created flow', id);
   }

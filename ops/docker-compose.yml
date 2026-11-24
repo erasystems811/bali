@@ -37,6 +37,7 @@ services:
       MONNIFY_CONTRACT_CODE: ${MONNIFY_CONTRACT_CODE:-}
       MONNIFY_BASE_URL: ${MONNIFY_BASE_URL:-https://api.monnify.com}
       PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-}
+      REMINDER_TEMPLATE: ${REMINDER_TEMPLATE:-bali_reservation_reminder}
       OPENAI_API_KEY: ${OPENAI_API_KEY_WORKING:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       FLOW_PRIVATE_KEY_FILE: /keys/flow_private.pem

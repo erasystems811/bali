@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const env = Object.fromEntries(fs.readFileSync(path.join(__dirname, '..', '.env'), 'utf8').split(/\r?\n/).filter((l) => /^[A-Z_]+=/.test(l)).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1).trim()]));
 const name = process.argv[2] || 'bali_reservation_reminder';
-const base = (process.argv[3] || 'https://bali.77-42-122-241.sslip.io').replace(/\/$/, '');
+const base = (process.argv[3] || 'https://bali.erasystems.com.ng').replace(/\/$/, '');
 
 const body = {
   name, language: 'en_US', category: 'UTILITY',

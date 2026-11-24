@@ -27,13 +27,13 @@ Meta messages cost money: do not add extra WhatsApp messages (the owner objected
 ## What is built (2026-11-24)
 
 - [x] App deployed on the shared Hetzner host 77.42.122.241 (/opt/bali), 2 containers (app + postgres); 100+ end to end checks (`app/test/app.test.js`, run against a throwaway DB, see ops/README.md)
-- [x] WhatsApp webhook on the Bali number -> https://bali.77-42-122-241.sslip.io/webhook/whatsapp?k=<BALI_FORWARD_SECRET>
+- [x] WhatsApp webhook on the Bali number -> https://bali.erasystems.com.ng/webhook/whatsapp?k=<BALI_FORWARD_SECRET>
 - [x] Monnify sandbox payments live (keys in /opt/bali/.env on the server only)
 - [x] Claude answers enquiries from the KB (ANTHROPIC_API_KEY on the server)
 - [ ] Monnify LIVE keys (current ones are MK_TEST sandbox; set MONNIFY_BASE_URL=https://api.monnify.com)
-- [ ] Monnify webhook URL added in the Monnify dashboard (owner action)
+- [ ] Monnify webhook URL added in the Monnify dashboard (owner action): https://bali.erasystems.com.ng/webhook/monnify
 - [ ] Handover number(s) not set yet (Settings tab); each must message the bot once so WhatsApp delivers plain text
-- [ ] DNS A record bali.erasystems.com.ng -> 77.42.122.241 (temporary sslip.io hostname is a reliability risk); then change APP_BASE_URL, the number webhook, and re-create the reminder template with the new domain
+- [x] DNS: bali.erasystems.com.ng -> 77.42.122.241 is live with its own certificate (2026-11-24). APP_BASE_URL, the number webhook and the Flow endpoint use it; the old bali.77-42-122-241.sslip.io name still works as an alias in Caddy (links already sent, and the approved reminder template button still points at it). When template bali_reservation_reminder_2 (new domain) is approved, set REMINDER_TEMPLATE=bali_reservation_reminder_2 in /opt/bali/.env and docker compose up -d app.
 - [ ] Reminder template approval pending on Meta (check status)
 - Retired: n8n workflows, PostgREST, Gotenberg, old event/contract/invoice flow (see git history).
 
@@ -43,7 +43,7 @@ Self-hosted on the shared Hetzner host 77.42.122.241 (/opt/bali), app + postgres
 
 ## Last updated
 
-2026-11-24 - after payment the guest is redirected back to the chat with the confirmation already sent; see list above.
+2026-11-24 - moved to bali.erasystems.com.ng (new Flow version 1144378334996832, number webhook, app links); after payment the guest is redirected back to the chat with the confirmation already sent; see list above.
 
 ## Standing instruction for every session
 
