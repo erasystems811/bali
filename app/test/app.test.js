@@ -562,9 +562,11 @@ async function http(method, url, { body, headers } = {}) {
   const bkSent = sent.length;
   const bkRes = await flowCall({ action: 'data_exchange', screen: 'RESERVE', flow_token: 'bali-' + bkTok, version: '3.0', data: { step: 'reserve', name: 'Back Chat', phone: '0803 666 1212', date: day(36), time: '20:00', guests: '2' } });
   const bkRef = bkRes.json.data.ref; const bkPay = (await pool.query('select paystack_ref from reservations where ref=$1', [bkRef])).rows[0].paystack_ref; paid.add(bkPay);
+  ok(sent.slice(bkSent).filter((x) => x.to === BK).length === 0, 'no WhatsApp message is sent to the guest while they pay');
   const bkPage = (await call('GET', `/reserve/${bkTok}/done?ref=${bkRef}`)).text;
-  ok(/Payment received/.test(bkPage) && /Close this page to go back to WhatsApp, then tap <b>I have paid<\/b>/.test(bkPage) && /window\.close\(\)/.test(bkPage) && !/location\.href="https:\/\/wa\.me/.test(bkPage) && !/Your table is confirmed/.test(bkPage), 'paid inside the form: the return page closes itself (WhatsApp built-in browser) so the guest is back on the form screen to tap I have paid; no jump to a different chat');
-  ok(sent.slice(bkSent).filter((x) => x.to === BK).length === 0, 'and no WhatsApp message was sent to the guest during payment');
+  ok(/Payment received/.test(bkPage) && /Taking you back to WhatsApp, where your confirmation is waiting/.test(bkPage) && /location\.href="https:\/\/wa\.me\/2348140490247"/.test(bkPage) && /Back to WhatsApp/.test(bkPage) && !/window\.close/.test(bkPage), 'paid inside the form: the return page sends the guest straight back to the WhatsApp chat (automatic, with a button as backup)');
+  const bkBefore = sent.length; await call('GET', `/reserve/${bkTok}/done?ref=${bkRef}`); ok(sent.length === bkBefore, 'reloading the return page never sends the confirmation twice');
+  ok(sent.slice(bkSent).filter((x) => x.to === BK).length === 1 && /Your table at Bali is confirmed/.test(sent.slice(bkSent).filter((x) => x.to === BK)[0].text) && sent.slice(bkSent).filter((x) => x.to === BK)[0].interactive?.action?.parameters?.display_text === 'TAP TO MANAGE', 'the confirmation message is already in the chat when the guest arrives there (sent as the return page loads, exactly once)');
   ok(!/Place your order/.test(bkPage), 'and does not send them off to other pages');
   await pool.query("update reservation_settings set payments_enabled=true, open_24_7=false where id=1");
 

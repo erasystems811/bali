@@ -106,10 +106,9 @@ function done({ S, T, r, state, token, describe, waNumber }) {
     if (inForm) {
       // Paid from inside the WhatsApp form. WhatsApp opened this page in its built-in browser on top of the form, so closing it drops the
       // guest straight back onto the form screen where they tap "I have paid". A web page cannot reopen the form itself, only close itself.
-      inner = `<div class="tick">✓</div><h1 class="center">Payment received</h1><p class="sub center">Close this page to go back to WhatsApp, then tap <b>I have paid</b> on the form.</p>${kvBlock}
-    <button class="btn" id="closeBtn" style="margin-top:18px">Close and go back</button>
-    <a class="btn ghost" style="margin-top:12px" href="${esc(wa)}">Open WhatsApp</a>
-    <script>function backToForm(){try{window.close()}catch(e){}}document.getElementById('closeBtn').onclick=backToForm;setTimeout(backToForm,1200)</script>`;
+      inner = `<div class="tick">✓</div><h1 class="center">Payment received</h1><p class="sub center">Taking you back to WhatsApp, where your confirmation is waiting.</p>${kvBlock}
+    <a class="btn" style="margin-top:18px" href="${esc(wa)}">Back to WhatsApp</a>
+    <script>setTimeout(function(){location.href=${JSON.stringify(wa)}},1200)</script>`;
     } else {
       inner = `<div class="tick">✓</div><h1 class="center">Your table is confirmed</h1><p class="sub center">We have sent the details to your WhatsApp.${r.paid_amount_kobo ? ` Your ${esc(naira(S.reservation_fee_kobo))} is credited to your order on the day.` : ''}</p>${kvBlock}
     <a class="btn" style="margin-top:18px" href="${esc(wa)}">Back to WhatsApp</a>

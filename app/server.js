@@ -265,6 +265,7 @@ function buildApp(ctx) {
     if (!r) return res.status(404).send(pages.notFound(env.WHATSAPP_NUMBER));
     let state = r.status;
     if (r.status === 'pending_payment') { const c = await resv.confirmPayment(r); state = c.status; r = (await pool.query('select * from reservations where ref=$1', [r.ref])).rows[0]; }
+    if (r.status === 'confirmed' && r.source === 'flow') { try { await resv.sendPendingConfirmation(r.ref, s.phone_number); } catch (e) { console.error('confirmation on return failed', e.message); } } // idempotent: sent once
     res.send(pages.done({ S, T, r, state, token: req.params.token, describe: resv.describe(r, T), waNumber: env.WHATSAPP_NUMBER || '2348140490247' }));
   }));
 
