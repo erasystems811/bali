@@ -108,7 +108,7 @@ async function http(method, url, { body, headers } = {}) {
   await settle();
   const ho = sent.slice(before).find((x) => x.to === HANDOVER);
   ok(ho && /Ada Okafor/.test(ho.text) && /2348034445555/.test(ho.text) && /19:00|7pm/.test(ho.text) && /Guests: 4/.test(ho.text), 'handover message has name, phone, date, arrival, guests');
-  ok(sent.slice(before).some((x) => x.to === G && /confirmed/.test(x.text) && /baliabuja\.mylo\.africa/.test(x.text)), 'guest gets confirmation + order link');
+  ok(sent.slice(before).some((x) => x.to === G && /confirmed/.test(x.text) && /order\.baliabuja\.ng/.test(x.text)), 'guest gets confirmation + order link');
   const row = (await pool.query('select * from reservations where ref=$1', [r1.json.ref])).rows[0];
   ok(row.handed_over_at && row.contact_phone === '2348034445555', 'stored with handover time and the typed phone');
   ok(r1.json.ref === 'R-001', 'the first reservation is R-001');
@@ -295,7 +295,7 @@ async function http(method, url, { body, headers } = {}) {
   const bdone = sent.length;
   await submit(H, 'fin-done', { ref: kref, flow_token: FT }); await settle();
   const conf7 = sent.slice(bdone).filter((x) => x.to === H);
-  ok(conf7.length === 1 && /Your table at Bali is confirmed/.test(conf7[0].text) && /place an order ahead for that day, you can do that through this link: https:\/\/baliabuja\.mylo\.africa/.test(conf7[0].text) && conf7[0].interactive?.action?.parameters?.display_text === 'TAP TO MANAGE', 'tapping Done sends the confirmation right after their response, with the TAP TO MANAGE button');
+  ok(conf7.length === 1 && /Your table at Bali is confirmed/.test(conf7[0].text) && /place an order ahead for that day, you can do that through this link: https:\/\/order\.baliabuja\.ng/.test(conf7[0].text) && conf7[0].interactive?.action?.parameters?.display_text === 'TAP TO MANAGE', 'tapping Done sends the confirmation right after their response, with the TAP TO MANAGE button');
   await submit(H, 'fin-done-2', { ref: kref, flow_token: FT }); await settle();
   ok(sent.slice(bdone).filter((x) => x.to === H).length === 1, 'the confirmation is only ever sent once');
   // (finishing the form is covered just above)

@@ -24,7 +24,9 @@ After payment: the return page (`/reserve/<token>/done`) sends the guest straigh
 
 Meta messages cost money: do not add extra WhatsApp messages (the owner objected to a pay button message). Cancel/change by a guest sends them a confirmation; the form never sends extra messages while paying.
 
-## What is built (2026-11-24)
+**CURRENT (2026-11-26, overrides the money paragraph above): reservations are FREE for now.** `reservation_settings.payments_enabled` is false (switch back on in dashboard Settings; the payment code and Monnify setup are intact). The form goes straight from details to the confirmed screen. Ordering link: https://order.baliabuja.ng. If payments return, restore the two knowledge base answers (price, refund), which now say reservations are free.
+
+## What is built (2026-11-26)
 
 - [x] App deployed on the shared Hetzner host 77.42.122.241 (/opt/bali), 2 containers (app + postgres); 100+ end to end checks (`app/test/app.test.js`, run against a throwaway DB, see ops/README.md)
 - [x] WhatsApp webhook on the Bali number -> https://bali.erasystems.com.ng/webhook/whatsapp?k=<BALI_FORWARD_SECRET>
@@ -42,6 +44,8 @@ Meta messages cost money: do not add extra WhatsApp messages (the owner objected
 Self-hosted on the shared Hetzner host 77.42.122.241 (/opt/bali), app + postgres containers behind the shared Caddy. Rebuilt 2026-11-22 after the old box died; fresh DB. RAM is tight on that host.
 
 ## Last updated
+
+2026-11-26 - reservations made free, new ordering link.
 
 2026-11-24 - moved to bali.erasystems.com.ng (new Flow version 1144378334996832, number webhook, app links); after payment the guest is redirected back to the chat with the confirmation already sent; see list above.
 

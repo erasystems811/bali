@@ -20,7 +20,7 @@ const DEFAULTS = {
   service_fee_kobo: 50000,
   hold_minutes: 15,
   refund_hours: 24,
-  order_link: 'https://baliabuja.mylo.africa',
+  order_link: 'https://order.baliabuja.ng',
   welcome_image_url: null,
   welcome_text: '*Hey, welcome to Bali!* 👋\n\nPlease tap the button below to make your table reservation.',
   handover_number: null,

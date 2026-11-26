@@ -141,7 +141,7 @@ function manage({ S, T, token, list, formUrl }) {
    <div class="field"><label for="cd">Date</label><input id="cd" type="date" min="${esc(T.todayStr())}" max="${esc(T.addDaysISO(T.todayStr(), S.max_days_ahead))}"></div>
    <div class="field"><label for="ct">Arrival time</label><input id="ct" type="time"></div>
    <div class="field"><label for="cg">Number of guests</label><input id="cg" type="number" inputmode="numeric" min="1"></div>
-   <p class="note">Your payment stays with the new booking. Changes close ${S.change_cutoff_hours > 0 ? S.change_cutoff_hours + ' hours' : 'at arrival'} before you arrive.</p>
+   <p class="note">${S.payments_enabled ? 'Your payment stays with the new booking. ' : ''}Changes close ${S.change_cutoff_hours > 0 ? S.change_cutoff_hours + ' hours' : 'at arrival'} before you arrive.</p>
    <div class="err" id="cerr" style="margin-bottom:10px"></div>
    <button class="btn" id="csave">Save changes</button><button class="btn ghost" id="cno" style="margin-top:10px">Close</button></div></div>
   <div class="modal" id="m"><div class="sheet"><h1 style="font-size:20px">Cancel this reservation?</h1><p class="note" id="mn"></p><button class="btn danger" id="yes">Yes, cancel it</button><button class="btn ghost" id="no" style="margin-top:10px">Keep it</button></div></div>
