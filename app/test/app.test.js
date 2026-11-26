@@ -295,6 +295,7 @@ async function http(method, url, { body, headers } = {}) {
   const bdone = sent.length;
   await submit(H, 'fin-done', { ref: kref, flow_token: FT }); await settle();
   const conf7 = sent.slice(bdone).filter((x) => x.to === H);
+  ok(conf7[0] && /\*NOTE:\* If you are not seated within 20 minutes of your reserved time, your table will be given out\./.test(conf7[0].text), 'the confirmation carries the 20 minute seating note');
   ok(conf7.length === 1 && /Your table at Bali is confirmed/.test(conf7[0].text) && /place an order ahead for that day, you can do that through this link: https:\/\/order\.baliabuja\.ng/.test(conf7[0].text) && conf7[0].interactive?.action?.parameters?.display_text === 'TAP TO MANAGE', 'tapping Done sends the confirmation right after their response, with the TAP TO MANAGE button');
   await submit(H, 'fin-done-2', { ref: kref, flow_token: FT }); await settle();
   ok(sent.slice(bdone).filter((x) => x.to === H).length === 1, 'the confirmation is only ever sent once');
@@ -670,6 +671,20 @@ async function http(method, url, { body, headers } = {}) {
   ok((await fetch(base + '/dashboard/login', { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'username=admin&password=no' })).headers.get('location').includes('e=1'), 'wrong password refused');
   ok((await call('GET', '/dashboard/', null, cookie)).text.includes('dashboard.js'), 'dashboard shell loads');
   const ov = (await call('GET', '/api/overview?days=30', null, cookie)).json;
+  const tdAuth = await call('GET', '/api/today');
+  ok(tdAuth.status === 401, "today's list needs login");
+  const tdSet = (await pool.query('select tz_offset_minutes as off from reservation_settings where id=1')).rows[0].off;
+  const tdDay = new Date(Date.now() + tdSet * 60000).toISOString().slice(0, 10);
+  const tdAt = (hhmm, addDays = 0) => new Date(Date.parse(tdDay + 'T' + hhmm + ':00Z') + addDays * 86400000 - tdSet * 60000).toISOString();
+  await pool.query("delete from reservations where ref like 'T-%'");
+  for (const [ref, at, status] of [['T-late', tdAt('23:59'), 'confirmed'], ['T-early', tdAt('00:00'), 'confirmed'], ['T-mid', tdAt('13:00'), 'completed'], ['T-cancel', tdAt('14:00'), 'cancelled'], ['T-exp', tdAt('15:00'), 'expired'], ['T-tom', tdAt('00:00', 1), 'confirmed'], ['T-yest', tdAt('23:59', -1), 'confirmed']]) {
+    await pool.query("insert into reservations (ref, phone_number, contact_phone, guest_name, guests, starts_at, status) values ($1,'2348000000001','2348000000001','Today Test',2,$2,$3)", [ref, at, status]);
+  }
+  const td = (await call('GET', '/api/today', null, cookie)).json;
+  const tdMine = td.rows.filter((x) => x.ref.startsWith('T-')).map((x) => x.ref);
+  ok(td.today === tdDay && JSON.stringify(tdMine) === JSON.stringify(['T-early', 'T-mid', 'T-late']), "today's list: only today (venue date), no cancelled or expired, earliest arrival first");
+  ok(td.rows.every((x, i) => i === 0 || new Date(td.rows[i - 1].starts_at) <= new Date(x.starts_at)) && td.guests === td.rows.reduce((n, x) => n + x.guests, 0) && td.rows.every((x) => x.time_label), "today's list is sorted and counts guests");
+  await pool.query("delete from reservations where ref like 'T-%'");
   ok(ov.kpis && ov.byWeekday.length > 0 && ov.upcomingDaily.length > 0 && ov.status.length > 0 && Array.isArray(ov.topDays), 'overview has KPIs and chart data');
   const rv = (await pool.query("select coalesce(sum(paid_amount_kobo),0)::bigint - coalesce(sum(refund_amount_kobo),0)::bigint as n from reservations where paid_at >= now() - interval '30 days'")).rows[0].n;
   ok(ov.kpis.revenueKobo === Number(rv) && ov.kpis.revenueKobo > 0, 'revenue = paid minus refunded');

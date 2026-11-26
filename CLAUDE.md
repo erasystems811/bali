@@ -20,7 +20,7 @@ Rules learned the hard way (do not regress): never answer a form step with the S
 
 Money: Monnify (sandbox keys now; live keys later). Guest pays N20,500 (N20,000 credited to the order + N500 service charge, shown only as a small note at the end of the pay screen). Refund of N20,000 if cancelled 24h+ ahead (guests via their reservation page; staff from the dashboard can refund in full). The table is confirmed the moment the provider says the payment is received (verified with Monnify by our own reference); the Monnify webhook (`/webhook/monnify`, must be added in the Monnify dashboard) is the safety net when the guest closes the form. Setting `confirm_via_webhook` (default off) makes the webhook the only trigger.
 
-After payment: the return page (`/reserve/<token>/done`) sends the guest straight back to the WhatsApp chat and sends the confirmation message right then (once). Confirmation is a message with a TAP TO MANAGE button (reservation page: change date/time/guests, cancel). Details go to up to 2 HANDOVER numbers (Settings). Reminder before arrival (default 6h, template `bali_reservation_reminder`). Enquiry chat (/ask) answers only from the knowledge_base table (keyword match first, then Claude if ANTHROPIC_API_KEY is set, KB-only). Reservation numbers run R-001, R-002, ... Bali is open 24 hours; no capacity or party-size limit by default. Dashboard: Reservations (graphs), Chats, Knowledge base, Settings.
+After payment: the return page (`/reserve/<token>/done`) sends the guest straight back to the WhatsApp chat and sends the confirmation message right then (once). Confirmation is a message with a TAP TO MANAGE button (reservation page: change date/time/guests, cancel). Details go to up to 2 HANDOVER numbers (Settings). Reminder before arrival (default 6h, template `bali_reservation_reminder`). Enquiry chat (/ask) answers only from the knowledge_base table (keyword match first, then Claude if ANTHROPIC_API_KEY is set, KB-only). Reservation numbers run R-001, R-002, ... Bali is open 24 hours; no capacity or party-size limit by default. Dashboard: Today (todays bookings only, earliest arrival first, refreshes itself), All reservations (list, then stats: tables today, cancellations, most booked days, next 30 days, booking status without expired; the owner removed the revenue, upcoming, arrival times and busiest dates cards), Chats, Knowledge base, Settings. Every confirmation (message, form screen, web page, change message) carries the NOTE in SEATING_NOTE (app/lib/core.js): table given out if not seated 20 minutes into the reserved time. It is a notice only, nothing auto-releases.
 
 Meta messages cost money: do not add extra WhatsApp messages (the owner objected to a pay button message). Cancel/change by a guest sends them a confirmation; the form never sends extra messages while paying.
 
@@ -45,7 +45,7 @@ Self-hosted on the shared Hetzner host 77.42.122.241 (/opt/bali), app + postgres
 
 ## Last updated
 
-2026-11-26 - reservations made free, new ordering link.
+2026-11-26 - reservations made free, new ordering link; Today tab, dashboard cards trimmed, 20 minute seating note.
 
 2026-11-24 - moved to bali.erasystems.com.ng (new Flow version 1144378334996832, number webhook, app links); after payment the guest is redirected back to the chat with the confirmation already sent; see list above.
 

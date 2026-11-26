@@ -1,5 +1,5 @@
 // Reservation rules: validation, capacity, holds, payment, handover, cancel/refund.
-const { loadSettings, makeTime, naira, guestWord, normalizePhone, randHex } = require('./core');
+const { loadSettings, makeTime, naira, guestWord, normalizePhone, randHex, SEATING_NOTE } = require('./core');
 
 function createResv(ctx, wa, ps) {
   const { pool, env } = ctx;
@@ -175,7 +175,7 @@ function createResv(ctx, wa, ps) {
     const credit = paid ? ` Your ${naira(S.reservation_fee_kobo)} is credited to your order on the day.` : '';
     const short = await sessionShort(r.phone_number);
     const manageUrl = `${base()}/m/${short}`;
-    const body = `Your table at ${S.venue_name} is confirmed ✅\n\nRef: ${r.ref}\nName: ${r.guest_name}\n${describe(r, T)}.${credit}${link ? `\n\nIf you would like to place an order ahead for that day, you can do that through this link: ${link}` : ''}\n\nTo change or cancel your reservation, you can manage it using the button below.`;
+    const body = `Your table at ${S.venue_name} is confirmed ✅\n\nRef: ${r.ref}\nName: ${r.guest_name}\n${describe(r, T)}.${credit}${link ? `\n\nIf you would like to place an order ahead for that day, you can do that through this link: ${link}` : ''}\n\n*NOTE:* ${SEATING_NOTE}\n\nTo change or cancel your reservation, you can manage it using the button below.`;
     // One message with a real tap button (TAP TO MANAGE). Outside the 24h window only plain text is possible, so the link goes in the text.
     try {
       if (await wa.withinWindow(r.phone_number, false)) await wa.sendCta(r.phone_number, { body, button: 'TAP TO MANAGE', url: manageUrl });
@@ -307,7 +307,7 @@ function createResv(ctx, wa, ps) {
       await client.query('commit');
     } catch (e) { try { await client.query('rollback'); } catch (_) {} throw e; } finally { client.release(); }
     if (S.notify_changes) await notifyHandover(S, `Reservation ${r.ref} was changed by the guest ✏️\nName: ${r.guest_name}\nPhone: ${r.contact_phone || r.phone_number}\nWas: ${describe(r, T)}\nNow: ${describe(upd, T)}`, 'a changed reservation');
-    try { await sendWithManage(r.phone_number, `Your reservation ${r.ref} is updated ✅\n\nName: ${r.guest_name}\n${describe(upd, T)}\n\nTo change or cancel it again, you can manage it using the button below.`); } catch (e) {}
+    try { await sendWithManage(r.phone_number, `Your reservation ${r.ref} is updated ✅\n\nName: ${r.guest_name}\n${describe(upd, T)}\n\n*NOTE:* ${SEATING_NOTE}\n\nTo change or cancel it again, you can manage it using the button below.`); } catch (e) {}
     return { ok: true, ref: r.ref, text: describe(upd, T) };
   }
 

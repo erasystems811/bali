@@ -5,7 +5,7 @@
 //  - To REFUSE a step and keep the guest where they are (bad time, not paid yet ...) the answer is { screen: <current>, data: { error_message } }.
 //    WhatsApp then shows the message and leaves the screen exactly as it is, so nothing the guest typed is cleared. Answering with the same
 //    screen and fresh data instead leaves the form spinning forever.
-const { loadSettings, makeTime, naira } = require('./core');
+const { loadSettings, makeTime, naira, SEATING_NOTE } = require('./core');
 const flow = require('./flow');
 
 function createFlowEndpoint(ctx, resv) {
@@ -46,7 +46,7 @@ function createFlowEndpoint(ctx, resv) {
       screen: 'DONE',
       data: {
         summary: `${r.guest_name}\n${resv.describe(r, T)}\nRef ${r.ref}`,
-        credit: `${r.paid_amount_kobo ? `Your ${naira(S.reservation_fee_kobo)} is credited to your order on the day. ` : ''}Your confirmation and the link to order ahead are in this chat.`,
+        credit: `${r.paid_amount_kobo ? `Your ${naira(S.reservation_fee_kobo)} is credited to your order on the day. ` : ''}Your confirmation and the link to order ahead are in this chat.\n\nNOTE: ${SEATING_NOTE}`,
         ref: r.ref,
       },
     };

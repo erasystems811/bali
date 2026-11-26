@@ -82,3 +82,11 @@ tbody tr{cursor:pointer;transition:background .12s}tbody tr:hover{background:rgb
 /* mobile */
 @media(max-width:980px){.g4{grid-template-columns:repeat(2,1fr)}.g2,.g3,.g2e{grid-template-columns:1fr}.chats{grid-template-columns:1fr}.chats.open .threads{display:none}.chats:not(.open) .convo{display:none}.main{padding:20px 16px 110px}}
 @media(max-width:760px){#root{display:block}.side{position:fixed;top:auto;bottom:0;left:0;right:0;width:100%;height:auto;flex-direction:row;padding:8px 10px calc(8px + env(safe-area-inset-bottom));border-right:none;border-top:1px solid var(--line2);background:#1a0d07;z-index:30}.side .brand,.side .who,.side .grow,.side form{display:none}.nav{display:flex;width:100%;gap:4px}.nav button{flex-direction:column;gap:4px;padding:8px 4px;font-size:11px;text-align:center;justify-content:center}}
+
+/* Today list + All reservations list */
+.live{font-size:14px;font-weight:600;color:var(--cream)}
+.tblwrap.scroll{max-height:62vh;overflow:auto}.tblwrap.scroll th{position:sticky;top:0;background:#25140b;z-index:1}
+table.today{min-width:0}table.today .time{font-weight:700;font-size:16px;color:var(--cream);white-space:nowrap;font-variant-numeric:tabular-nums}
+table.today tr.done{opacity:.55}
+@media(max-width:760px){table.today .wide{display:none}table.today th,table.today td{padding-left:8px;padding-right:8px}.nav button{flex:1;min-width:0;line-height:1.2}}
+@media(max-width:760px){.tools .seg{max-width:100%;overflow-x:auto}.card{min-width:0}table.today .time{font-size:14.5px}table.today .nm span{font-size:11.5px}}

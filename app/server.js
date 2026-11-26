@@ -338,6 +338,8 @@ function buildApp(ctx) {
   const api = express.Router();
   api.use(requireAuth);
 
+  const reservationRow = (r, T) => { const pt = T.utcToLocalParts(r.starts_at); return { ...r, local_date: pt.date, local_time: pt.time, date_label: T.fmtDateFull(pt.date), time_label: T.fmtTime(pt.time) }; };
+
   api.get('/overview', wrap(async (req, res) => {
     const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 7), 365);
     const S = await loadSettings(ctx); const T = makeTime(S);
@@ -365,6 +367,15 @@ function buildApp(ctx) {
     });
   }));
 
+  // today's bookings (venue date), earliest arrival first. Cancelled and unpaid/expired attempts are not people coming, so they are left out.
+  api.get('/today', wrap(async (req, res) => {
+    const S = await loadSettings(ctx); const T = makeTime(S, ctx.now);
+    const today = T.todayStr();
+    const { rows } = await pool.query("select * from reservations where status in ('confirmed','completed','no_show') and starts_at >= $1 and starts_at < $2 order by starts_at asc, created_at asc",
+      [T.localToUtcISO(today, '00:00'), T.localToUtcISO(T.addDaysISO(today, 1), '00:00')]);
+    res.json({ today, today_label: T.fmtDateFull(today), guests: rows.reduce((n, r) => n + r.guests, 0), rows: rows.map((r) => reservationRow(r, T)) });
+  }));
+
   api.get('/reservations', wrap(async (req, res) => {
     const S = await loadSettings(ctx); const T = makeTime(S);
     const where = []; const p = [];
@@ -373,7 +384,7 @@ function buildApp(ctx) {
     if (req.query.to) { p.push(T.localToUtcISO(T.addDaysISO(String(req.query.to), 1), '00:00')); where.push(`starts_at < $${p.length}`); }
     if (req.query.q) { p.push(`%${String(req.query.q).toLowerCase()}%`); where.push(`(lower(guest_name) like $${p.length} or contact_phone like $${p.length} or phone_number like $${p.length} or lower(ref) like $${p.length})`); }
     const { rows } = await pool.query(`select * from reservations ${where.length ? 'where ' + where.join(' and ') : ''} order by starts_at desc limit 500`, p);
-    res.json({ rows: rows.map((r) => { const pt = T.utcToLocalParts(r.starts_at); return { ...r, local_date: pt.date, local_time: pt.time, date_label: T.fmtDateFull(pt.date), time_label: T.fmtTime(pt.time) }; }) });
+    res.json({ rows: rows.map((r) => reservationRow(r, T)) });
   }));
   api.post('/reservations/:ref/cancel', wrap(async (req, res) => {
     const mode = ['auto', 'full', 'none'].includes(req.body?.refund) ? req.body.refund : 'auto';

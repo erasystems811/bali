@@ -1,4 +1,4 @@
-// Bali dashboard (vanilla JS). Tabs: Reservations, Chats, Knowledge base, Settings.
+// Bali dashboard (vanilla JS). Tabs: Today, All reservations, Chats, Knowledge base, Settings.
 (function () {
   const $ = (s, r = document) => r.querySelector(s);
   const h = (tag, attrs, ...kids) => {
@@ -23,14 +23,15 @@
   const toast = (msg, bad) => { let t = $('.toast'); if (!t) { t = h('div', { class: 'toast' }); document.body.append(t); } t.textContent = msg; t.className = 'toast on' + (bad ? ' bad' : ''); clearTimeout(toastT); toastT = setTimeout(() => (t.className = 'toast'), 2600); };
 
   const ICON = {
+    today: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>',
     res: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="16" rx="3"/><path d="M8 2.5v4M16 2.5v4M3 10h18"/></svg>',
     chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.5-4.6A8 8 0 1 1 21 12z"/></svg>',
     kb: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5v-16z"/><path d="M8 7h8M8 11h6"/></svg>',
     set: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
   };
-  const TABS = [['res', 'Reservations'], ['chat', 'Chats'], ['kb', 'Knowledge base'], ['set', 'Settings']];
-  let tab = (location.hash || '#res').slice(1); if (!TABS.some((t) => t[0] === tab)) tab = 'res';
-  let charts = [], pollT = null;
+  const TABS = [['today', 'Today'], ['res', 'All reservations'], ['chat', 'Chats'], ['kb', 'Knowledge base'], ['set', 'Settings']];
+  let tab = (location.hash || '#today').slice(1); if (!TABS.some((t) => t[0] === tab)) tab = 'today';
+  let charts = [], pollT = null, reload = () => {}; // reload: refreshes the list on the open tab after an action
   const killCharts = () => { charts.forEach((c) => c.destroy()); charts = []; clearInterval(pollT); };
 
   function shell() {
@@ -44,39 +45,70 @@
       h('main', { class: 'main', id: 'main' }));
   }
   function go(k) { tab = k; location.hash = k; killCharts(); window.scrollTo(0, 0); render(); }
-  function render() { shell(); ({ res: viewRes, chat: viewChat, kb: viewKb, set: viewSet })[tab](); }
+  function render() { shell(); ({ today: viewToday, res: viewRes, chat: viewChat, kb: viewKb, set: viewSet })[tab](); }
 
-  // ---------------- Reservations ----------------
-  let days = 30, filter = { status: '', q: '' };
+  // ---------------- Today ----------------
+  // Only today's bookings, earliest arrival first; refreshes itself so new bookings and changes appear in their place.
+  async function viewToday() {
+    const main = $('#main');
+    const sub = h('p', {}, 'Loading…'); const count = h('div', { class: 'live' });
+    const box = h('div', { class: 'tblwrap', id: 'today' }, h('div', { class: 'empty' }, 'Loading…'));
+    main.append(h('div', { class: 'head' }, h('div', {}, h('h1', {}, 'Today'), sub), count), h('div', { class: 'card' }, box));
+    let last = '';
+    async function load() {
+      let d;
+      try { d = await api('/today'); } catch (e) { if (box.isConnected) count.textContent = 'Could not refresh, trying again…'; return; }
+      if (!box.isConnected) return;
+      sub.textContent = d.today_label + ' · earliest arrival first';
+      count.textContent = d.rows.length + (d.rows.length === 1 ? ' table · ' : ' tables · ') + d.guests + (d.guests === 1 ? ' guest' : ' guests');
+      const now = JSON.stringify(d.rows);
+      if (now === last) return; // nothing changed: leave the list (and the scroll position) alone
+      last = now;
+      box.innerHTML = '';
+      if (!d.rows.length) { box.append(h('div', { class: 'empty' }, 'No reservations for today yet.')); return; }
+      box.append(h('table', { class: 'today' }, h('thead', {}, h('tr', {}, ['Arrival', 'Guest', 'Guests', 'Status', 'Ref'].map((c) => h('th', { class: c === 'Ref' || c === 'Status' ? 'wide' : '' }, c)))),
+        h('tbody', {}, d.rows.map((r) => h('tr', { class: r.status === 'confirmed' ? '' : 'done', onclick: () => drawer(r) },
+          h('td', { class: 'time' }, r.time_label), guestCell(r), h('td', {}, String(r.guests)),
+          h('td', { class: 'wide' }, h('span', { class: 'st ' + r.status }, r.status.replace('_', ' '))), h('td', { class: 'wide' }, r.ref))))));
+    }
+    reload = () => { last = ''; load(); };
+    pollT = setInterval(load, 10000);
+    await load();
+  }
+  const guestCell = (r) => h('td', { class: 'nm' }, h('b', {}, r.guest_name || 'Guest'), h('span', {}, '+' + String(r.contact_phone || r.phone_number).replace(/^\+/, '')));
+
+  // ---------------- All reservations ----------------
+  let days = 30, jumpToStats = false, filter = { status: '', q: '' };
   const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const COL = { cream: '#e8c99b', creamD: 'rgba(232,201,155,.38)', teal: '#3aa3bd', ok: '#62c597', warn: '#e7b24a', bad: '#f0776a', mut: '#82705d' };
   Chart.defaults.font.family = 'Inter, system-ui, sans-serif'; Chart.defaults.color = '#b4a089';
   const chartBase = () => ({ responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { backgroundColor: '#2d1a0f', borderColor: 'rgba(232,201,155,.3)', borderWidth: 1, padding: 10, titleColor: '#f6ead9', bodyColor: '#e8c99b', displayColors: false } }, scales: { x: { grid: { display: false }, ticks: { color: '#b4a089' }, border: { display: false } }, y: { beginAtZero: true, grid: { color: 'rgba(232,201,155,.08)' }, ticks: { color: '#82705d', precision: 0 }, border: { display: false } } } });
-  const fmtHour = (n) => { const s = n >= 12 ? 'pm' : 'am'; return (n % 12 || 12) + s; };
   const dayLabel = (iso) => { const d = new Date(iso + 'T00:00:00Z'); return WD[d.getUTCDay()] + ' ' + d.getUTCDate() + ' ' + d.toLocaleString('en', { month: 'short', timeZone: 'UTC' }); };
 
   async function viewRes() {
     const main = $('#main');
+    reload = loadRows;
     main.append(
-      h('div', { class: 'head' }, h('div', {}, h('h1', {}, 'Reservations'), h('p', {}, 'Tables booked, who is coming and how the venue is filling up.')),
-        h('div', { class: 'seg' }, [[7, '7d'], [30, '30d'], [90, '90d'], [365, '1y']].map(([d, l]) => h('button', { class: d === days ? 'on' : '', onclick: () => { days = d; go('res'); } }, l)))),
-      h('div', { id: 'kp', class: 'grid g4' }), h('div', { id: 'ch', style: 'margin-top:16px' }),
-      h('div', { class: 'card', style: 'margin-top:16px' }, h('h3', {}, 'All reservations'), h('div', { class: 'sub' }, 'Click a row for details and actions.'),
+      h('div', { class: 'head' }, h('div', {}, h('h1', {}, 'All reservations'), h('p', {}, 'Every booking, past and upcoming. Click a row for details and actions.'))),
+      h('div', { class: 'card' },
         h('div', { class: 'tools' },
           h('input', { class: 'search', placeholder: 'Search name, phone or reference', value: filter.q, oninput: (e) => { filter.q = e.target.value; clearTimeout(viewRes.t); viewRes.t = setTimeout(loadRows, 250); } }),
           h('div', { class: 'seg' }, [['', 'All'], ['confirmed', 'Confirmed'], ['pending_payment', 'Pending'], ['cancelled', 'Cancelled']].map(([v, l]) => h('button', { class: filter.status === v ? 'on' : '', onclick: (e) => { filter.status = v; [...e.target.parentNode.children].forEach((b) => b.classList.remove('on')); e.target.classList.add('on'); loadRows(); } }, l)))),
-        h('div', { class: 'tblwrap', id: 'tbl' })));
+        h('div', { class: 'tblwrap scroll', id: 'tbl' })),
+      h('div', { class: 'head', id: 'stats', style: 'margin:30px 0 16px' }, h('div', {}, h('h1', {}, 'Statistics'), h('p', {}, 'How the venue is filling up.')),
+        h('div', { class: 'seg' }, [[7, '7d'], [30, '30d'], [90, '90d'], [365, '1y']].map(([d, l]) => h('button', { class: d === days ? 'on' : '', onclick: () => { days = d; jumpToStats = true; go('res'); } }, l)))),
+      h('div', { id: 'kp', class: 'grid g2' }), h('div', { id: 'ch', style: 'margin-top:16px' }));
+    await loadRows();
     const o = await api('/overview?days=' + days);
+    if (!$('#kp')) return; // moved to another tab meanwhile
     const k = o.kpis;
     $('#kp').append(
       kpi('Tables today', k.todayTables, k.todayGuests + ' guests expected', true),
-      kpi('Upcoming', k.upcoming, k.upcomingGuests + ' guests booked ahead'),
-      kpi('Revenue (' + days + 'd)', naira(k.revenueKobo), naira(k.refundedKobo) + ' refunded'),
       kpi('Cancellations', Math.round(k.cancelRate * 100) + '%', 'Avg party ' + k.avgParty.toFixed(1)));
     const ch = $('#ch');
     ch.append(
       h('div', { class: 'grid g2' }, card('Most booked days', 'Bookings by day of the week, last ' + days + ' days', 'c1'), card('Next 30 days', 'Guests booked per day', 'c2')),
-      h('div', { class: 'grid g3', style: 'margin-top:16px' }, card('Arrival times', 'When guests arrive', 'c3'), card('Booking status', 'Everything created in the period', 'c4', 'sm'), top5(o.topDays)));
+      h('div', { style: 'margin-top:16px' }, card('Booking status', 'Everything created in the period', 'c4', 'sm')));
     // weekday (Mon..Sun order), highlight the busiest
     const order = [1, 2, 3, 4, 5, 6, 0]; const wd = order.map((d) => (o.byWeekday.find((x) => x.dow === d) || { bookings: 0 }).bookings);
     const mx = Math.max(...wd, 0);
@@ -84,11 +116,10 @@
     const up = o.upcomingDaily; const dayMap = Object.fromEntries(up.map((u) => [u.day, u.guests]));
     const lab = [], vals = []; for (let i = 0; i < 30; i++) { const d = new Date(o.today + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + i); const iso = d.toISOString().slice(0, 10); lab.push(iso); vals.push(dayMap[iso] || 0); }
     chartOrEmpty('c2', Math.max(...vals, 0), () => ({ type: 'bar', data: { labels: lab.map((l) => dayLabel(l).slice(4)), datasets: [{ data: vals, borderRadius: 5, backgroundColor: COL.teal, maxBarThickness: 18 }] }, options: { ...chartBase(), scales: { ...chartBase().scales, x: { ...chartBase().scales.x, ticks: { color: '#82705d', maxTicksLimit: 8, maxRotation: 0 } } }, plugins: { ...chartBase().plugins, tooltip: { ...chartBase().plugins.tooltip, callbacks: { title: (i) => dayLabel(lab[i[0].dataIndex]), label: (c) => c.parsed.y + ' guests' } } } } }));
-    const hrs = o.byHour;
-    chartOrEmpty('c3', hrs.length, () => ({ type: 'bar', data: { labels: hrs.map((x) => fmtHour(x.hour)), datasets: [{ data: hrs.map((x) => x.bookings), borderRadius: 8, backgroundColor: COL.cream, maxBarThickness: 40 }] }, options: { ...chartBase(), plugins: { ...chartBase().plugins, tooltip: { ...chartBase().plugins.tooltip, callbacks: { label: (c) => c.parsed.y + ' bookings' } } } } }));
-    const stCol = { confirmed: COL.ok, pending_payment: COL.warn, cancelled: COL.bad, expired: COL.mut, completed: COL.teal, no_show: '#b4a089' };
-    chartOrEmpty('c4', o.status.length, () => ({ type: 'doughnut', data: { labels: o.status.map((s) => s.status.replace('_', ' ')), datasets: [{ data: o.status.map((s) => s.n), backgroundColor: o.status.map((s) => stCol[s.status] || COL.mut), borderWidth: 0, spacing: 3 }] }, options: { responsive: true, maintainAspectRatio: false, cutout: '68%', plugins: { legend: { display: true, position: 'right', labels: { color: '#e8d7bf', boxWidth: 10, boxHeight: 10, usePointStyle: true, padding: 12 } }, tooltip: chartBase().plugins.tooltip } } }));
-    loadRows();
+    const stCol = { confirmed: COL.ok, pending_payment: COL.warn, cancelled: COL.bad, completed: COL.teal, no_show: '#b4a089' };
+    const statuses = o.status.filter((s) => s.status !== 'expired');
+    chartOrEmpty('c4', statuses.length, () => ({ type: 'doughnut', data: { labels: statuses.map((s) => s.status.replace('_', ' ')), datasets: [{ data: statuses.map((s) => s.n), backgroundColor: statuses.map((s) => stCol[s.status] || COL.mut), borderWidth: 0, spacing: 3 }] }, options: { responsive: true, maintainAspectRatio: false, cutout: '68%', plugins: { legend: { display: true, position: 'right', labels: { color: '#e8d7bf', boxWidth: 10, boxHeight: 10, usePointStyle: true, padding: 12 } }, tooltip: chartBase().plugins.tooltip } } }));
+    if (jumpToStats) { jumpToStats = false; $('#stats')?.scrollIntoView(); }
   }
   const kpi = (l, v, d, accent) => h('div', { class: 'card kpi' + (accent ? ' accent' : '') }, h('div', { class: 'l' }, l), h('div', { class: 'v' }, String(v)), h('div', { class: 'd' }, d));
   const card = (t, s, id, sm) => h('div', { class: 'card' }, h('h3', {}, t), h('div', { class: 'sub' }, s), h('div', { class: 'chart' + (sm ? ' sm' : ''), id: id + 'w' }, h('canvas', { id })));
@@ -96,8 +127,6 @@
     if (!hasData) { $('#' + id + 'w').innerHTML = '<div class="empty">No data in this period yet.</div>'; return; }
     charts.push(new Chart($('#' + id), mk()));
   }
-  const top5 = (rows) => h('div', { class: 'card top5' }, h('h3', {}, 'Busiest dates'), h('div', { class: 'sub' }, 'Most guests in the period'),
-    rows.length ? rows.map((r, i) => h('div', { class: 'it' }, h('div', { class: 'rk' }, String(i + 1)), h('div', { class: 'm' }, h('b', {}, dayLabel(r.day)), h('span', {}, r.bookings + ' bookings')), h('div', { class: 'g' }, r.guests + ' guests'))) : h('div', { class: 'empty' }, 'No bookings yet.'));
 
   async function loadRows() {
     const p = new URLSearchParams(); if (filter.status) p.set('status', filter.status); if (filter.q) p.set('q', filter.q);
@@ -107,7 +136,7 @@
     box.innerHTML = '';
     box.append(h('table', {}, h('thead', {}, h('tr', {}, ['Guest', 'Date', 'Arrival', 'Guests', 'Status', 'Paid', 'Ref'].map((c) => h('th', {}, c)))),
       h('tbody', {}, rows.map((r) => h('tr', { onclick: () => drawer(r) },
-        h('td', { class: 'nm' }, h('b', {}, r.guest_name || 'Guest'), h('span', {}, '+' + String(r.contact_phone || r.phone_number).replace(/^\+/, ''))),
+        guestCell(r),
         h('td', {}, r.date_label), h('td', {}, r.time_label), h('td', {}, String(r.guests)),
         h('td', {}, h('span', { class: 'st ' + r.status }, r.status.replace('_', ' '))),
         h('td', {}, r.paid_amount_kobo ? naira(r.paid_amount_kobo) : '—'), h('td', {}, r.ref))))));
@@ -125,9 +154,9 @@
       dr.append(h('h3', { style: 'margin:20px 0 4px' }, 'Cancel this reservation'),
         ...(r.paid_amount_kobo ? opts.map(([v, t, s]) => h('label', { class: 'radio' }, h('input', { type: 'radio', name: 'rf', checked: v === 'auto', onchange: () => (mode = v) }), h('div', {}, h('b', {}, t), h('span', {}, s)))) : []),
         h('div', { class: 'row', style: 'margin-top:14px' },
-          h('button', { class: 'btn danger', onclick: async (e) => { if (!confirm('Cancel ' + r.ref + ' and tell the guest on WhatsApp?')) return; e.target.disabled = true; try { await api('/reservations/' + r.ref + '/cancel', { method: 'POST', body: { refund: mode } }); toast('Cancelled and the guest was told'); close(); loadRows(); } catch (er) { toast(er.message, true); e.target.disabled = false; } } }, 'Cancel reservation'),
-          r.status === 'confirmed' ? h('button', { class: 'btn', onclick: async () => { await api('/reservations/' + r.ref + '/status', { method: 'POST', body: { status: 'completed' } }); toast('Marked completed'); close(); loadRows(); } }, 'Mark completed') : null,
-          r.status === 'confirmed' ? h('button', { class: 'btn', onclick: async () => { await api('/reservations/' + r.ref + '/status', { method: 'POST', body: { status: 'no_show' } }); toast('Marked no show'); close(); loadRows(); } }, 'No show') : null));
+          h('button', { class: 'btn danger', onclick: async (e) => { if (!confirm('Cancel ' + r.ref + ' and tell the guest on WhatsApp?')) return; e.target.disabled = true; try { await api('/reservations/' + r.ref + '/cancel', { method: 'POST', body: { refund: mode } }); toast('Cancelled and the guest was told'); close(); reload(); } catch (er) { toast(er.message, true); e.target.disabled = false; } } }, 'Cancel reservation'),
+          r.status === 'confirmed' ? h('button', { class: 'btn', onclick: async () => { await api('/reservations/' + r.ref + '/status', { method: 'POST', body: { status: 'completed' } }); toast('Marked completed'); close(); reload(); } }, 'Mark completed') : null,
+          r.status === 'confirmed' ? h('button', { class: 'btn', onclick: async () => { await api('/reservations/' + r.ref + '/status', { method: 'POST', body: { status: 'no_show' } }); toast('Marked no show'); close(); reload(); } }, 'No show') : null));
     }
     document.body.append(veil, dr); requestAnimationFrame(() => { veil.classList.add('on'); dr.classList.add('on'); });
   }

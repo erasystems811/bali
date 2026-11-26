@@ -84,4 +84,7 @@ function normalizePhone(raw) {
 
 function randHex(n) { return require('crypto').randomBytes(n).toString('hex'); }
 
-module.exports = { DEFAULTS, loadSettings, makeTime, naira, guestWord, normalizePhone, randHex, WD_TITLE, WEEKDAYS, MONTHS, pad };
+// Told to the guest whenever a reservation is confirmed or changed.
+const SEATING_NOTE = 'If you are not seated within 20 minutes of your reserved time, your table will be given out.';
+
+module.exports = { SEATING_NOTE, DEFAULTS, loadSettings, makeTime, naira, guestWord, normalizePhone, randHex, WD_TITLE, WEEKDAYS, MONTHS, pad };
