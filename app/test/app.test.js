@@ -14,12 +14,13 @@ const env = {
   APP_BASE_URL: 'https://app.test', META_ACCESS_TOKEN: 'tok', META_PHONE_NUMBER_ID: '1', META_WEBHOOK_VERIFY_TOKEN: 'vt',
   BALI_FORWARD_SECRET: 'fsec', PAYSTACK_SECRET_KEY: 'sk_test', SESSION_SECRET: 's', NODE_ENV: 'test',
 };
-const sent = []; const refunds = []; const paid = new Set(); let paystackDown = false; const monnifyCalls = []; const monnifyRefunds = []; let rejectReminderTemplate = false; let claudeFail = false; let payHang = false; let graphTransient = 0; let graphFlowDown = false;
+const sent = []; const refunds = []; const paid = new Set(); let paystackDown = false; const monnifyCalls = []; const monnifyRefunds = []; let rejectReminderTemplate = false; let claudeFail = false; let payHang = false; let graphTransient = 0; let graphFlowDown = false; let graphImageDown = false;
 const claudeCalls = [];
 async function http(method, url, { body, headers } = {}) {
   const u = new URL(url);
   if (u.hostname === 'graph.facebook.com') {
     if (graphTransient > 0) { graphTransient -= 1; const e = new Error('HTTP 400 graph'); e.body = { error: { code: 2, is_transient: true, message: '(#2) Service temporarily unavailable' } }; throw e; }
+    if (graphImageDown && body.interactive?.header?.type === 'image') { const e = new Error('HTTP 400 graph'); e.body = { error: { code: 131053, message: '(#131053) Media upload error', error_data: { details: 'Your server hosting media content did not respond back in time.' } } }; throw e; }
     if (graphFlowDown && body.interactive?.type === 'flow') { const e = new Error('HTTP 400 graph'); e.body = { error: { code: 2, is_transient: true, message: '(#2) Service temporarily unavailable' } }; throw e; }
     if (rejectReminderTemplate && body.template?.name === 'bali_reservation_reminder') throw new Error('template not approved'); sent.push({ tname: body.template?.name, tcomponents: body.template?.components, to: body.to, type: body.type, text: body.text?.body || body.interactive?.body?.text || body.template?.components?.[0]?.parameters?.[0]?.text, interactive: body.interactive, template: body.type === 'template' }); return { messages: [{ id: 'wamid.' + sent.length }] }; }
   if (u.hostname === 'api.paystack.co') {
@@ -84,7 +85,7 @@ async function http(method, url, { body, headers } = {}) {
   const tok = await tokenOf(G);
   ok(sent[0].interactive.action.parameters.display_text === 'TAP HERE TO RESERVE' && sent[0].interactive.action.parameters.url === `https://app.test/reserve/${tok}`, 'button opens the reservation form');
   ok(/Hey, welcome to Bali/.test(sent[0].text) && /Questions\? Chat with us:\n/.test(sent[0].text) && /https:\/\/app\.test\/c\/[a-f0-9]{12}$/.test(sent[0].text) && !/[a-f0-9]{32}/.test(sent[0].text), 'card text is tidy: greeting, instruction, then the short enquiries link (no long token)');
-  ok(sent[0].interactive.header?.image?.link === 'https://app.test/assets/welcome.png', 'Bali picture in the card header');
+  ok(sent[0].interactive.header?.image?.link === 'https://app.test/assets/welcome-flow.jpg', 'Bali picture in the card header');
   await inbound(G, 'm1', 'hi');
   ok(sent.length === 1, 'duplicate delivery is ignored');
   await inbound(G, 'm2', 'hello again');
@@ -195,7 +196,7 @@ async function http(method, url, { body, headers } = {}) {
   const fm = sent.slice(bf).find((x) => x.to === F);
   const fp = fm?.interactive?.action?.parameters;
   ok(fm?.interactive?.type === 'flow' && fp.flow_id === 'FLOW1' && fp.flow_cta === 'TAP HERE TO RESERVE' && fp.flow_action === 'navigate', 'welcome is the native form message with an obvious TAP HERE TO RESERVE button');
-  ok(fm.interactive.header?.image?.link === 'https://app.test/assets/welcome.png' && /Hey, welcome to Bali/.test(fm.text) && /\n\nPlease tap the button below to make your table reservation\.\n\nQuestions\? Chat with us:\nhttps:\/\/app\.test\/c\/[a-f0-9]{12}$/.test(fm.text) && !/[a-f0-9]{32}/.test(fm.text), 'has the Bali picture and a clean three-part message: greeting, instruction, short chat link');
+  ok(fm.interactive.header?.image?.link === 'https://app.test/assets/welcome-flow.jpg' && /Hey, welcome to Bali/.test(fm.text) && /\n\nPlease tap the button below to make your table reservation\.\n\nQuestions\? Chat with us:\nhttps:\/\/app\.test\/c\/[a-f0-9]{12}$/.test(fm.text) && !/[a-f0-9]{32}/.test(fm.text), 'has the Bali picture and a clean three-part message: greeting, instruction, short chat link');
   const shortCode = fm.text.match(/\/c\/([a-f0-9]{12})/)[1]; const sRes = await fetch(`${base}/c/${shortCode}`, { redirect: 'manual' });
   ok(sRes.status === 302 && /^\/ask\/[a-f0-9]{32}$/.test(sRes.headers.get('location')) && (await fetch(`${base}/c/000000000000`, { redirect: 'manual' })).status === 404, 'the short link opens the enquiry chat; unknown codes 404');
   ok(fp.flow_token.startsWith('bali-') && fp.flow_action_payload.screen === 'RESERVE', 'flow token and first screen set');
@@ -512,6 +513,17 @@ async function http(method, url, { body, headers } = {}) {
   const fb = sent.slice(bj).filter((x) => x.to === HJ);
   ok(fb.length === 1 && !fb[0].interactive && /Reserve your table here:\nhttps:\/\/app\.test\/reserve\//.test(fb[0].text) && /Questions\? Chat with us:\nhttps:\/\/app\.test\/c\//.test(fb[0].text), 'if the form message cannot be delivered at all, the guest still gets a reply with the reservation and chat links');
   graphFlowDown = false;
+  const HKpic = '2348012345803'; const bkpic = sent.length; graphImageDown = true;
+  await inbound(HKpic, 'hk1', 'hi'); await settle();
+  const noPic = sent.slice(bkpic).filter((x) => x.to === HKpic);
+  ok(noPic.length === 1 && noPic[0].interactive?.type === 'flow' && !noPic[0].interactive.header, 'if Meta cannot fetch the welcome picture, the guest still gets the real form message (without the picture), not links');
+  graphImageDown = false;
+  const HLpic = '2348012345804'; const blpic = sent.length;
+  await inbound(HLpic, 'hl1', 'hi'); await settle();
+  const withPic = sent.slice(blpic).filter((x) => x.to === HLpic);
+  ok(withPic.length === 1 && withPic[0].interactive?.header?.image?.link === 'https://app.test/assets/welcome-flow.jpg', 'normally the welcome message carries the small Bali picture');
+  const loggedPic = (await pool.query("select count(*)::int as n from reservation_log where phone_number=$1 and direction='outbound'", [HKpic])).rows[0].n;
+  ok(loggedPic === 1, 'a failed attempt is not loggedPic as a message the guest received');
   await pool.query("update reservation_settings set flow_id=null where id=1");
 
   console.log('\n7o. payments through Monnify');

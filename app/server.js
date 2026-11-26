@@ -62,11 +62,11 @@ function buildApp(ctx) {
     res.sendStatus(403);
   });
 
-  async function sendForm(S, phone, token, { intro, nameInit, short } = {}) {
+  async function sendForm(S, phone, token, { intro, nameInit, short, noImage } = {}) {
     const askUrl = `${base()}/c/${await resv.sessionShort(phone)}`;
     return wa.sendFlow(phone, {
       // short = the guest tapped "Reserve a table" on the web chat and is about to land in WhatsApp: a compact message with the button right there
-      image: short ? null : (S.welcome_image_url || `${base()}/assets/welcome.png`),
+      image: (short || noImage) ? null : (S.welcome_image_url || `${base()}/assets/welcome-flow.jpg`),
       body: short ? 'Your reservation form is ready. Tap TAP HERE TO RESERVE below to open it.' : `${intro ? intro + '\n\n' : ''}${S.welcome_text}\n\nQuestions? Chat with us:\n${askUrl}`,
       cta: 'TAP HERE TO RESERVE', flowId: S.flow_id, token: `bali-${token}`,
       data: flow.flowData(S, { intro: intro || '', nameInit, phoneInit: `+${phone}` }),
@@ -80,9 +80,16 @@ function buildApp(ctx) {
       await pool.query('update web_sessions set welcomed_at = now(), last_seen = now() where token=$1', [token]);
       if (w[0]?.welcomed_at && Date.now() - new Date(w[0].welcomed_at).getTime() < 90000) return; // ignore rapid repeat texts
       const { rows: c } = await pool.query('select name from contacts where phone_number=$1', [phone]);
-      try { return await sendForm(S, phone, token, { nameInit: c[0]?.name || '' }); } catch (e) {
-        // The WhatsApp form message could not be delivered (even after retries): never leave the guest without a reply
-        console.error('form message failed, sending links instead:', JSON.stringify((e && e.body) || e.message));
+      let formErr = null;
+      for (const noImage of [false, false, true]) { // Meta sometimes cannot fetch the picture in time: try again, then send the same form message without the picture
+        try { return await sendForm(S, phone, token, { nameInit: c[0]?.name || '', noImage }); } catch (e) {
+          formErr = e; console.error('form message failed' + (noImage ? ' (no picture)' : '') + ':', JSON.stringify((e && e.body) || e.message));
+          await new Promise((r) => setTimeout(r, ctx.retryDelayMs === undefined ? 900 : ctx.retryDelayMs));
+        }
+      }
+      {
+        const e = formErr; // The WhatsApp form message could not be delivered at all: never leave the guest without a reply
+        console.error('sending links instead:', JSON.stringify((e && e.body) || e.message));
         const askShort = `${base()}/c/${await resv.sessionShort(phone)}`;
         return wa.send(phone, `${S.welcome_text}\n\nReserve your table here:\n${base()}/reserve/${token}\n\nQuestions? Chat with us:\n${askShort}`, 'your reservation links', { reply: true });
       }
@@ -97,7 +104,7 @@ function buildApp(ctx) {
       return;
     }
     await wa.sendCta(phone, {
-      image: S.welcome_image_url || `${base()}/assets/welcome.png`,
+      image: S.welcome_image_url || `${base()}/assets/welcome-flow.jpg`,
       body: `${S.welcome_text}\n\nQuestions? Chat with us:\n${askUrl}`,
       button: 'TAP HERE TO RESERVE',
       url: formUrl,

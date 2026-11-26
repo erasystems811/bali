@@ -22,6 +22,8 @@ Money: Monnify (sandbox keys now; live keys later). Guest pays N20,500 (N20,000 
 
 After payment: the return page (`/reserve/<token>/done`) sends the guest straight back to the WhatsApp chat and sends the confirmation message right then (once). Confirmation is a message with a TAP TO MANAGE button (reservation page: change date/time/guests, cancel). Details go to up to 2 HANDOVER numbers (Settings). Reminder before arrival (default 6h, template `bali_reservation_reminder`). Enquiry chat (/ask) answers only from the knowledge_base table (keyword match first, then Claude if ANTHROPIC_API_KEY is set, KB-only). Reservation numbers run R-001, R-002, ... Bali is open 24 hours; no capacity or party-size limit by default. Dashboard: Today (todays bookings only, earliest arrival first, refreshes itself), All reservations (stats at the top, then the list; stats: tables today, cancellations, most booked days, next 30 days, booking status without expired; the owner removed the revenue, upcoming, arrival times and busiest dates cards), Chats, Knowledge base, Settings. Every confirmation (message, form screen, web page, change message) carries the NOTE in SEATING_NOTE (app/lib/core.js): table given out if not seated 20 minutes into the reserved time. It is a notice only, nothing auto-releases.
 
+Welcome message reliability: Meta fetches the header picture from our server and once failed (error 131053, 2026-11-26), so the guest got plain links. The picture is now the small app/public/welcome-flow.jpg (11 KB, not the 1.2 MB PNG), the form message is retried twice and then sent WITHOUT the picture before links are used as the last resort.
+
 Meta messages cost money: do not add extra WhatsApp messages (the owner objected to a pay button message). Cancel/change by a guest sends them a confirmation; the form never sends extra messages while paying.
 
 **CURRENT (2026-11-26, overrides the money paragraph above): reservations are FREE for now.** `reservation_settings.payments_enabled` is false (switch back on in dashboard Settings; the payment code and Monnify setup are intact). The form goes straight from details to the confirmed screen. Ordering link: https://order.baliabuja.ng. If payments return, restore the two knowledge base answers (price, refund), which now say reservations are free.
@@ -45,7 +47,7 @@ Self-hosted on the shared Hetzner host 77.42.122.241 (/opt/bali), app + postgres
 
 ## Last updated
 
-2026-11-26 - reservations made free, new ordering link; Today tab, dashboard cards trimmed, 20 minute seating note.
+2026-11-26 - welcome message made reliable (small picture, retries, no-picture fallback); reservations made free, new ordering link; Today tab, dashboard cards trimmed, 20 minute seating note.
 
 2026-11-24 - moved to bali.erasystems.com.ng (new Flow version 1144378334996832, number webhook, app links); after payment the guest is redirected back to the chat with the confirmation already sent; see list above.
 

@@ -71,15 +71,16 @@ function createWa(ctx) {
   }
   // The native WhatsApp form (Flow): one message with a header picture, text and a button that opens the form INSIDE WhatsApp.
   async function sendFlow(to, { image, body, footer, cta, flowId, token, data }) {
-    await log(to, 'outbound', `${body} [${cta}]`);
-    if (SANDBOX) { ctx.sandbox?.push({ to, text: body, kind: 'flow', flowId, data }); return null; }
+    if (SANDBOX) { await log(to, 'outbound', `${body} [${cta}]`); ctx.sandbox?.push({ to, text: body, kind: 'flow', flowId, data }); return null; }
     const interactive = {
       type: 'flow', body: { text: body },
       action: { name: 'flow', parameters: { flow_message_version: '3', flow_id: flowId, flow_token: token, flow_cta: cta, flow_action: 'navigate', flow_action_payload: { screen: 'RESERVE', data } } },
     };
     if (footer) interactive.footer = { text: footer };
     if (image) interactive.header = { type: 'image', image: { link: image } };
-    return graph({ to, type: 'interactive', interactive });
+    const id = await graph({ to, type: 'interactive', interactive });
+    await log(to, 'outbound', `${body} [${cta}]`);
+    return id;
   }
   // release anything queued for a person who has just messaged us (they replied "okay" etc.)
   async function flushQueue(phone) {
