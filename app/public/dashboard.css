@@ -85,7 +85,6 @@ tbody tr{cursor:pointer;transition:background .12s}tbody tr:hover{background:rgb
 
 /* Today list + All reservations list */
 .live{font-size:14px;font-weight:600;color:var(--cream)}
-.tblwrap.scroll{max-height:62vh;overflow:auto}.tblwrap.scroll th{position:sticky;top:0;background:#25140b;z-index:1}
 table.today{min-width:0}table.today .time{font-weight:700;font-size:16px;color:var(--cream);white-space:nowrap;font-variant-numeric:tabular-nums}
 table.today tr.done{opacity:.55}
 @media(max-width:760px){table.today .wide{display:none}table.today th,table.today td{padding-left:8px;padding-right:8px}.nav button{flex:1;min-width:0;line-height:1.2}}

@@ -78,7 +78,7 @@
   const guestCell = (r) => h('td', { class: 'nm' }, h('b', {}, r.guest_name || 'Guest'), h('span', {}, '+' + String(r.contact_phone || r.phone_number).replace(/^\+/, '')));
 
   // ---------------- All reservations ----------------
-  let days = 30, jumpToStats = false, filter = { status: '', q: '' };
+  let days = 30, filter = { status: '', q: '' };
   const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const COL = { cream: '#e8c99b', creamD: 'rgba(232,201,155,.38)', teal: '#3aa3bd', ok: '#62c597', warn: '#e7b24a', bad: '#f0776a', mut: '#82705d' };
   Chart.defaults.font.family = 'Inter, system-ui, sans-serif'; Chart.defaults.color = '#b4a089';
@@ -89,16 +89,15 @@
     const main = $('#main');
     reload = loadRows;
     main.append(
-      h('div', { class: 'head' }, h('div', {}, h('h1', {}, 'All reservations'), h('p', {}, 'Every booking, past and upcoming. Click a row for details and actions.'))),
-      h('div', { class: 'card' },
+      h('div', { class: 'head' }, h('div', {}, h('h1', {}, 'All reservations'), h('p', {}, 'How the venue is filling up, and every booking past and upcoming.')),
+        h('div', { class: 'seg' }, [[7, '7d'], [30, '30d'], [90, '90d'], [365, '1y']].map(([d, l]) => h('button', { class: d === days ? 'on' : '', onclick: () => { days = d; go('res'); } }, l)))),
+      h('div', { id: 'kp', class: 'grid g2' }), h('div', { id: 'ch', style: 'margin-top:16px' }),
+      h('div', { class: 'card', style: 'margin-top:16px' }, h('h3', {}, 'Reservations'), h('div', { class: 'sub' }, 'Click a row for details and actions.'),
         h('div', { class: 'tools' },
           h('input', { class: 'search', placeholder: 'Search name, phone or reference', value: filter.q, oninput: (e) => { filter.q = e.target.value; clearTimeout(viewRes.t); viewRes.t = setTimeout(loadRows, 250); } }),
           h('div', { class: 'seg' }, [['', 'All'], ['confirmed', 'Confirmed'], ['pending_payment', 'Pending'], ['cancelled', 'Cancelled']].map(([v, l]) => h('button', { class: filter.status === v ? 'on' : '', onclick: (e) => { filter.status = v; [...e.target.parentNode.children].forEach((b) => b.classList.remove('on')); e.target.classList.add('on'); loadRows(); } }, l)))),
-        h('div', { class: 'tblwrap scroll', id: 'tbl' })),
-      h('div', { class: 'head', id: 'stats', style: 'margin:30px 0 16px' }, h('div', {}, h('h1', {}, 'Statistics'), h('p', {}, 'How the venue is filling up.')),
-        h('div', { class: 'seg' }, [[7, '7d'], [30, '30d'], [90, '90d'], [365, '1y']].map(([d, l]) => h('button', { class: d === days ? 'on' : '', onclick: () => { days = d; jumpToStats = true; go('res'); } }, l)))),
-      h('div', { id: 'kp', class: 'grid g2' }), h('div', { id: 'ch', style: 'margin-top:16px' }));
-    await loadRows();
+        h('div', { class: 'tblwrap', id: 'tbl' })));
+    loadRows();
     const o = await api('/overview?days=' + days);
     if (!$('#kp')) return; // moved to another tab meanwhile
     const k = o.kpis;
@@ -119,7 +118,6 @@
     const stCol = { confirmed: COL.ok, pending_payment: COL.warn, cancelled: COL.bad, completed: COL.teal, no_show: '#b4a089' };
     const statuses = o.status.filter((s) => s.status !== 'expired');
     chartOrEmpty('c4', statuses.length, () => ({ type: 'doughnut', data: { labels: statuses.map((s) => s.status.replace('_', ' ')), datasets: [{ data: statuses.map((s) => s.n), backgroundColor: statuses.map((s) => stCol[s.status] || COL.mut), borderWidth: 0, spacing: 3 }] }, options: { responsive: true, maintainAspectRatio: false, cutout: '68%', plugins: { legend: { display: true, position: 'right', labels: { color: '#e8d7bf', boxWidth: 10, boxHeight: 10, usePointStyle: true, padding: 12 } }, tooltip: chartBase().plugins.tooltip } } }));
-    if (jumpToStats) { jumpToStats = false; $('#stats')?.scrollIntoView(); }
   }
   const kpi = (l, v, d, accent) => h('div', { class: 'card kpi' + (accent ? ' accent' : '') }, h('div', { class: 'l' }, l), h('div', { class: 'v' }, String(v)), h('div', { class: 'd' }, d));
   const card = (t, s, id, sm) => h('div', { class: 'card' }, h('h3', {}, t), h('div', { class: 'sub' }, s), h('div', { class: 'chart' + (sm ? ' sm' : ''), id: id + 'w' }, h('canvas', { id })));
